@@ -5,18 +5,36 @@ import re
 
 # Global variables
 current_index = 0
-current_path = "."
+if "current_path" not in globals():
+    current_path = "."
 loaded_steps = []
+bucket_index = 0
+
+
+class DesignLoader:
+    def __init__(self, path, pattern, bucket_size=10):
+        self.path = path
+        self.pattern = pattern
+        self.bucket_size = bucket_size
+
+        self.design_index = 0
+        self.design_steps = []
+
+        self.bucket_index = 0
+
+
+    def __str__(self):
+        return f"Path: {self.path}, Pattern: {self.pattern}"
 
 
 def load_by_path(path=".", pattern=r"^.+pdb$"):
-    '''
+    """
     DESCRIPTION
     Load all PDB files in the specified directory matching the given pattern.
     PARAMETERS
     path: str - The directory path containing PDB files (default: current directory).
     pattern: str - The regex pattern to match PDB files (default: match all PDB files).
-    '''
+    """
     global current_index, current_path, loaded_steps
     current_path = path
 
@@ -35,33 +53,113 @@ def load_by_path(path=".", pattern=r"^.+pdb$"):
         current_index = 0
 
 
-def load_by_bucket(path=".", group_size=10, pattern=r"^.+pdb$"):
-    '''
+def load_by_bucket(path=".", bucket_size=10, pattern=r"^.+pdb$"):
+    """
     DESCRIPTION
     Load PDB files in the specified directory in groups.
     PARAMETERS
     path: str - The directory path containing PDB files (default: current directory).
-    group_size: int - The number of files to load in each group (default: 10).
+    bucket_size: int - The number of files to load in each group (default: 10).
     pattern: str - The regex pattern to match PDB files (default: match all PDB files).
-    '''
+    """
+    global bucket_index, current_path, current_index
     cmd.delete("all")
     files = os.listdir(path)
     pattern = re.compile(pattern)
     pdb_files = [file for file in files if pattern.match(file)]
-    pdb_files.sort()
+    
 
-    for i in range(0, len(pdb_files), group_size):
-        group_files = pdb_files[i:i + group_size]
+    pdb_files.sort()
+    grp_indexes = [i for i in range(0, len(pdb_files), bucket_size)]
+    while True:
+        cmd.delete("all")
+        if bucket_index >= len(grp_indexes):
+            bucket_index = 0
+        if bucket_index < 0:
+            bucket_index = len(grp_indexes) - 1
+        grp_idx = grp_indexes[bucket_index]
+        group_files = pdb_files[grp_idx : grp_idx + bucket_size]
         for file in group_files:
             cmd.load(os.path.join(path, file))
+        current_index = 0
+        # print(f"not {group_files[0].replace('.pdb', '')}")
+        cmd.disable(f"not {group_files[0].replace('.pdb', '')}")
         yield 1
 
 
+def setup_loader(path=None, pattern=r"^.+pdb$", group_size=10):
+    """
+    DESCRIPTION
+    """
+    global current_path, bucket_loader
+    if path is not None:
+        current_path = path
+
+    if pattern != r"^.+pdb$":
+        bucket_loader = load_by_bucket(
+            current_path, pattern=pattern, bucket_size=group_size
+        )
+
+# 使用`next_bucket`或`CTRL-right`(control键+→键)查看下一组, 使用`prev_bucket`或`CTRL-left`(control键+←键)查看上一组
+
+@cmd.set_key("CTRL-right")
+def next_bucket(path=None, pattern=r"^.+pdb$", group_size=10):
+    """
+    DESCRIPTION
+    Load the next group of PDB files.
+    """
+    global current_path, bucket_loader, bucket_index
+    if current_path == "." and path is None:
+        raise Exception("No path specified, please run `setup_loader` with a path argument first")
+    
+    if path is not None:
+        current_path = path
+
+    if "bucket_loader" not in globals():
+        bucket_loader = load_by_bucket(
+            current_path, pattern=pattern, bucket_size=group_size
+        )
+    bucket_index += 1
+    try:
+        next(bucket_loader)
+    except StopIteration:
+        bucket_loader = load_by_bucket(
+            current_path, pattern=pattern, bucket_size=group_size
+        )
+        next(bucket_loader)
+
+@cmd.set_key("CTRL-left")
+def prev_bucket(path=None, pattern=r"^.+pdb$", group_size=10):
+    """
+    DESCRIPTION
+    Load the previous group of PDB files.
+    """
+    global current_path, bucket_loader, bucket_index
+    if current_path == "." and path is None:
+        raise Exception("No path specified, please run `setup_loader` with a path argument first")
+    
+    if path is not None:
+        current_path = path
+
+    if "bucket_loader" not in globals():
+        bucket_loader = load_by_bucket(
+            current_path, pattern=pattern, bucket_size=group_size
+        )
+    bucket_index -= 1
+    try:
+        next(bucket_loader)
+    except StopIteration:
+        bucket_loader = load_by_bucket(
+            current_path, pattern=pattern, bucket_size=group_size
+        )
+        next(bucket_loader)
+
+
 def take_step():
-    '''
+    """
     DESCRIPTION
     Iterate through loaded PDB files, enabling one and disabling others.
-    '''
+    """
     global loaded_steps, current_index
     while True:
         step = loaded_steps[current_index]
@@ -74,12 +172,13 @@ def take_step():
 
 @cmd.set_key("right")
 def step_forward():
-    '''
+    """
     DESCRIPTION
     Step forward through loaded PDB files.
-    '''
+    """
     global current_index, loaded_steps, step_generator
     loaded_steps = cmd.get_object_list()
+    refresh_current_idx()
     if not loaded_steps:
         raise Exception("No objects loaded")
     if "step_generator" not in globals():
@@ -92,12 +191,13 @@ def step_forward():
 
 @cmd.set_key("left")
 def step_backward():
-    '''
+    """
     DESCRIPTION
     Step backward through loaded PDB files.
-    '''
+    """
     global current_index, loaded_steps, step_generator
     loaded_steps = cmd.get_object_list()
+    refresh_current_idx()
     if not loaded_steps:
         raise Exception("No objects loaded")
     if "step_generator" not in globals():
@@ -107,13 +207,18 @@ def step_backward():
         current_index = len(loaded_steps) - 1
     next(step_generator)
 
+def refresh_current_idx():
+    global current_index
+    loaded_steps = cmd.get_object_list()
+    current_index = loaded_steps.index(cmd.get_names('objects', 0, selection='(enabled)')[0])
 
-@cmd.set_key("CTRL-right")
+
+@cmd.set_key("CTSH-S")
 def save_selected():
-    '''
+    """
     DESCRIPTION
     Save the currently selected PDB file to a 'selected' subdirectory.
-    '''
+    """
     global current_index, current_path
     selected_dir = os.path.join(current_path, "selected")
     os.makedirs(selected_dir, exist_ok=True)
@@ -126,7 +231,9 @@ def save_selected():
 
 
 # Register the commands in PyMOL
-cmd.extend('loadpath', load_by_path)
-cmd.extend('step', step_forward)
-cmd.extend('back', step_backward)
-cmd.extend('save_select', save_selected)
+cmd.extend("loadpath", load_by_path)
+cmd.extend("step", step_forward)
+cmd.extend("back", step_backward)
+cmd.extend("save_select", save_selected)
+cmd.extend("next_bucket", next_bucket)
+cmd.extend("prev_bucket", prev_bucket)

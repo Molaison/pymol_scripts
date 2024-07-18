@@ -1,56 +1,84 @@
 from pymol import cmd, stored
 
-
-def interfaceResidues_per_chain(cmpx, cutoff=1.0):
+def calculate_interface_residues_per_chain(complex_name, area_diff_cutoff=1.0, distance_cutoff=3.6):
+    '''
+    DESCRIPTION
+    Calculate interface residues for each chain in the given complex.
+    
+    PARAMETERS
+    complex_name: str - The name of the complex in PyMOL.
+    area_diff_cutoff: float - The cutoff value for the interface definition (default: 1.0).
+    
+    RETURNS
+    rVal: list - List of interface residues with chain, residue number, name, and difference value.
+    stored.j: list - List of residues in the interface by distance.
+    '''
     stored.r, stored.j, rVal, seen = [], [], [], []
-    cmd.get_area(cmpx, load_b=1)
-    cmd.select(f"interface_bydist_{cmpx}", "none")
-    for chain in cmd.get_chains(cmpx):
-        cmd.create("remain_str", cmpx)
-        cmd.extract("chain_str", f"remain_str and chain {chain}")
-        cmd.alter("chain_str", "q=b")
-        cmd.alter("remain_str", "q=b")
-        cmd.get_area("remain_str", load_b=1)
-        cmd.get_area("chain_str", load_b=1)
-        cmd.alter("chain_str or remain_str", "b=b-q")
+    cmd.get_area(complex_name, load_b=1)
+    cmd.select(f"interface_by_distance_{complex_name}", "none")
+    
+    for chain in cmd.get_chains(complex_name):
+        cmd.create("remain_structure", complex_name)
+        cmd.extract("chain_structure", f"remain_structure and chain {chain}")
+        cmd.alter("chain_structure", "q=b")
+        cmd.alter("remain_structure", "q=b")
+        cmd.get_area("remain_structure", load_b=1)
+        cmd.get_area("chain_structure", load_b=1)
+        cmd.alter("chain_structure or remain_structure", "b=b-q")
+        
         cmd.do(
-            f"select interface_bydist_{cmpx}, interface_bydist_{cmpx} or ((chain_str within 3.6 of remain_str) or (remain_str within 3.6 of chain_str)) "
+            f"select interface_by_distance_{complex_name}, interface_by_distance_{complex_name} or ((chain_structure within {distance_cutoff} of remain_structure) or (remain_structure within {distance_cutoff} of chain_structure)) "
         )
-        cmd.iterate("chain_str", "stored.r.append((chain,resi,name,b));")
+        
+        cmd.iterate("chain_structure", "stored.r.append((chain, resi, name, b));")
+        
         for chain, resi, name, diff in stored.r:
-            if abs(diff) >= float(cutoff):
+            if abs(diff) >= float(area_diff_cutoff):
                 key = f"{resi}-{chain}-{name}"
-                if key in seen:
-                    continue
-                else:
+                if key not in seen:
                     seen.append(key)
-                rVal.append((chain, resi, name, diff))
-    cmd.iterate(f"interface_bydist_{cmpx}", "stored.j.append((chain,resi,name));")
+                    rVal.append((chain, resi, name, diff))
+    
+    cmd.iterate(f"interface_by_distance_{complex_name}", "stored.j.append((chain, resi, name));")
+    
     return rVal, stored.j
 
 
-def select_interface(cmpx, cutoff=1.0):
-    itfc_atom, bydist_atom = interfaceResidues_per_chain(cmpx, cutoff)
-    itfc_resi = []
-    cmd.select(f"interface_byarea_{cmpx}", "none")
-    for chain, resi, name, diff in itfc_atom:
-        if (chain, resi) not in itfc_resi:
-            itfc_resi.append((chain, resi))
+def select_interface_residues(complex_name, area_diff_cutoff=1.0, distance_cutoff=3.6):
+    '''
+    DESCRIPTION
+    Select interface residues in the given complex.
+    
+    PARAMETERS
+    complex_name: str - The name of the complex in PyMOL.
+    area_diff_cutoff: float - The cutoff value for the interface definition (default: 1.0).
+    '''
+    interface_atoms, distance_atoms = calculate_interface_residues_per_chain(complex_name, area_diff_cutoff, distance_cutoff)
+    interface_residues = []
+    
+    cmd.select(f"interface_by_area_{complex_name}", "none")
+    
+    for chain, resi, name, diff in interface_atoms:
+        if (chain, resi) not in interface_residues:
+            interface_residues.append((chain, resi))
             cmd.select(
-                f"interface_byarea_{cmpx}",
-                f"interface_byarea_{cmpx} or ({cmpx} and chain {chain} and i. {resi})",
+                f"interface_by_area_{complex_name}",
+                f"interface_by_area_{complex_name} or ({complex_name} and chain {chain} and i. {resi})"
             )
-
-    cmd.select(f"interface_bydist_{cmpx}", "none")
-    cmd.delete("remain_str chain_str")
-    for chain, resi, name in bydist_atom:
+    
+    cmd.select(f"interface_by_distance_{complex_name}", "none")
+    cmd.delete("remain_structure chain_structure")
+    
+    for chain, resi, name in distance_atoms:
         cmd.select(
-            f"interface_bydist_{cmpx}",
-            f"interface_bydist or ({cmpx} and chain {chain} and i. {resi})",
+            f"interface_by_distance_{complex_name}",
+            f"interface_by_distance_{complex_name} or ({complex_name} and chain {chain} and i. {resi})"
         )
-        cmd.select(
-            f"interface_{cmpx}", f"interface_byarea_{cmpx} and interface_bydist_{cmpx}"
-        )
+    
+    cmd.select(
+        f"interface_{complex_name}",
+        f"interface_by_area_{complex_name} and interface_by_distance_{complex_name}"
+    )
 
 
-cmd.extend("select_interface", select_interface)
+cmd.extend("select_interface", select_interface_residues)
