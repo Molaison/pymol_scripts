@@ -101,7 +101,8 @@ def setup_loader(path=None, pattern=r"^.+pdb$", group_size:int=None):
 
     if pattern != reg_pattern:
         reg_pattern = pattern
-        bucket_loader = load_by_bucket(current_path)
+        
+    bucket_loader = load_by_bucket(current_path)
 
 
 @cmd.set_key("CTRL-right")
