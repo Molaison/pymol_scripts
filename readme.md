@@ -5,7 +5,7 @@
 ​	该脚本实现了一些快捷键用以加速蛋白质设计的筛选的过程, 其主要功能如下: 
 
 - `loadpath path,regex_pattern`: 该命令用于批量导入蛋白质结构文件至pymol中. 其中`path`为结构文件所在路径; `regex_pattern`用正则表达式指定哪些文件应当被导入, 默认的值为`^.+pdb$`, 即导入所有PDB文件, 不会正则表达式可以询问ChatGPT.
--   `setup_loader path, regex_pattern, group_size`: 该命令用于分组导入指定路径下结构文件. `group_size`用于指定一次导入文件的数量. 
+-   `setup_loader path, pattern, group_size`: 该命令用于分组导入指定路径下结构文件. `group_size`用于指定一次导入文件的数量. 可以通过`setup_loader path=<yourpath>`或是`setup_loader pattern=<yourregex>`指定单项参数设置.
   - 使用`next_bucket`命令或`CTRL-right`(control键+→键)查看下一组, 使用`prev_bucket`命令或`CTRL-left`(control键+←键)查看上一组.
 - `step_backward, step_forward`(←&→键): 查看上一个或下一个PDB文件.
 - `save_selected`(CTRL+SHIFT+S): 保存当前选中的PDB文件到`<current_path>/selected`子目录. 使用`loadpath`或`setup_loader`会将`current_path`设为指定的路径, 否则默认为当前工作目录(即打开pymol的目录)

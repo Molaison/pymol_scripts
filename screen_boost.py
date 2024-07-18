@@ -9,6 +9,8 @@ if "current_path" not in globals():
     current_path = "."
 loaded_steps = []
 bucket_index = 0
+bucket_size = 10
+reg_pattern = r"^.+pdb$"
 
 
 class DesignLoader:
@@ -22,12 +24,11 @@ class DesignLoader:
 
         self.bucket_index = 0
 
-
     def __str__(self):
         return f"Path: {self.path}, Pattern: {self.pattern}"
 
 
-def load_by_path(path=".", pattern=r"^.+pdb$"):
+def load_by_path(path="."):
     """
     DESCRIPTION
     Load all PDB files in the specified directory matching the given pattern.
@@ -35,13 +36,13 @@ def load_by_path(path=".", pattern=r"^.+pdb$"):
     path: str - The directory path containing PDB files (default: current directory).
     pattern: str - The regex pattern to match PDB files (default: match all PDB files).
     """
-    global current_index, current_path, loaded_steps
+    global current_index, current_path, loaded_steps, reg_pattern
     current_path = path
 
     print("Loading files from", path)
     cmd.delete("all")
     files = os.listdir(path)
-    pattern = re.compile(pattern)
+    pattern = re.compile(reg_pattern)
     loaded_steps = [file for file in files if pattern.match(file)]
     loaded_steps.sort()
     print(loaded_steps)
@@ -53,7 +54,7 @@ def load_by_path(path=".", pattern=r"^.+pdb$"):
         current_index = 0
 
 
-def load_by_bucket(path=".", bucket_size=10, pattern=r"^.+pdb$"):
+def load_by_bucket(path="."):
     """
     DESCRIPTION
     Load PDB files in the specified directory in groups.
@@ -62,16 +63,16 @@ def load_by_bucket(path=".", bucket_size=10, pattern=r"^.+pdb$"):
     bucket_size: int - The number of files to load in each group (default: 10).
     pattern: str - The regex pattern to match PDB files (default: match all PDB files).
     """
-    global bucket_index, current_path, current_index
+    global bucket_index, current_path, current_index, bucket_size, reg_pattern
     cmd.delete("all")
     files = os.listdir(path)
-    pattern = re.compile(pattern)
+    pattern = re.compile(reg_pattern)
     pdb_files = [file for file in files if pattern.match(file)]
-    
 
     pdb_files.sort()
-    grp_indexes = [i for i in range(0, len(pdb_files), bucket_size)]
+    
     while True:
+        grp_indexes = [i for i in range(0, len(pdb_files), bucket_size)]
         cmd.delete("all")
         if bucket_index >= len(grp_indexes):
             bucket_index = 0
@@ -87,71 +88,69 @@ def load_by_bucket(path=".", bucket_size=10, pattern=r"^.+pdb$"):
         yield 1
 
 
-def setup_loader(path=None, pattern=r"^.+pdb$", group_size=10):
+def setup_loader(path=None, pattern=r"^.+pdb$", group_size:int=None):
     """
     DESCRIPTION
     """
-    global current_path, bucket_loader
+    global current_path, bucket_loader, bucket_size, reg_pattern
     if path is not None:
         current_path = path
 
-    if pattern != r"^.+pdb$":
-        bucket_loader = load_by_bucket(
-            current_path, pattern=pattern, bucket_size=group_size
-        )
+    if group_size is not None:
+        bucket_size = int(group_size)
 
-# 使用`next_bucket`或`CTRL-right`(control键+→键)查看下一组, 使用`prev_bucket`或`CTRL-left`(control键+←键)查看上一组
+    if pattern != reg_pattern:
+        reg_pattern = pattern
+        bucket_loader = load_by_bucket(current_path)
+
 
 @cmd.set_key("CTRL-right")
-def next_bucket(path=None, pattern=r"^.+pdb$", group_size=10):
+def next_bucket(path=None):
     """
     DESCRIPTION
     Load the next group of PDB files.
     """
     global current_path, bucket_loader, bucket_index
     if current_path == "." and path is None:
-        raise Exception("No path specified, please run `setup_loader` with a path argument first")
-    
+        raise Exception(
+            "No path specified, please run `setup_loader` with a path argument first"
+        )
+
     if path is not None:
         current_path = path
 
     if "bucket_loader" not in globals():
-        bucket_loader = load_by_bucket(
-            current_path, pattern=pattern, bucket_size=group_size
-        )
+        bucket_loader = load_by_bucket(current_path)
     bucket_index += 1
     try:
         next(bucket_loader)
     except StopIteration:
-        bucket_loader = load_by_bucket(
-            current_path, pattern=pattern, bucket_size=group_size
-        )
+        bucket_loader = load_by_bucket(current_path)
         next(bucket_loader)
 
+
 @cmd.set_key("CTRL-left")
-def prev_bucket(path=None, pattern=r"^.+pdb$", group_size=10):
+def prev_bucket(path=None):
     """
     DESCRIPTION
     Load the previous group of PDB files.
     """
     global current_path, bucket_loader, bucket_index
     if current_path == "." and path is None:
-        raise Exception("No path specified, please run `setup_loader` with a path argument first")
-    
+        raise Exception(
+            "No path specified, please run `setup_loader` with a path argument first"
+        )
+
     if path is not None:
         current_path = path
 
     if "bucket_loader" not in globals():
-        bucket_loader = load_by_bucket(
-            current_path, pattern=pattern, bucket_size=group_size
-        )
+        bucket_loader = load_by_bucket(current_path)
     bucket_index -= 1
     try:
         next(bucket_loader)
     except StopIteration:
-        bucket_loader = load_by_bucket(
-            current_path, pattern=pattern, bucket_size=group_size
-        )
+        bucket_loader = load_by_bucket(current_path)
         next(bucket_loader)
 
 
@@ -207,10 +206,13 @@ def step_backward():
         current_index = len(loaded_steps) - 1
     next(step_generator)
 
+
 def refresh_current_idx():
     global current_index
     loaded_steps = cmd.get_object_list()
-    current_index = loaded_steps.index(cmd.get_names('objects', 0, selection='(enabled)')[0])
+    current_index = loaded_steps.index(
+        cmd.get_names("objects", 0, selection="(enabled)")[0]
+    )
 
 
 @cmd.set_key("CTSH-S")
