@@ -27,3 +27,11 @@ select_interface your_complex_name, area_diff_cutoff, distance_cutoff
 - `interface_by_distance_{your_complex_name}`: 根据距离筛选出来的`Interface Residue`, 即在两条不同的链间, 距离(定义为所有原子对距离中最小的值)小于`distance_cutoff`的任意残基.
 - `interface_by_area_{your_complex_name}`: 根据面积差筛选出来的`Interface Residue`, 即在两条不同的链间, `SASA`差值大于`area_diff_cutoff`的任意残基.
 - `interface_{your_complex_name}`: 以上两种筛选方法的交集, 即最终的`Interface Residue`.
+
+### Transer ligand from reference to destination pdb file
+
+```bash
+python align_ligand.py --input </path/to/dest/file> --ref </path/to/ref/file> --ligand_name <res name of ligand>
+```
+
+​	

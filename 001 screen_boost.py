@@ -13,6 +13,7 @@ bucket_size = 10
 reg_pattern = r"^.+pdb|.+cif$"
 pinned_objects = set()  # 固定的对象集合
 auto_bucket_mode = True  # 自动bucket模式
+switch_commands = []  # 切换object时要执行的命令列表
 
 
 def load_by_bucket(path="."):
@@ -286,6 +287,114 @@ def toggle_auto_bucket(enable=None):
     print(f"Auto bucket mode {status}")
 
 
+def register_switch_command(command):
+    """
+    DESCRIPTION
+    Register a command to be executed when switching objects.
+    The command can use {object} as a placeholder for the current object name.
+    
+    PARAMETERS
+    command: str - PyMOL command to execute. Use {object} for current object name.
+    
+    EXAMPLES
+    register_switch_command("show sticks, {object}")
+    register_switch_command("color red, {object} and name CA")
+    """
+    global switch_commands
+    if command not in switch_commands:
+        switch_commands.append(command)
+        print(f"Registered switch command: {command}")
+        print(f"Total registered commands: {len(switch_commands)}")
+    else:
+        print(f"Command already registered: {command}")
+
+
+def unregister_switch_command(command):
+    """
+    DESCRIPTION
+    Unregister a previously registered switch command.
+    
+    PARAMETERS
+    command: str - The exact command string to remove
+    """
+    global switch_commands
+    if command in switch_commands:
+        switch_commands.remove(command)
+        print(f"Unregistered switch command: {command}")
+        print(f"Remaining registered commands: {len(switch_commands)}")
+    else:
+        print(f"Command not found in registered commands: {command}")
+
+
+def list_switch_commands():
+    """
+    DESCRIPTION
+    List all currently registered switch commands.
+    """
+    global switch_commands
+    if switch_commands:
+        print(f"Registered switch commands ({len(switch_commands)}):")
+        for i, command in enumerate(switch_commands, 1):
+            print(f"  {i}. {command}")
+    else:
+        print("No switch commands are currently registered")
+
+
+def clear_switch_commands():
+    """
+    DESCRIPTION
+    Clear all registered switch commands.
+    """
+    global switch_commands
+    count = len(switch_commands)
+    switch_commands.clear()
+    print(f"Cleared {count} switch commands")
+
+
+def execute_switch_commands(object_name):
+    """
+    DESCRIPTION
+    Execute all registered switch commands for the given object.
+    
+    PARAMETERS
+    object_name: str - The name of the current object
+    """
+    global switch_commands
+    
+    for command in switch_commands:
+        try:
+            # Replace {object} placeholder with actual object name
+            formatted_command = command.format(object=object_name)
+            print(f"Executing: {formatted_command}")
+            cmd.do(formatted_command.strip("\"").strip("\'"))
+        except Exception as e:
+            print(f"Error executing switch command '{command}': {e}")
+
+
+def register_show_sticks():
+    """
+    DESCRIPTION
+    Convenience function to register showing sticks for each switched object.
+    """
+    register_switch_command("show sticks, {object}")
+
+
+def register_show_cartoon():
+    """
+    DESCRIPTION
+    Convenience function to register showing cartoon for each switched object.
+    """
+    register_switch_command("show cartoon, {object}")
+
+
+def register_hide_all():
+    """
+    DESCRIPTION
+    Convenience function to register hiding all representations for each switched object.
+    """
+    register_switch_command("hide everything, {object}")
+
+
 def load_by_path(path=".", pattern=r"^.+pdb|.+cif$", bucket_size=10):
     """
     DESCRIPTION
@@ -313,7 +422,7 @@ def take_step():
     DESCRIPTION
     Iterate through loaded PDB files, enabling one and disabling others.
     """
-    global loaded_steps, current_index, pinned_objects
+    global loaded_steps, current_index, pinned_objects, switch_commands
     while True:
         non_pinned_steps = [
             obj for obj in cmd.get_object_list() if obj not in pinned_objects
@@ -334,6 +443,9 @@ def take_step():
         for pinned in pinned_objects:
             if pinned in cmd.get_object_list():
                 cmd.enable(pinned)
+
+        # 执行注册的切换命令
+        execute_switch_commands(step)
 
         cmd.zoom()
         yield step
@@ -534,10 +646,10 @@ cmd.extend("unpin", unpin_current)
 cmd.extend("list_pins", list_pinned)
 cmd.extend("clear_pins", clear_all_pins)
 cmd.extend("auto_bucket", toggle_auto_bucket)
-cmd.extend("prev_bucket", prev_bucket)
-cmd.extend("setup_loader", setup_loader)
-cmd.extend("pin", pin_current)
-cmd.extend("unpin", unpin_current)
-cmd.extend("list_pins", list_pinned)
-cmd.extend("clear_pins", clear_all_pins)
-cmd.extend("auto_bucket", toggle_auto_bucket)
+cmd.extend("register_switch_cmd", register_switch_command)
+cmd.extend("unregister_switch_cmd", unregister_switch_command)
+cmd.extend("list_switch_cmds", list_switch_commands)
+cmd.extend("clear_switch_cmds", clear_switch_commands)
+cmd.extend("reg_show_sticks", register_show_sticks)
+cmd.extend("reg_show_cartoon", register_show_cartoon)
+cmd.extend("reg_hide_all", register_hide_all)
