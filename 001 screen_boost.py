@@ -447,7 +447,6 @@ def take_step():
         # 执行注册的切换命令
         execute_switch_commands(step)
 
-        cmd.zoom()
         yield step
 
 
