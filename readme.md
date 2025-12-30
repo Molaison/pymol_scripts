@@ -13,7 +13,7 @@ PyMOL helper scripts, plugins, and presets are now grouped by what they do so it
   - `dataset_navigation/`: high-volume model review utilities (`screen_boost.py`, `file_management.py`, `load_into_single_object.py`) that expose bucket navigation, pinning, and save/load conveniences.
   - `grouping/`: utilities that reorganize loaded objects, currently `load_into_groups.py`.
 - `visualization/`
-  - `styles/`: color palettes and rendering presets (`set_publication_style.py`, `macaron_style.py`, `publication_presets.py`, `rfdiffusion2_pymolsetting.py`, `ink_wash_style.py`, `high_contrast_ray_style.py`).
+  - `styles/`: color palettes and rendering presets (`set_publication_style.py`, `macaron_style.py`, `publication_presets.py`, `rfdiffusion2_pymolsetting.py`, `ink_wash_style.py`, `high_contrast_ray_style.pml`).
   - `overlays/`: CGO overlays such as `axes_overlay.py` and `z_axis_overlay.ini`.
   - `plugins/`: Qt-enabled visualization plugins (initially `macaron_style_plugin.py`).
 - `examples/pymol_wiki/`: curated references imported from the PyMOL Wiki (e.g., `color_by_mutation.py`).
@@ -62,7 +62,7 @@ super_ligand selection=model*, ligand_objects="ligA,ligB"
 
 - `visualization/styles/macaron_style.py` 与 `visualization/plugins/macaron_style_plugin.py`：提供多种粉彩/冷暖光谱，并通过 Qt 对话框快速切换色板 (`apply_custom_style`, `show_macaron_dialog`)。
 - `visualization/styles/ink_wash_style.py`：水墨风格的色板与渲染设置，突出高对比的黑白效果。
-- `visualization/styles/high_contrast_ray_style.py`：简洁的光追参数模板（关闭阴影、提升环境光），适合快速导出海报底图。
+- `visualization/styles/high_contrast_ray_style.pml`：简洁的光追参数模板（关闭阴影、提升环境光），适合快速导出海报底图。
 - 仍保留 `set_publication_style.py`, `publication_presets.py`, `rfdiffusion2_pymolsetting.py` 等经典预设，可与上方脚本组合使用。
 
 ## Overlays & Specialized Utilities

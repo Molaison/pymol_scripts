@@ -17,7 +17,7 @@
 | Visualization Styles | `visualization/styles/set_publication_style.py` | `pbs` command that toggles ray-tracing parameters for publication renders. |
 | Visualization Styles | `visualization/styles/macaron_style.py` & `visualization/plugins/macaron_style_plugin.py` | Gradient color spectrum + Qt dialog (`apply_custom_style`, `show_macaron_dialog`) for preset palettes. |
 | Visualization Styles | `visualization/styles/ink_wash_style.py` | Ink-wash inspired palette and render tweaks for stylized figures. |
-| Visualization Styles | `visualization/styles/high_contrast_ray_style.py` | Minimal ray-trace preset for quick high-contrast outputs. |
+| Visualization Styles | `visualization/styles/high_contrast_ray_style.pml` | Minimal ray-trace preset for quick high-contrast outputs. |
 | Visualization Overlays | `visualization/overlays/axes_overlay.py` | Callback-driven viewport axes drawn via CGO cylinders/cones. |
 | Visualization Overlays | `visualization/overlays/z_axis_overlay.ini` | CGO cylinder definition for showcasing a z-axis alignment cue. |
 | Workflows | `workflows/dataset_navigation/screen_boost.py` | Bucket loader with pinning, keyboard shortcuts, and selection export; pairs with `file_management.py`. |
