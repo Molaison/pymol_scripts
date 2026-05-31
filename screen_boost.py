@@ -28,7 +28,7 @@ class DesignLoader:
         return f"Path: {self.path}, Pattern: {self.pattern}"
 
 
-def load_by_path(path="."):
+def load_by_path(path=".", pattern=None):
     """
     DESCRIPTION
     Load all PDB files in the specified directory matching the given pattern.
@@ -37,21 +37,29 @@ def load_by_path(path="."):
     pattern: str - The regex pattern to match PDB files (default: match all PDB files).
     """
     global current_index, current_path, loaded_steps, reg_pattern
-    current_path = path
 
-    print("Loading files from", path)
+    if not os.path.isdir(path):
+        print(f"[screen_boost] Path not found: '{path}'. Please check the path and try again.")
+        return
+    current_path = path
+    if pattern is not None:
+        reg_pattern = pattern
+
+    print(f"[screen_boost] Loading files from '{path}' (pattern: {reg_pattern})")
     cmd.delete("all")
     files = os.listdir(path)
-    pattern = re.compile(reg_pattern)
-    loaded_steps = [file for file in files if pattern.match(file)]
-    loaded_steps.sort()
-    print(loaded_steps)
+    compiled = re.compile(reg_pattern)
+    loaded_steps = sorted(file for file in files if compiled.match(file))
+    if not loaded_steps:
+        print(f"[screen_boost] No files in '{path}' matched pattern '{reg_pattern}'. Nothing loaded.")
+        return
+    print(f"[screen_boost] Loaded {len(loaded_steps)} file(s): {loaded_steps}")
     for step in loaded_steps:
         cmd.load(os.path.join(path, step))
     cmd.disable("all")
-    if loaded_steps:
-        cmd.enable(loaded_steps[0].replace(".pdb", ""))
-        current_index = 0
+    cmd.enable(loaded_steps[0].replace(".pdb", ""))
+    current_index = 0
+    cmd.zoom()
 
 
 def load_by_bucket(path="."):
@@ -64,13 +72,17 @@ def load_by_bucket(path="."):
     pattern: str - The regex pattern to match PDB files (default: match all PDB files).
     """
     global bucket_index, current_path, current_index, bucket_size, reg_pattern
-    cmd.delete("all")
+    if not os.path.isdir(path):
+        print(f"[screen_boost] Path not found: '{path}'. Please check the path and try again.")
+        return
     files = os.listdir(path)
     pattern = re.compile(reg_pattern)
-    pdb_files = [file for file in files if pattern.match(file)]
+    pdb_files = sorted(file for file in files if pattern.match(file))
 
-    pdb_files.sort()
-    
+    if not pdb_files:
+        print(f"[screen_boost] No files in '{path}' matched pattern '{reg_pattern}'. Nothing loaded.")
+        return
+
     while True:
         grp_indexes = [i for i in range(0, len(pdb_files), bucket_size)]
         cmd.delete("all")
@@ -83,16 +95,25 @@ def load_by_bucket(path="."):
         for file in group_files:
             cmd.load(os.path.join(path, file))
         current_index = 0
-        # print(f"not {group_files[0].replace('.pdb', '')}")
         cmd.disable(f"not {group_files[0].replace('.pdb', '')}")
+        cmd.zoom()
+        print(
+            f"[screen_boost] Bucket {bucket_index + 1}/{len(grp_indexes)} "
+            f"(files {grp_idx + 1}-{grp_idx + len(group_files)} of {len(pdb_files)})"
+        )
         yield 1
 
 
 def setup_loader(path=None, pattern=r"^.+pdb$", group_size:int=None):
     """
     DESCRIPTION
+    Configure grouped (bucket) loading and immediately display the first group.
+    PARAMETERS
+    path: str - The directory path containing PDB files.
+    pattern: str - The regex pattern to match PDB files (default: match all PDB files).
+    group_size: int - The number of files to load in each group (default: 10).
     """
-    global current_path, bucket_loader, bucket_size, reg_pattern
+    global current_path, bucket_loader, bucket_size, reg_pattern, bucket_index
     if path is not None:
         current_path = path
 
@@ -101,8 +122,20 @@ def setup_loader(path=None, pattern=r"^.+pdb$", group_size:int=None):
 
     if pattern != reg_pattern:
         reg_pattern = pattern
-        
+
+    if not os.path.isdir(current_path):
+        print(
+            f"[screen_boost] Path not found: '{current_path}'. "
+            f"Pass a valid path, e.g. `setup_loader path=/path/to/pdbs`."
+        )
+        return
+
+    bucket_index = 0
     bucket_loader = load_by_bucket(current_path)
+    try:
+        next(bucket_loader)
+    except StopIteration:
+        pass
 
 
 @cmd.set_key("CTRL-right")
@@ -113,21 +146,29 @@ def next_bucket(path=None):
     """
     global current_path, bucket_loader, bucket_index
     if current_path == "." and path is None:
-        raise Exception(
-            "No path specified, please run `setup_loader` with a path argument first"
-        )
+        print("[screen_boost] No path set. Run `setup_loader path=/path/to/pdbs` first.")
+        return
 
     if path is not None:
         current_path = path
 
     if "bucket_loader" not in globals():
+        bucket_index = 0
         bucket_loader = load_by_bucket(current_path)
+        try:
+            next(bucket_loader)  # show the first bucket
+        except StopIteration:
+            print("[screen_boost] Nothing to load.")
+        return
     bucket_index += 1
     try:
         next(bucket_loader)
     except StopIteration:
         bucket_loader = load_by_bucket(current_path)
-        next(bucket_loader)
+        try:
+            next(bucket_loader)
+        except StopIteration:
+            print("[screen_boost] Nothing to load.")
 
 
 @cmd.set_key("CTRL-left")
@@ -138,21 +179,29 @@ def prev_bucket(path=None):
     """
     global current_path, bucket_loader, bucket_index
     if current_path == "." and path is None:
-        raise Exception(
-            "No path specified, please run `setup_loader` with a path argument first"
-        )
+        print("[screen_boost] No path set. Run `setup_loader path=/path/to/pdbs` first.")
+        return
 
     if path is not None:
         current_path = path
 
     if "bucket_loader" not in globals():
+        bucket_index = 0
         bucket_loader = load_by_bucket(current_path)
+        try:
+            next(bucket_loader)  # show the first bucket
+        except StopIteration:
+            print("[screen_boost] Nothing to load.")
+        return
     bucket_index -= 1
     try:
         next(bucket_loader)
     except StopIteration:
         bucket_loader = load_by_bucket(current_path)
-        next(bucket_loader)
+        try:
+            next(bucket_loader)
+        except StopIteration:
+            print("[screen_boost] Nothing to load.")
 
 
 def take_step():
@@ -178,9 +227,10 @@ def step_forward():
     """
     global current_index, loaded_steps, step_generator
     loaded_steps = cmd.get_object_list()
-    refresh_current_idx()
     if not loaded_steps:
-        raise Exception("No objects loaded")
+        print("[screen_boost] No objects loaded. Use `loadpath` or `setup_loader` first.")
+        return
+    refresh_current_idx()
     if "step_generator" not in globals():
         step_generator = take_step()
     current_index += 1
@@ -197,9 +247,10 @@ def step_backward():
     """
     global current_index, loaded_steps, step_generator
     loaded_steps = cmd.get_object_list()
-    refresh_current_idx()
     if not loaded_steps:
-        raise Exception("No objects loaded")
+        print("[screen_boost] No objects loaded. Use `loadpath` or `setup_loader` first.")
+        return
+    refresh_current_idx()
     if "step_generator" not in globals():
         step_generator = take_step()
     current_index -= 1
@@ -211,26 +262,31 @@ def step_backward():
 def refresh_current_idx():
     global current_index
     loaded_steps = cmd.get_object_list()
-    current_index = loaded_steps.index(
-        cmd.get_names("objects", 0, selection="(enabled)")[0]
-    )
+    enabled = cmd.get_names("objects", enabled_only=1)
+    if not enabled or enabled[0] not in loaded_steps:
+        return
+    current_index = loaded_steps.index(enabled[0])
 
 
 @cmd.set_key("CTSH-S")
 def save_selected():
     """
     DESCRIPTION
-    Save the currently selected PDB file to a 'selected' subdirectory.
+    Save the currently displayed (enabled) PDB object(s) to a 'selected' subdirectory.
     """
-    global current_index, current_path
+    global current_path
+    enabled = cmd.get_names("objects", enabled_only=1)
+    if not enabled:
+        print("[screen_boost] No object is currently displayed. Nothing to save.")
+        return
     selected_dir = os.path.join(current_path, "selected")
     os.makedirs(selected_dir, exist_ok=True)
-    current_object = cmd.get_object_list()[current_index]
-    save_path = os.path.join(selected_dir, f"{current_object}.pdb")
-    print(f"Saving {current_object} to {save_path}")
-    if os.path.exists(save_path):
-        print(f"File {save_path} already exists. Overwrite....")
-    cmd.save(save_path, current_object)
+    for current_object in enabled:
+        save_path = os.path.join(selected_dir, f"{current_object}.pdb")
+        if os.path.exists(save_path):
+            print(f"[screen_boost] Overwriting existing file: {save_path}")
+        cmd.save(save_path, current_object)
+        print(f"[screen_boost] Saved {current_object} -> {save_path}")
 
 
 # Register the commands in PyMOL
