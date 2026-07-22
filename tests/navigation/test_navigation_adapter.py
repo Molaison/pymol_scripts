@@ -135,6 +135,28 @@ class NavigationAdapterTests(unittest.TestCase):
         self.assertNotIn("a_measurement", self.fake.enabled)
         self.assertIn("overlay", self.fake.enabled)
 
+    def test_registered_start_normalizes_quoted_entries_and_scalars(self):
+        navigation.register_commands(self.fake)
+
+        result = self.fake.extensions["pp_nav_start"](
+            source='"groups"',
+            entries='"root_a,root_b"',
+            batch_size='"2"',
+            window_size='"1"',
+            stride='"1"',
+            wrap='"0"',
+            bind_keys='"0"',
+            zoom_policy='"none"',
+        )
+
+        self.assertEqual(result["source"], "groups")
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["current_entry_ids"], ["group:root_a"])
+        self.assertEqual(
+            set(result["visible_names"]),
+            {"a_model", "a_cgo", "a_map", "a_measurement"},
+        )
+
     def test_pin_keeps_complete_group_visible(self):
         navigation.pp_nav_start(source="groups", batch_size=2, window_size=1, zoom_policy="none")
         navigation.pp_nav_pin()

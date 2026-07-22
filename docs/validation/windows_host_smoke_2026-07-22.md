@@ -6,9 +6,9 @@ compatibility with every PyMOL 2.x build.
 
 ## Environment
 
-- Latest run interval: 2026-07-22 03:08:40.373–03:08:40.787 UTC
-  (2026-07-22 11:08:40.373–11:08:40.787 Asia/Shanghai)
-- Base commit: `2dd4d087e1cb1a886e3f11c23de73ad3fc5389c6`
+- Latest run interval: 2026-07-22 04:07:42.901–04:07:43.221 UTC
+  (2026-07-22 12:07:42.901–12:07:43.221 Asia/Shanghai)
+- Base commit: `0c0d7398fa23bfc31ad55496ee47c267569239bb`
 - Worktree: dirty implementation worktree; the record corresponds to the files
   present at run time, not only to the base commit
 - Windows: Windows 10 build 19045
@@ -20,17 +20,16 @@ compatibility with every PyMOL 2.x build.
 - Launcher: `scripts/windows/run_host_smoke.ps1`, starting PyMOL from a
   Windows-local temporary current directory
 - Harness schema/version: `pymolplugins.host-smoke/1.0`, `1.1.0`
-- Worker URL during the run: `http://127.0.0.1:18765`
-- Windows PyMOL reached the WSL worker directly through the shared bounded
-  client; worker Python was 3.12.13, worker `status` was `ok`, and PLIP 3.0.0
-  reported `available=true` while PyRosetta remained unavailable
+- Worker health was intentionally omitted for this console-parser regression
+  run (`worker_checked=false`); the separate PLIP evidence below remains the
+  worker-backed numerical/render record
 
 The full JSON record was written outside the repository at
-`C:\Users\ADMIN\AppData\Local\Temp\PymolPlugins-host-smoke-3.1-final.json`
+`C:\Users\ADMIN\AppData\Local\Temp\PymolPlugins-host-final-bytes-current.json`
 and was visible from WSL at
-`/mnt/c/Users/ADMIN/AppData/Local/Temp/PymolPlugins-host-smoke-3.1-final.json`.
+`/mnt/c/Users/ADMIN/AppData/Local/Temp/PymolPlugins-host-final-bytes-current.json`.
 Its SHA-256 at review time was
-`62b5f34908e781bd639f01c6865b94fe37fcae133607ebf00b5bad12f035657f`.
+`d435121193e141e0dac66a6b2ff4799c7146aaf3042d697d0c3d0a8262380dff`.
 
 ## Automated result
 
@@ -38,13 +37,13 @@ Its SHA-256 at review time was
 
 | Check | Result | Covered behavior |
 | --- | --- | --- |
-| `HOST-LOAD-01` | PASS | UNC thin-entry load, idempotent loading of all 10 `pymolplugins.*` canonical modules, inferred `Debian` WSL boundary, required APIs, all 63 canonical commands, and Windows-PyMOL-to-WSL PLIP-capable worker health request. |
+| `HOST-LOAD-01` | PASS | UNC thin-entry load, idempotent loading of all 10 `pymolplugins.*` canonical modules, inferred `Debian` WSL boundary, required APIs, all 63 canonical commands, and 63/63 actual `cmd.keyword` callbacks carrying the STRICT-parser console adapter. |
 | `HOST-FIXTURE-01` | PASS | Nested groups; molecule, static CGO, map, measurement, multistate, ligand/water/metal, and C2/C3/C6 fixtures. |
-| `HOST-NAV-01` | PASS | Atomic nested-group navigation and preservation of an unmanaged overlay. |
-| `HOST-TARGETS-01` | PASS | Fuzzy single-object resolution plus preview/commit iteration over recursive nested-group leaves, including molecule, CGO, map, measurement, and multistate objects; unrelated overlay preserved. Same-line completion markers detected a swallowed unknown command under `stop` and six swallowed invalid-color `CmdException` failures under `continue`, with zero false executed targets or marker residue. |
+| `HOST-NAV-01` | PASS | Real `cmd.do` start with `entries="root_a,root_b"`, exact two-entry session state, atomic nested-group navigation, and preservation of an unmanaged overlay. |
+| `HOST-TARGETS-01` | PASS | Real `cmd.do` execution of a quoted command template and quoted glob target, proven by scene enabled-state changes rather than return values. Recursive leaves included molecule, CGO, map, measurement, and multistate objects while an unrelated overlay was preserved. Same-line completion markers detected a swallowed unknown command under `stop` and six swallowed invalid-color `CmdException` failures under `continue`, with zero false executed targets or marker residue. |
 | `HOST-ALIGNMENT-01` | PASS | Exact chain-specific sequence selection plus anchor, motif, and ligand preview/commit/undo on real object TTTs. All fits reached zero RMSD; a detached ligand key stayed fixed while its separate payload moved. |
 | `HOST-ORIENTATION-01` | PASS | Non-mutating preview and real commit/undo for elongated-object PCA orientation and C3 cyclic orientation. |
-| `HOST-GEOMETRY-01` | PASS | C2 paired-rotation, C3/C6 cyclic axes, mass-weighted PCA, explicit vector/two-point axes, provenance-complete JSON fields, and a real 30 A vector-normal membrane-slab CGO with measured plane separation. |
+| `HOST-GEOMETRY-01` | PASS | C2 paired-rotation, C3/C6 cyclic axes, mass-weighted PCA, a quoted `cmd.do` vector/center argument, an explicit two-point axis, provenance-complete JSON fields, and a real 30 A vector-normal membrane-slab CGO with measured plane separation. |
 | `HOST-FOLLOW-01` | PASS | Programmatic driver delta, static followers, and undo under `matrix_mode=0/1/2`. |
 | `HOST-STYLE-01` | PASS | Scoped style apply and snapshot revert. |
 | `HOST-INTERACTION-01` | PASS | Local interaction ligand boundary, manifest output, exact clear, and neighboring-name preservation. |

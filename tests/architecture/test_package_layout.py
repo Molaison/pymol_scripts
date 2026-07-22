@@ -31,6 +31,56 @@ class PackageLayoutTests(unittest.TestCase):
         self.assertIn("pp_target_resolve", commands)
         self.assertIn("pp_foreach", commands)
 
+    def test_all_manifest_callbacks_use_the_console_adapter(self):
+        source = r'''
+import sys
+import types
+
+sys.path.insert(0, {root!r})
+
+class FakeCmd:
+    def __init__(self):
+        self.keyword = {{}}
+
+    def extend(self, name, function):
+        self.keyword[name] = [function, 0, 0, ",", 11]
+
+cmd = FakeCmd()
+pymol_module = types.ModuleType("pymol")
+pymol_module.__path__ = []
+pymol_module.cmd = cmd
+qt_module = types.ModuleType("pymol.Qt")
+qt_module.QtCore = None
+pymol_module.Qt = qt_module
+sys.modules["pymol"] = pymol_module
+sys.modules["pymol.Qt"] = qt_module
+
+import pymolplugins.host.plugin
+from pymolplugins.host.manifest import CANONICAL_COMMANDS
+
+names = [name for values in CANONICAL_COMMANDS.values() for name in values]
+assert len(names) == 63
+assert not [name for name in names if name not in cmd.keyword]
+assert not [
+    name
+    for name in names
+    if not getattr(cmd.keyword[name][0], "_pymolplugins_console_adapter", False)
+]
+'''.format(root=str(ROOT))
+        completed = subprocess.run(
+            [sys.executable, "-I", "-c", source],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            "stdout:\n%s\nstderr:\n%s"
+            % (completed.stdout, completed.stderr),
+        )
+
     def test_canonical_package_never_imports_historical_namespaces(self):
         forbidden = {
             "analysis",

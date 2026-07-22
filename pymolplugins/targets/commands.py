@@ -10,7 +10,7 @@ try:
 except ImportError:
     cmd = None  # type: ignore
 
-from pymolplugins.core.parameters import as_bool
+from pymolplugins.core.parameters import as_bool, extend_command
 from .resolver import expand_targets, resolve_targets
 
 
@@ -246,8 +246,8 @@ def register_commands(command_api=None) -> None:
     selected = command_api if command_api is not None else cmd
     if selected is None:
         return
-    selected.extend("pp_target_resolve", pp_target_resolve)
-    selected.extend("pp_foreach", pp_foreach)
+    extend_command(selected, "pp_target_resolve", pp_target_resolve)
+    extend_command(selected, "pp_foreach", pp_foreach)
 
 
 register_commands()

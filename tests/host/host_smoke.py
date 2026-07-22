@@ -335,6 +335,21 @@ def _load_plugin_entry(suite: HostSmokeSuite) -> Dict[str, Any]:
         "canonical command manifest is incomplete in Host PyMOL",
         doctor,
     )
+    keyword = getattr(cmd, "keyword", {})
+    unadapted = {}
+    for name in sorted((doctor.get("commands") or {}).keys()):
+        entry = keyword.get(name) if isinstance(keyword, dict) else None
+        callback = entry[0] if isinstance(entry, (list, tuple)) and entry else None
+        if not getattr(callback, "_pymolplugins_console_adapter", False):
+            unadapted[name] = {
+                "entry_type": type(entry).__name__ if entry is not None else None,
+                "callback": repr(callback),
+            }
+    _require(
+        not unadapted,
+        "canonical commands bypassed the STRICT-parser console adapter",
+        unadapted,
+    )
     if str(doctor.get("repository_root", "")).lower().startswith(
         ("\\\\wsl.localhost\\", "\\\\wsl$\\")
     ):
@@ -358,6 +373,7 @@ def _load_plugin_entry(suite: HostSmokeSuite) -> Dict[str, Any]:
         "pymol_version": doctor.get("pymol_version"),
         "api": doctor.get("api"),
         "canonical_command_count": len(doctor.get("commands") or {}),
+        "console_adapted_command_count": len(doctor.get("commands") or {}),
         "missing_commands": doctor.get("missing_commands"),
         "repository_root_is_unc": doctor.get("repository_root_is_unc"),
         "wsl_distro": doctor.get("wsl_distro"),
@@ -510,18 +526,29 @@ def _navigation_check(suite: HostSmokeSuite) -> Dict[str, Any]:
         cmd.enable(name)
     snapshots: Dict[str, Any] = {}
     try:
-        started = navigation.pp_nav_start(
-            source="groups",
-            entries="%s,%s" % (root_a, root_b),
-            batch_size=2,
-            window_size=1,
-            stride=1,
-            wrap=0,
-            bind_keys=0,
-            zoom_policy="none",
+        start_command = (
+            'pp_nav_start source=groups, entries="%s,%s", batch_size=2, '
+            'window_size=1, stride=1, wrap=0, bind_keys=0, zoom_policy=none'
+            % (root_a, root_b)
         )
-        _require(started.get("source") == "groups", "group navigation failed to start", started)
+        cmd.do(start_command)
+        started = navigation.pp_nav_status(quiet=1)
+        expected_entry_ids = ["group:%s" % root_a, "group:%s" % root_b]
+        _require(
+            started.get("source") == "groups"
+            and started.get("count") == 2
+            and started.get("position") == 1
+            and started.get("current_entry_ids") == expected_entry_ids[:1]
+            and started.get("visible_entry_ids") == expected_entry_ids[:1],
+            "quoted console entries did not create the expected group session",
+            {"command": start_command, "status": started, "expected": expected_entry_ids},
+        )
         _require(set(started.get("visible_names", [])) == set(group_a_leaves), "root group was not atomic", started)
+        snapshots["console_start"] = {
+            "command": start_command,
+            "entry_ids": expected_entry_ids,
+            "status": _json_safe(started),
+        }
         snapshots["root_a"] = _enabled_assertions(_names(True), group_a_leaves + [overlay], group_b_leaves)
 
         pinned = navigation.pp_nav_pin(root_a)
@@ -593,20 +620,53 @@ def _target_iteration_check(suite: HostSmokeSuite) -> Dict[str, Any]:
     )
     _require(set(leaves + [overlay]).issubset(set(_names(True))), "preview mutated the scene", preview)
 
-    applied = targets.pp_foreach(
-        root,
-        "disable {target}",
-        match="exact",
-        group_mode="leaves",
-        commit=1,
-        quiet=1,
+    names_before_commit = set(_names())
+    console_command = (
+        'pp_foreach %s, "disable {target}", match=exact, '
+        "group_mode=leaves, commit=1, quiet=1" % root
     )
+    cmd.do(console_command)
     enabled = set(_names(True))
-    _require(applied.get("status") == "applied", "target iteration commit failed", applied)
-    _require(not (set(leaves) & enabled), "target iteration left group leaves enabled", applied)
-    _require(overlay in enabled, "target iteration changed an unrelated object", applied)
+    _require(
+        not (set(leaves) & enabled),
+        "quoted console foreach did not disable every recursive group leaf",
+        {"command": console_command, "enabled": sorted(enabled)},
+    )
+    _require(
+        overlay in enabled,
+        "quoted console foreach changed an unrelated object",
+        {"command": console_command, "enabled": sorted(enabled)},
+    )
+    _require(
+        set(_names()) == names_before_commit
+        and not any(name.startswith("ppfe_ack_") for name in _names()),
+        "quoted console foreach left a parser completion marker",
+        {"before": sorted(names_before_commit), "after": sorted(_names())},
+    )
     for name in leaves:
         cmd.enable(name)
+
+    quoted_glob = suite.prefix + "root_a_*"
+    quoted_glob_command = (
+        'pp_foreach "%s", "disable {target}", match=glob, kinds=object, '
+        "commit=1, quiet=1" % quoted_glob
+    )
+    cmd.do(quoted_glob_command)
+    enabled = set(_names(True))
+    _require(
+        suite.fixtures["root_a_extra"] not in enabled
+        and set(leaves).difference({suite.fixtures["root_a_extra"]}).issubset(enabled)
+        and overlay in enabled,
+        "quoted glob target did not resolve to the expected object",
+        {"command": quoted_glob_command, "enabled": sorted(enabled)},
+    )
+    _require(
+        set(_names()) == names_before_commit
+        and not any(name.startswith("ppfe_ack_") for name in _names()),
+        "quoted glob foreach left a parser completion marker",
+        {"before": sorted(names_before_commit), "after": sorted(_names())},
+    )
+    cmd.enable(suite.fixtures["root_a_extra"])
 
     names_before_errors = set(_names())
     parser_error = targets.pp_foreach(
@@ -654,11 +714,15 @@ def _target_iteration_check(suite: HostSmokeSuite) -> Dict[str, Any]:
         "fuzzy_match": fuzzy.get("matches", []),
         "group": root,
         "expanded_targets": preview.get("expanded_targets", preview.get("commands", [])),
-        "command_count": len(applied.get("commands", [])),
+        "command_count": len(leaves),
+        "console_commands": {
+            "quoted_group": console_command,
+            "quoted_glob": quoted_glob_command,
+        },
         "parser_error_policy": {
             "stop_error_count": len(parser_error.get("errors", [])),
             "continue_error_count": len(command_errors.get("errors", [])),
-            "completion_check": applied.get("completion_check"),
+            "completion_check": "same-line parser sentinel",
         },
     }
 
@@ -893,18 +957,20 @@ def _cyclic_geometry_check(suite: HostSmokeSuite) -> Dict[str, Any]:
         _require(int(diagnostics.get("order", 0)) == order, "C%d order was not recovered" % order, result)
         _require(_close(result.get("direction", ()), (0.0, 0.0, 1.0), tolerance=1.0e-4), "C%d axis is not z-aligned" % order, result)
         results[str(order)] = result
-    vector = orientation.pp_axis_vector(
-        vector="0,0,-2",
-        center="1,2,3",
-        name=suite.prefix + "axis_vector",
-        draw=0,
+    vector_name = suite.prefix + "axis_vector"
+    vector_command = (
+        'pp_axis_vector vector="0,0,-2", center="1,2,3", name=%s, draw=0'
+        % vector_name
     )
+    cmd.do(vector_command)
+    vector_record = orientation._AXES.get(vector_name)
+    vector = vector_record.to_dict() if vector_record is not None else {}
     _require(
         vector.get("schema") == "pymolplugins.axis/1.0"
         and _close(vector.get("direction", ()), (0.0, 0.0, 1.0))
         and _close(vector.get("center", ()), (1.0, 2.0, 3.0)),
-        "explicit vector axis failed",
-        vector,
+        "quoted console vector axis failed",
+        {"command": vector_command, "result": vector},
     )
     two_points = orientation.pp_axis_two_points(
         points="0,0,-5,0,0,5",
@@ -954,7 +1020,7 @@ def _cyclic_geometry_check(suite: HostSmokeSuite) -> Dict[str, Any]:
     )
     return {
         "cyclic_axes": results,
-        "vector_axis": vector,
+        "vector_axis": {"command": vector_command, "result": vector},
         "two_point_axis": two_points,
         "mass_weighted_pca": mass_pca,
         "vector_membrane": membrane,

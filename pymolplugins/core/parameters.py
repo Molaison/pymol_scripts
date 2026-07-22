@@ -10,11 +10,75 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Iterable
-from typing import List, Optional
+from functools import wraps
+from typing import Any, Callable, List, Optional
 
 
 _TRUE_TOKENS = frozenset(("1", "true", "on", "yes", "y", "t"))
 _FALSE_TOKENS = frozenset(("0", "false", "off", "no", "n", "f"))
+_CONSOLE_ADAPTER_MARKER = "_pymolplugins_console_adapter"
+
+
+def console_text(value: str) -> str:
+    """Remove exactly one quote-syntax layer from a PyMOL console value.
+
+    PyMOL's STRICT parser preserves surrounding single-, double-, and
+    triple-single-quote delimiters for functions registered with
+    ``cmd.extend``.  The quotes are syntax at that boundary, not part of a
+    command template, selection, regular expression, URL, or Windows path.
+    This helper deliberately performs no escape decoding and leaves
+    mismatched quotes untouched.
+    """
+
+    if len(value) >= 6 and value.startswith("'''") and value.endswith("'''"):
+        return value[3:-3]
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def console_command(function: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap one ``cmd.extend`` callback with STRICT-parser normalization.
+
+    Only explicitly supplied string arguments are normalized.  Defaults and
+    direct Python calls to *function* retain their original semantics.
+    ``functools.wraps`` preserves the public signature PyMOL inspects while
+    binding console arguments.
+    """
+
+    if getattr(function, _CONSOLE_ADAPTER_MARKER, False):
+        return function
+
+    @wraps(function)
+    def adapted(*args: Any, **kwargs: Any) -> Any:
+        normalized_args = tuple(
+            console_text(value) if isinstance(value, str) else value
+            for value in args
+        )
+        normalized_kwargs = {
+            key: console_text(value) if isinstance(value, str) else value
+            for key, value in kwargs.items()
+        }
+        return function(*normalized_args, **normalized_kwargs)
+
+    setattr(adapted, _CONSOLE_ADAPTER_MARKER, True)
+    return adapted
+
+
+def extend_command(
+    command_api: Any, name: str, function: Callable[..., Any]
+) -> Callable[..., Any]:
+    """Register a canonical PyMOL command through :func:`console_command`."""
+
+    adapted = console_command(function)
+    command_api.extend(name, adapted)
+    return adapted
+
+
+def is_console_command(function: object) -> bool:
+    """Return whether *function* carries the canonical console adapter."""
+
+    return bool(getattr(function, _CONSOLE_ADAPTER_MARKER, False))
 
 
 def as_bool(value: object) -> bool:

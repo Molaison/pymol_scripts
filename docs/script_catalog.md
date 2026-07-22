@@ -26,7 +26,7 @@ and Python imports continue to work.
 | --- | --- | --- |
 | Host | `pymolplugins/host/plugin.py` | Unified implementation for `pp_load`, full-manifest `pp_doctor`/`pp_capabilities`, and categorized `pp_help`; `plugins/pymol_plugins.py` is its thin Plugin Manager entry. |
 | WSL | `pymolplugins/host/manifest.py` | Declarative, uniqueness-tested canonical module and 63-command inventory. |
-| WSL | `pymolplugins/core/parameters.py` | Strict PyMOL-console value parsing: `as_bool`, `as_int`, `as_float`, `split_names`, `sanitize_name`. |
+| Both | `pymolplugins/core/parameters.py` | Strict PyMOL-console boundary and value parsing: one-layer paired-quote normalization for every canonical `cmd.extend` callback, plus `as_bool`, `as_int`, `as_float`, `split_names`, and `sanitize_name`. |
 | WSL | `pymolplugins/core/sequence.py` | Residue-safe sequence index and exact/bounded motif matching with original chain/resi identity. |
 | WSL | `pymolplugins/core/math3d.py` | Dependency-free TTT/homogeneous transforms, rigid validation, Horn/Kabsch fit, eigen/vector utilities. |
 | Both | `pymolplugins/targets/resolver.py` | Deterministic exact/glob/contains/regex/fuzzy object/group resolution and recursive non-molecule-safe group expansion. |

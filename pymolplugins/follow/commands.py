@@ -49,7 +49,7 @@ except ImportError:  # ``run /absolute/path/group_follow.py`` from PyMOL.
     )
 
 try:
-    from pymolplugins.core.parameters import as_bool, split_names
+    from pymolplugins.core.parameters import as_bool, extend_command, split_names
 except ImportError:
     def as_bool(value, name="value"):
         if isinstance(value, bool):
@@ -67,6 +67,10 @@ except ImportError:
         if isinstance(value, str):
             return [part.strip() for part in value.replace(";", ",").split(",") if part.strip()]
         return [str(part).strip() for part in value if str(part).strip()]
+
+    def extend_command(command_api, name, function):
+        command_api.extend(name, function)
+        return function
 
 
 Matrix = Tuple[float, ...]
@@ -493,9 +497,9 @@ def pp_follow_stop() -> Dict[str, object]:
 
 
 if cmd is not None:
-    cmd.extend("pp_follow_arm", pp_follow_arm)
-    cmd.extend("pp_follow_apply", pp_follow_apply)
-    cmd.extend("pp_follow_rebase", pp_follow_rebase)
-    cmd.extend("pp_follow_undo", pp_follow_undo)
-    cmd.extend("pp_follow_status", pp_follow_status)
-    cmd.extend("pp_follow_stop", pp_follow_stop)
+    extend_command(cmd, "pp_follow_arm", pp_follow_arm)
+    extend_command(cmd, "pp_follow_apply", pp_follow_apply)
+    extend_command(cmd, "pp_follow_rebase", pp_follow_rebase)
+    extend_command(cmd, "pp_follow_undo", pp_follow_undo)
+    extend_command(cmd, "pp_follow_status", pp_follow_status)
+    extend_command(cmd, "pp_follow_stop", pp_follow_stop)

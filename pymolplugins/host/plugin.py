@@ -16,7 +16,7 @@ REPOSITORY_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", 
 if REPOSITORY_ROOT not in sys.path:
     sys.path.insert(0, REPOSITORY_ROOT)
 
-from pymolplugins.core.parameters import as_bool  # noqa: E402
+from pymolplugins.core.parameters import as_bool, extend_command  # noqa: E402
 from pymolplugins.host.manifest import (  # noqa: E402
     CANONICAL_COMMANDS,
     CANONICAL_MODULES,
@@ -245,10 +245,10 @@ def __init_plugin__(app=None):
     addmenuitemqt("PymolPlugins: Structure Annotator", show_structure_annotator_from_toolkit)
 
 
-cmd.extend("pp_load", pp_load)
-cmd.extend("pp_doctor", pp_doctor)
-cmd.extend("pp_capabilities", pp_capabilities)
-cmd.extend("pp_help", pp_help)
+extend_command(cmd, "pp_load", pp_load)
+extend_command(cmd, "pp_doctor", pp_doctor)
+extend_command(cmd, "pp_capabilities", pp_capabilities)
+extend_command(cmd, "pp_help", pp_help)
 
 # A plugin-manager load should make canonical commands immediately available.
 pp_load()

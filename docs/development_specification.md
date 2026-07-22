@@ -201,6 +201,11 @@ pp_foreach targets, command, match=auto, kinds="object,group",
            group_mode=atomic, commit=0, on_error=stop
 ```
 
+所有 canonical `cmd.extend` callback 必须经过统一 console boundary：PyMOL
+STRICT parser 保留的最外层单引号、双引号或三单引号语法只移除一层，不执行
+escape decoding、`literal_eval` 或 `shlex`，以保持 UNC/Windows path、regex、
+selection 和 command template 的内部文本不变；直接 Python 调用不经过此转换。
+
 - match 支持 `exact|glob|contains|regex|fuzzy|auto`；返回实际名称、类型、
   match method 和 score，不静默丢弃歧义。
 - group mode 支持 `atomic|leaves|both|molecules`；`leaves` 使用 partial-session

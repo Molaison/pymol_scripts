@@ -20,7 +20,13 @@ except ImportError:
     cmd = None  # type: ignore
 
 try:
-    from pymolplugins.core.parameters import as_bool, as_int, sanitize_name, split_names
+    from pymolplugins.core.parameters import (
+        as_bool,
+        as_int,
+        extend_command,
+        sanitize_name,
+        split_names,
+    )
     from pymolplugins.navigation.model import (
         NavigationEntry,
         NavigationError,
@@ -30,7 +36,13 @@ except ImportError:
     _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     if _ROOT not in sys.path:
         sys.path.insert(0, _ROOT)
-    from pymolplugins.core.parameters import as_bool, as_int, sanitize_name, split_names  # type: ignore
+    from pymolplugins.core.parameters import (  # type: ignore
+        as_bool,
+        as_int,
+        extend_command,
+        sanitize_name,
+        split_names,
+    )
     from pymolplugins.navigation.model import (  # type: ignore
         NavigationEntry,
         NavigationError,
@@ -1093,20 +1105,32 @@ def pp_nav_stop(keep_loaded: object = 0) -> Dict[str, object]:
         _CONTROLLER = None
 
 
-if cmd is not None:
-    cmd.extend("pp_nav_start", pp_nav_start)
-    cmd.extend("pp_nav_next", pp_nav_next)
-    cmd.extend("pp_nav_prev", pp_nav_prev)
-    cmd.extend("pp_nav_next_batch", pp_nav_next_batch)
-    cmd.extend("pp_nav_prev_batch", pp_nav_prev_batch)
-    cmd.extend("pp_nav_goto", pp_nav_goto)
-    cmd.extend("pp_nav_pin", pp_nav_pin)
-    cmd.extend("pp_nav_unpin", pp_nav_unpin)
-    cmd.extend("pp_nav_register_hook", pp_nav_register_hook)
-    cmd.extend("pp_nav_unregister_hook", pp_nav_unregister_hook)
-    cmd.extend("pp_nav_clear_hooks", pp_nav_clear_hooks)
-    cmd.extend("pp_nav_clear_pins", pp_nav_clear_pins)
-    cmd.extend("pp_nav_context", pp_nav_context)
-    cmd.extend("pp_nav_sync_from_scene", pp_nav_sync_from_scene)
-    cmd.extend("pp_nav_status", pp_nav_status)
-    cmd.extend("pp_nav_stop", pp_nav_stop)
+def register_commands(command_api=None) -> None:
+    """Register navigation commands through the shared console boundary."""
+
+    selected = command_api if command_api is not None else cmd
+    if selected is None:
+        return
+    commands = {
+        "pp_nav_start": pp_nav_start,
+        "pp_nav_next": pp_nav_next,
+        "pp_nav_prev": pp_nav_prev,
+        "pp_nav_next_batch": pp_nav_next_batch,
+        "pp_nav_prev_batch": pp_nav_prev_batch,
+        "pp_nav_goto": pp_nav_goto,
+        "pp_nav_pin": pp_nav_pin,
+        "pp_nav_unpin": pp_nav_unpin,
+        "pp_nav_register_hook": pp_nav_register_hook,
+        "pp_nav_unregister_hook": pp_nav_unregister_hook,
+        "pp_nav_clear_hooks": pp_nav_clear_hooks,
+        "pp_nav_clear_pins": pp_nav_clear_pins,
+        "pp_nav_context": pp_nav_context,
+        "pp_nav_sync_from_scene": pp_nav_sync_from_scene,
+        "pp_nav_status": pp_nav_status,
+        "pp_nav_stop": pp_nav_stop,
+    }
+    for name, function in commands.items():
+        extend_command(selected, name, function)
+
+
+register_commands()

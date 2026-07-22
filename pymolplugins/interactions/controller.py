@@ -18,6 +18,8 @@ import sys
 import uuid
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from pymolplugins.core.parameters import extend_command
+
 try:
     from pymolplugins.interactions.presets import PRESETS, preset_parameters
     from pymolplugins.interactions.plip_protocol import build_plip_request_from_pymol
@@ -1765,12 +1767,12 @@ def register_commands(cmd_api: Any = None) -> None:
     if selected is None:
         return
     get_controller(selected)
-    selected.extend("pp_interact_list", pp_interact_list)
-    selected.extend("pp_interact_describe", pp_interact_describe)
-    selected.extend("pp_interact_run", pp_interact_run)
-    selected.extend("pp_interact_clear", pp_interact_clear)
-    selected.extend("pp_interact_export", pp_interact_export)
-    selected.extend("pp_interact_backend_status", pp_interact_backend_status)
+    extend_command(selected, "pp_interact_list", pp_interact_list)
+    extend_command(selected, "pp_interact_describe", pp_interact_describe)
+    extend_command(selected, "pp_interact_run", pp_interact_run)
+    extend_command(selected, "pp_interact_clear", pp_interact_clear)
+    extend_command(selected, "pp_interact_export", pp_interact_export)
+    extend_command(selected, "pp_interact_backend_status", pp_interact_backend_status)
 
 
 register_commands()

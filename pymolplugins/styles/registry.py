@@ -10,6 +10,7 @@ import os
 import sys
 
 from pymol import cmd
+from pymolplugins.core.parameters import extend_command
 
 try:
     if not globals().get("__package__"):
@@ -496,7 +497,7 @@ CANONICAL_COMMANDS = {
 def register_commands(command_api=cmd):
     """Register canonical commands; repeated calls are deterministic."""
     for name, function in CANONICAL_COMMANDS.items():
-        command_api.extend(name, function)
+        extend_command(command_api, name, function)
 
 
 # Legacy adapters intentionally contain no direct PyMOL side effects.  They

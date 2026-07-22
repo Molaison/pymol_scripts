@@ -20,7 +20,7 @@ try:
         WorkerRequestError,
         worker_request,
     )
-    from pymolplugins.core.parameters import as_float, as_int, split_names
+    from pymolplugins.core.parameters import as_float, as_int, extend_command, split_names
     from pymolplugins.core.windows_paths import windows_long_path
 except ImportError:
     _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -31,7 +31,12 @@ except ImportError:
         WorkerRequestError,
         worker_request,
     )
-    from pymolplugins.core.parameters import as_float, as_int, split_names  # type: ignore
+    from pymolplugins.core.parameters import (  # type: ignore
+        as_float,
+        as_int,
+        extend_command,
+        split_names,
+    )
     from pymolplugins.core.windows_paths import windows_long_path  # type: ignore
 
 
@@ -391,9 +396,9 @@ def pp_worker_jobs() -> Dict[str, object]:
     return result
 
 
-cmd.extend("pp_worker_health", pp_worker_health)
-cmd.extend("pp_worker_capabilities", pp_worker_capabilities)
-cmd.extend("pp_rosetta_metrics", pp_rosetta_metrics)
-cmd.extend("pp_rosetta_metrics_async", pp_rosetta_metrics_async)
-cmd.extend("pp_worker_cancel", pp_worker_cancel)
-cmd.extend("pp_worker_jobs", pp_worker_jobs)
+extend_command(cmd, "pp_worker_health", pp_worker_health)
+extend_command(cmd, "pp_worker_capabilities", pp_worker_capabilities)
+extend_command(cmd, "pp_rosetta_metrics", pp_rosetta_metrics)
+extend_command(cmd, "pp_rosetta_metrics_async", pp_rosetta_metrics_async)
+extend_command(cmd, "pp_worker_cancel", pp_worker_cancel)
+extend_command(cmd, "pp_worker_jobs", pp_worker_jobs)

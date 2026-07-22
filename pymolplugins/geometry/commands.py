@@ -41,7 +41,14 @@ try:
         symmetric_eigensystem,
         ttt_to_homogeneous,
     )
-    from pymolplugins.core.parameters import as_bool, as_float, as_int, sanitize_name, split_names
+    from pymolplugins.core.parameters import (
+        as_bool,
+        as_float,
+        as_int,
+        extend_command,
+        sanitize_name,
+        split_names,
+    )
     from pymolplugins.core.pymol_groups import expand_names as expand_group_names
 except ImportError:
     _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -69,7 +76,14 @@ except ImportError:
         symmetric_eigensystem,
         ttt_to_homogeneous,
     )
-    from pymolplugins.core.parameters import as_bool, as_float, as_int, sanitize_name, split_names  # type: ignore
+    from pymolplugins.core.parameters import (  # type: ignore
+        as_bool,
+        as_float,
+        as_int,
+        extend_command,
+        sanitize_name,
+        split_names,
+    )
     from pymolplugins.core.pymol_groups import expand_names as expand_group_names  # type: ignore
 
 
@@ -1815,13 +1829,13 @@ def pp_geometry_export(name: str, filename: str = "") -> Optional[str]:
 
 
 if cmd is not None:
-    cmd.extend("pp_axis_pca", pp_axis_pca)
-    cmd.extend("pp_axis_vector", pp_axis_vector)
-    cmd.extend("pp_axis_two_points", pp_axis_two_points)
-    cmd.extend("pp_orient_pca", pp_orient_pca)
-    cmd.extend("pp_axis_cyclic", pp_axis_cyclic)
-    cmd.extend("pp_orient_cyclic", pp_orient_cyclic)
-    cmd.extend("pp_orientation_undo", pp_orientation_undo)
-    cmd.extend("pp_membrane_slab", pp_membrane_slab)
-    cmd.extend("pp_membrane_from_anvil", pp_membrane_from_anvil)
-    cmd.extend("pp_geometry_export", pp_geometry_export)
+    extend_command(cmd, "pp_axis_pca", pp_axis_pca)
+    extend_command(cmd, "pp_axis_vector", pp_axis_vector)
+    extend_command(cmd, "pp_axis_two_points", pp_axis_two_points)
+    extend_command(cmd, "pp_orient_pca", pp_orient_pca)
+    extend_command(cmd, "pp_axis_cyclic", pp_axis_cyclic)
+    extend_command(cmd, "pp_orient_cyclic", pp_orient_cyclic)
+    extend_command(cmd, "pp_orientation_undo", pp_orientation_undo)
+    extend_command(cmd, "pp_membrane_slab", pp_membrane_slab)
+    extend_command(cmd, "pp_membrane_from_anvil", pp_membrane_from_anvil)
+    extend_command(cmd, "pp_geometry_export", pp_geometry_export)

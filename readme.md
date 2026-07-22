@@ -19,7 +19,7 @@ RosettaScripts XML.
 
 ## Status
 
-The 193 canonical Python/fake-PyMOL tests run in WSL. An automated Windows Host
+The 201 canonical Python/fake-PyMOL tests run in WSL. An automated Windows Host
 smoke run also passes on PyMOL 3.1.3.1 with all 63 commands, including
 `matrix_mode=0/1/2`, static CGO/map/measurement followers, group navigation,
 checked object/group command failures, anchor/motif/ligand alignment,
@@ -119,6 +119,12 @@ Each dispatch carries a temporary same-line completion marker, so parser and
 `on_error=stop|continue`; the marker is removed immediately. PyMOL's console
 contains the detailed parser error because its public `cmd.do` API does not
 return it.
+
+Canonical commands also normalize PyMOL STRICT-parser quoting at registration:
+one outer single-, double-, or triple-single-quote syntax layer is removed from
+explicit console arguments without decoding backslashes. Quoted selections,
+regexes, command templates, and Windows/UNC paths therefore reach the Python
+adapter unchanged internally.
 
 ### Move a group by following one manually moved object
 

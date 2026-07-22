@@ -8,7 +8,7 @@ evidence, interactive Host evidence, and optional licensed-backend evidence.
 
 Current evidence anchors:
 
-- WSL: 193 standard-library unit/fake-command tests pass.
+- WSL: 201 standard-library unit/fake-command tests pass.
 - Windows Host: the automated PyMOL 3.1.3.1 record is
   [automatic pass / manual pending](validation/windows_host_smoke_2026-07-22.md).
 - WSL worker: a real loopback run on Python 3.12.13 returned `status=ok` with
@@ -50,7 +50,7 @@ context/offset, pin clearing, and explicit session replacement are also tested.
 
 | IDs | Status | Evidence and remaining boundary |
 | --- | --- | --- |
-| TARGET-01..05 | Host smoke verified (3.1.3.1) + WSL verified | Exact/glob/contains/regex/fuzzy matching, deterministic ordering, preview-only default, and explicit commit are tested. Real Host expansion of one nested group covered molecule, static CGO, map, measurement, and multistate leaves while preserving an unrelated overlay. Same-line completion markers detect the real parser's swallowed unknown-command/CmdException failures, enforce stop/continue, and leave no scene names behind. |
+| TARGET-01..05 | Host smoke verified (3.1.3.1) + WSL verified | Exact/glob/contains/regex/fuzzy matching, deterministic ordering, preview-only default, and explicit commit are tested. Real Host `cmd.do` covers a quoted template and quoted glob target; expansion of one nested group covered molecule, static CGO, map, measurement, and multistate leaves while preserving an unrelated overlay. Same-line completion markers detect the real parser's swallowed unknown-command/CmdException failures, enforce stop/continue, and leave no scene names behind. |
 
 ### Group follow
 

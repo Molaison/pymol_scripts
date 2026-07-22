@@ -106,6 +106,21 @@ class TargetResolverTests(unittest.TestCase):
             any(name.startswith("ppfe_ack_") for name in self.fake.get_names("all"))
         )
 
+    def test_registered_foreach_normalizes_strict_console_quotes(self):
+        commands.register_commands(self.fake)
+
+        applied = self.fake.extensions["pp_foreach"](
+            '"root_a"',
+            '"disable {target}"',
+            group_mode='"molecules"',
+            commit='"1"',
+            quiet='"1"',
+        )
+
+        self.assertEqual(applied["status"], "applied")
+        self.assertEqual(applied["executed_targets"], ["a_model"])
+        self.assertEqual(self.fake.commands, ["disable a_model"])
+
     def test_foreach_detects_silent_parser_errors_and_honors_policy(self):
         stopped = commands.pp_foreach(
             "a_*",

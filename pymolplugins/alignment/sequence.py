@@ -16,7 +16,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 from pymol import cmd
 
 try:
-    from pymolplugins.core.parameters import as_bool, as_int, sanitize_name
+    from pymolplugins.core.parameters import as_bool, as_int, extend_command, sanitize_name
     from pymolplugins.core.sequence import (
         SequenceOccurrenceError,
         find_sequence_matches,
@@ -33,7 +33,7 @@ except ModuleNotFoundError as error:
     repository_root = str(Path(__file__).resolve().parents[2])
     if repository_root not in sys.path:
         sys.path.insert(0, repository_root)
-    from pymolplugins.core.parameters import as_bool, as_int, sanitize_name
+    from pymolplugins.core.parameters import as_bool, as_int, extend_command, sanitize_name
     from pymolplugins.core.sequence import (
         SequenceOccurrenceError,
         find_sequence_matches,
@@ -392,11 +392,11 @@ Legacy aliases remain available:
 
 def _register_commands(command_api=None) -> None:
     selected = cmd if command_api is None else command_api
-    selected.extend("pp_select_sequence", pp_select_sequence)
-    selected.extend("sbs_help", show_help)
-    selected.extend("sbs", select_by_sequence)
-    selected.extend("select_sequence", select_by_sequence)
-    selected.extend("seq_select", select_by_sequence)
+    extend_command(selected, "pp_select_sequence", pp_select_sequence)
+    extend_command(selected, "sbs_help", show_help)
+    extend_command(selected, "sbs", select_by_sequence)
+    extend_command(selected, "select_sequence", select_by_sequence)
+    extend_command(selected, "seq_select", select_by_sequence)
 
     try:
         selected.auto_arg[0]["pp_select_sequence"] = [selected.object_sc, "objects", ""]

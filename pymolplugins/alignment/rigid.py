@@ -30,7 +30,13 @@ try:
         mat4_multiply,
         ttt_to_homogeneous,
     )
-    from pymolplugins.core.parameters import as_bool, as_int, sanitize_name, split_names
+    from pymolplugins.core.parameters import (
+        as_bool,
+        as_int,
+        extend_command,
+        sanitize_name,
+        split_names,
+    )
     from pymolplugins.core.pymol_groups import expand_names as expand_group_names
     from pymolplugins.core.sequence import find_sequence_matches, index_atom_streams
 except ImportError:
@@ -47,7 +53,13 @@ except ImportError:
         mat4_multiply,
         ttt_to_homogeneous,
     )
-    from pymolplugins.core.parameters import as_bool, as_int, sanitize_name, split_names  # type: ignore
+    from pymolplugins.core.parameters import (  # type: ignore
+        as_bool,
+        as_int,
+        extend_command,
+        sanitize_name,
+        split_names,
+    )
     from pymolplugins.core.pymol_groups import expand_names as expand_group_names  # type: ignore
     from pymolplugins.core.sequence import find_sequence_matches, index_atom_streams  # type: ignore
 
@@ -785,10 +797,10 @@ def pp_align_list() -> List[Dict[str, object]]:
 
 
 if cmd is not None:
-    cmd.extend("pp_align_anchor", pp_align_anchor)
-    cmd.extend("pp_align_motif", pp_align_motif)
-    cmd.extend("pp_align_ligand", pp_align_ligand)
-    cmd.extend("pp_align_commit", pp_align_commit)
-    cmd.extend("pp_align_undo", pp_align_undo)
-    cmd.extend("pp_align_export", pp_align_export)
-    cmd.extend("pp_align_list", pp_align_list)
+    extend_command(cmd, "pp_align_anchor", pp_align_anchor)
+    extend_command(cmd, "pp_align_motif", pp_align_motif)
+    extend_command(cmd, "pp_align_ligand", pp_align_ligand)
+    extend_command(cmd, "pp_align_commit", pp_align_commit)
+    extend_command(cmd, "pp_align_undo", pp_align_undo)
+    extend_command(cmd, "pp_align_export", pp_align_export)
+    extend_command(cmd, "pp_align_list", pp_align_list)
