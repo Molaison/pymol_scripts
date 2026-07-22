@@ -1,84 +1,291 @@
-## Useful PyMOL Scripts
+# PymolPlugins
 
-PyMOL helper scripts, plugins, and presets are now grouped by what they do so it is easier to find (and contribute) focused utilities.
+PymolPlugins is a structure-inspection toolkit for PyMOL 2.x.  Its canonical
+commands use the `pp_` prefix and are designed to compose safely in an existing
+session: navigation owns only its managed objects, transforms have explicit
+preview/commit/undo boundaries, styles can be reverted, and interaction output
+is tracked by an exact manifest.
 
-## Repository Layout
+The project has two runtime surfaces:
 
-- `analysis/`
-  - `alignment_selection/`: sequence/structure alignment helpers such as `select_by_sequence.py`, `select_interface_res.py`, `select_idx_sep_comma.py`, `align_by_ligand.py`, and the Qt sequence difference highlighter.
-  - `interactions/`: binding-site inspection utilities (`draw_hydrogen_bonds.py`, `ligand_surrounding.py`, `show_contacts.py`) that emphasize contacts between chains, ligands, and post-translational modifications.
-  - `cavities/`: backbone cavity detection, the Gemini variant, and the accompanying `view_cavity.pml` preset.
-  - `geometry/`: centroid/inertia/ellipsoid tools (e.g., `measure_inertia.py`, `com.py`, `draw_ellipsoids.py`).
-- `workflows/`
-  - `dataset_navigation/`: high-volume model review utilities (`screen_boost.py`, `file_management.py`, `load_into_single_object.py`) that expose bucket navigation, pinning, and save/load conveniences.
-  - `grouping/`: utilities that reorganize loaded objects, currently `load_into_groups.py`.
-- `visualization/`
-  - `styles/`: color palettes and rendering presets (`set_publication_style.py`, `macaron_style.py`, `publication_presets.py`, `rfdiffusion2_pymolsetting.py`, `ink_wash_style.py`, `high_contrast_ray_style.pml`).
-  - `overlays/`: CGO overlays such as `axes_overlay.py` and `z_axis_overlay.ini`.
-  - `plugins/`: Qt-enabled visualization plugins (initially `macaron_style_plugin.py`).
-- `examples/pymol_wiki/`: curated references imported from the PyMOL Wiki (e.g., `color_by_mutation.py`).
-- `docs/`: reference PDFs (`docs/references/…`) plus `docs/script_catalog.md` (an index of every active script and plugin).
-- `archive/experimental`, `archive/specialized`, `archive/legacy`: older scripts kept for reference.
-- `data/`: demo structures (currently `helical_bundle.pdb`) used by tutorials.
+- **Windows Host PyMOL** owns the GUI, objects, selections, Qt, CGO rendering,
+  and all `cmd.*` mutations.
+- **WSL2** is the development/test surface and can run an optional HTTP worker
+  for PLIP or a separately licensed PyRosetta installation.
 
-## Screen Boosting (`workflows/dataset_navigation/screen_boost.py`)
+Windows PyMOL never executes a WSL Python path.  Remote calculations send PDB
+text in JSON; they do not send Host/WSL file paths, shell commands, or arbitrary
+RosettaScripts XML.
 
-该脚本实现了用于加速蛋白质设计筛选的整套快捷键，现在与 `file_management.py`、`load_into_single_object.py` 一起放在 `workflows/dataset_navigation/` 目录下，方便成组维护。核心功能保持不变：
+## Status
 
-- `loadpath path, pattern=<regex>, bucket_size=<num>, objects_per_step=<num>`: 批量导入结构文件并启用 bucket 模式；`objects_per_step` 控制每次 `step` 同时显示的对象数（默认 1）。
-- `setup_loader path=<path>, pattern=<regex>, group_size=<num>, objects_per_step=<num>`: 设置分组导入策略，并允许使用 `next_bucket`/`prev_bucket`（或 `CTRL-→ / CTRL-←`）切换批次。
-- `step` / `back`（→ / ←）：在当前批次内部逐步查看结构；当 `objects_per_step>1` 时一次显示多个对象（从当前 index 开始的窗口）。
-- `save_select`（CTRL+SHIFT+S）：将当前对象导出到 `<current_path>/selected` 子目录。
-- `register_switch_cmd command, offset=<i>`：注册切换时执行的命令；当一次显示多个对象时，`offset` 用于指定第 `i` 个对象替换 `{object}` 占位符。
+The 193 canonical Python/fake-PyMOL tests run in WSL. An automated Windows Host
+smoke run also passes on PyMOL 3.1.3.1 with all 63 commands, including
+`matrix_mode=0/1/2`, static CGO/map/measurement followers, group navigation,
+checked object/group command failures, anchor/motif/ligand alignment,
+PCA/cyclic orientation undo, style revert, and exact local interaction cleanup.
+Windows PyMOL also reached the live WSL worker through
+localhost forwarding and validated PLIP export identity.  Real mouse movement, callback-owned CGO, Qt
+timeout/cancel, licensed PyRosetta, and PyMOL 2.x compatibility remain separate
+gates.  See [implementation status](docs/implementation_status.md), the
+[Host record](docs/validation/windows_host_smoke_2026-07-22.md), and the
+[Windows Host acceptance checklist](docs/windows_host_acceptance.md).
 
-## Select Interface Residues (`analysis/alignment_selection/select_interface_res.py`)
+The following older modules are not canonical entry points:
 
-脚本位置已调整为 `analysis/alignment_selection/select_interface_res.py`，其使用方式不变：
+- `workflows/dataset_navigation/file_management.py` and
+  `analysis/alignment_selection/align_by_ligand.py` are compatibility facades.
+- legacy style scripts delegate to the style registry.
+- `workflows/dataset_navigation/screen_boost.py` and
+  `file_management.py` are compatibility adapters over the same canonical
+  `NavigationSession`; neither owns a second cursor or binds keys at import.
+- `analysis/interactions/plip_interactions.py` keeps old command/UI names but
+  its public run/clear commands delegate to the canonical WSL-backed pipeline
+  and exact manifests.  New code should use `pp_interact_*` directly.
+- `plugins/structure_annotator.py` retains its annotation domain and UI while
+  reusing the canonical navigation cursor and explicit key leases.
+
+The detailed classification is in [the script catalog](docs/script_catalog.md).
+Canonical implementation now lives under the feature-oriented
+`pymolplugins/` package. Historical `analysis/`, `workflows/`, `visualization/`,
+`utilities/`, and `services/` paths are import/run compatibility shims only;
+optional standalone tools live under `extras/`.
+
+## Load in Windows PyMOL
+
+Use a disposable session for the first test.
+
+1. Make the repository visible to Windows, either from a Windows checkout/copy
+   or through `\\wsl.localhost\<distro>\home\admin\gitrepo\PymolPlugins`.
+2. In PyMOL Plugin Manager, install or load `plugins/pymol_plugins.py`.
+   Loading a script through UNC is supported, but Windows automation must start
+   from a normal Windows working directory rather than an UNC current directory.
+3. In the PyMOL console, run:
+
+   ```pymol
+   pp_load
+   pp_doctor
+   pp_help
+   ```
+
+`pp_load` imports only the canonical modules.  `pp_doctor` reports the Host
+Python/PyMOL API and optionally probes the WSL worker; `pp_help` lists all
+canonical commands by category.  A worker failure is not
+fatal for local navigation, alignment, styles, geometry, or local interactions.
+
+## Canonical quick start
+
+### Navigate files, objects, or root groups
 
 ```pymol
-run analysis/alignment_selection/select_interface_res.py
-select_interface_enhanced your_complex_name, method, cb_cutoff, contact_cutoff
+pp_nav_start source=groups, entries="design_1,design_2", window_size=1, bind_keys=0
+pp_nav_next
+pp_nav_pin
+pp_nav_status
+pp_nav_stop
 ```
 
-三种结果选择分别创建：
+For files, provide `path` and optionally `pattern`; for existing molecule
+objects use `source=objects`.  A group is one atomic navigation entry.  Keyboard
+bindings are opt-in with `bind_keys=1` and are restored on stop when the Host
+exposes restorable key mappings.
 
-- `interface_by_distance_{your_complex_name}`：基于原子距离的界面残基。
-- `interface_by_area_{your_complex_name}`：基于 SASA 差值的界面残基。
-- `interface_{your_complex_name}`：两个标准的交集。
+### Resolve and iterate objects or groups
 
-## Ligand Alignment (`analysis/alignment_selection/align_by_ligand.py`)
-
-新的 `analysis/alignment_selection/align_by_ligand.py` 提供 `alignto_ligand` 与 `super_ligand` 命令，可根据配体配准多条链：
+PyMOL's built-in `iterate` evaluates an expression once per atom. For
+object/group-level work, use the separate target resolver:
 
 ```pymol
-run analysis/alignment_selection/align_by_ligand.py
-alignto_ligand selection=*, ligand_selection=organic, reference_object=objectA
-super_ligand selection=model*, ligand_objects="ligA,ligB"
+# Preview all matched objects; no scene mutation.
+pp_target_resolve "design_*", match=glob, kinds=object
+
+# Preview one command per recursive group leaf, including CGO/map/measurement.
+pp_foreach assembly, "disable {target}", group_mode=leaves
+
+# Execute only after reviewing the preview.
+pp_foreach assembly, "disable {target}", group_mode=leaves, commit=1
+
+# Approximate-name matching is explicit and can be limited.
+pp_target_resolve desgn_alpha, match=fuzzy, fuzzy_cutoff=0.75, limit=1
 ```
 
-可通过 `ligand_object_pattern` 或 `ligand_objects` 精确指定配体对象，命令会输出 RMS 摘要并自动着色配体原子。
+Matching modes are `exact`, `glob`, `contains`, `regex`, `fuzzy`, and `auto`.
+Groups can remain `atomic`, expand to all recursive `leaves`, include `both`,
+or filter to `molecules`. `pp_foreach` previews by default because arbitrary
+PyMOL commands cannot be generically rolled back. Committed templates must
+render as one physical parser line (semicolon-separated commands are allowed).
+Each dispatch carries a temporary same-line completion marker, so parser and
+`CmdException` failures are reported in `errors` and obey
+`on_error=stop|continue`; the marker is removed immediately. PyMOL's console
+contains the detailed parser error because its public `cmd.do` API does not
+return it.
 
-## Visualization Styles & Plugins
+### Move a group by following one manually moved object
 
-- `visualization/styles/macaron_style.py` 与 `visualization/plugins/macaron_style_plugin.py`：提供多种粉彩/冷暖光谱，并通过 Qt 对话框快速切换色板 (`apply_custom_style`, `show_macaron_dialog`)。
-- `visualization/styles/ink_wash_style.py`：水墨风格的色板与渲染设置，突出高对比的黑白效果。
-- `visualization/styles/high_contrast_ray_style.pml`：简洁的光追参数模板（关闭阴影、提升环境光），适合快速导出海报底图。
-- 仍保留 `set_publication_style.py`, `publication_presets.py`, `rfdiffusion2_pymolsetting.py` 等经典预设，可与上方脚本组合使用。
+```pymol
+pp_follow_arm driver, group=my_group
+# Move "driver" with the PyMOL object-movement mouse mode.
+pp_follow_apply
+pp_follow_undo
+pp_follow_stop
+```
 
-## Overlays & Specialized Utilities
+The follower delta is derived from object TTT matrices; PyMOL groups themselves
+are not scene-graph transform parents.  Static CGO objects can follow directly.
+Callback-owned overlays are skipped by default; `axes_overlay.py` registers
+itself automatically.  A registered rebuild hook or explicit `cgo_policy=static`
+can opt into other behavior.  Undo refuses post-apply external edits unless the
+user explicitly passes `force=1`.
 
-- `visualization/overlays/axes_overlay.py` 与 `visualization/overlays/z_axis_overlay.ini`：用于在视窗内绘制三轴/参考 Z 轴 CGO 对象，配合对称轴分析尤其方便。
-- `archive/specialized/compute_radius_of_gyration.py`, `validate_soft_fix.py`, `align_ligand.py` 等保留脚本按照功能命名，可作为特殊流程的起点。
+### Sequence selection and rigid alignment
 
-## Script Catalog
+```pymol
+pp_select_sequence objects="model*", queries="GGH", occurrence=all
+pp_align_motif mobile, target, "GGH", move="mobile,mobile_ligand", commit=0
+pp_align_ligand mobile, target, mobile_ligand=organic, target_ligand=organic, commit=0
+pp_align_commit
+pp_align_undo
+```
 
-为了覆盖整个脚本库，`docs/script_catalog.md` 列出了主要路径、命令和用途。新增脚本时请同步更新该清单，确保命名与功能保持一致。
+Alignment anchors and moved payloads are separate.  Preview is the default;
+inspect the matrix/RMSD before committing.  Preview commit fingerprints both
+anchors and move-object baselines, while undo refuses to overwrite newer edits
+unless explicitly forced.
 
-## Adding New Content
+### Axes, orientation, and membrane slabs
 
-- **分析脚本**：根据用途放入 `analysis` 的子目录，确保使用 `snake_case` 文件名，并在 docstring 里说明 PyMOL 命令与参数。
-- **批量/流程脚本**：放入 `workflows`，若脚本依赖批量导航逻辑，请复用 `dataset_navigation` 中的工具模块。
-- **可视化预设**：放入 `visualization/styles`（配色/渲染）或 `visualization/overlays`（CGO 对象）。Qt 插件放入 `visualization/plugins` 并实现 `__init_plugin__`。
-- **示例与文档**：放入 `examples` 或 `docs`，避免占用根目录。
+```pymol
+pp_axis_pca selection=model, axis=long, name=model_axis
+pp_axis_pca selection=model, atoms=heavy, weighting=mass, name=mass_axis
+pp_axis_vector vector="0,0,1", center="0,0,0", name=normal_axis
+pp_axis_two_points points="0,0,-10,0,0,10", name=two_point_axis
+pp_orient_pca selection=model, move=model, target_axis=z, secondary_selection=ligand, commit=0
+pp_axis_cyclic selection=oligomer, order=auto, name=symmetry_axis
+pp_membrane_slab selection=oligomer, axis_source=cyclic, thickness=30
+pp_membrane_slab selection=monomer, axis_source=vector, axis="0,0,1", thickness=30
+```
 
-遵循 `AGENTS.md` 中的 PyMOL 插件风格指南（单文件插件、`cmd.extend` 注册、traceback 打印等），可以让新脚本更快地融入当前结构。
+PCA and cyclic-axis results include confidence/diagnostics.  Cn support focuses
+on cyclic oligomers; higher-order dihedral/polyhedral symmetry is out of scope.
+`pp_membrane_from_anvil` can parse an existing DUM-plane PDB or invoke an
+explicit user-provided executable without a shell.  It validates protein
+identity, maps rigidly reoriented planes back to the input frame, and rejects
+non-rigid coordinate changes; no ANVIL binary is bundled.  Direct invocation
+runs on the caller's OS: Windows PyMOL needs a Windows-native executable.  For
+a WSL-only ANVIL build, run it in WSL and pass the output PDB back through a
+Windows-visible/UNC path for parsing rather than pointing Windows at `/home/...`.
+
+### Declarative styles
+
+```pymol
+pp_style_list
+pp_style_apply publication_light, selection=all, snapshot=1, render=0
+pp_style_revert
+pp_style_render width=1600, height=1200, filename=figure.png
+```
+
+Applying a style does not ray trace by default.  `pp_style_render` is the only
+canonical render entry point.
+
+### Interaction presets
+
+```pymol
+pp_interact_list
+pp_interact_run ligand_quick, source=complex, partner1="polymer.protein", partner2="organic"
+pp_interact_run polar_qc, source=complex, partner1="chain A", partner2="chain B"
+pp_interact_export generated_group, interactions.json
+pp_interact_clear generated_group
+```
+
+Canonical presets produce one versioned `InteractionResult` and delete only
+names recorded in their manifest.  `polar_qc` classifies good/weak polar pairs
+and donor/acceptor clashes without the fixed temporary names or global setting
+mutations in the historical `show_contacts.py`.
+
+With the WSL worker running and PLIP/OpenBabel available, PLIP presets are
+asynchronous by default:
+
+```pymol
+pp_interact_run plip_overview, source=complex, partner2="resn LIG and chain X and resi 501"
+pp_worker_jobs
+pp_worker_cancel job_id
+```
+
+The Host exports PDB text and a checked atom-identity map before starting the
+thread.  HTTP is the only off-thread work; schema validation, exact-ligand
+filtering, and rendering return to the Qt main thread.  A cancel request
+suppresses rendering but cannot forcibly interrupt an in-progress backend.
+Use `async_mode=0` only for deliberate headless/batch execution without a Qt
+event loop.
+
+The recorded validation environment completed a real RCSB 1A4W calculation
+with PLIP 3.0.0, including Windows PyMOL export, WSL HTTP analysis,
+exact-ligand filtering, and Host rendering.  See
+[the Host evidence record](docs/validation/windows_host_smoke_2026-07-22.md);
+PLIP remains optional.
+
+## Optional WSL worker
+
+The core worker uses only the Python standard library and can start even when
+PLIP and PyRosetta are unavailable.  Optional backends must be installed in an
+isolated WSL environment using their own supported and licensed distribution
+channels.
+
+```bash
+python3 scripts/probe_worker_env.py --pretty
+export PYMOLPLUGINS_WORKER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+scripts/start_worker.sh
+```
+
+Set the same `PYMOLPLUGINS_WORKER_TOKEN` and, if needed,
+`PYMOLPLUGINS_WORKER_URL` in the Windows environment inherited by PyMOL.  Then:
+
+```pymol
+pp_worker_health
+pp_worker_capabilities
+pp_rosetta_metrics selection=complex, target_chains=A, binder_chains=B
+pp_rosetta_metrics_async selection=complex, target_chains=A, binder_chains=B
+```
+
+Do not put the token on a command line or commit it to the repository.  The
+startup script requires a token by default and refuses non-loopback binding
+without an additional explicit opt-in.  Full setup, networking, license, and
+troubleshooting guidance is in [docs/wsl_worker.md](docs/wsl_worker.md).
+
+## Development checks in WSL
+
+The test suite does not require PyMOL:
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 -m py_compile path/to/changed_module.py
+git diff --check
+```
+
+Use the Host checklist for functionality that depends on Windows PyMOL.  Never
+claim Host integration from WSL fake-command tests alone.
+
+## Repository layout
+
+- `pymolplugins/`: canonical feature packages and the only implementation
+  namespace used by `pp_load`.
+- `pymolplugins/core/`: PyMOL-independent parsing, sequence, group metadata,
+  and 3D math.
+- `pymolplugins/host/`: command manifest, plugin bootstrap, doctor, and help.
+- `pymolplugins/worker/`: WSL HTTP application and optional backends.
+- `plugins/`: thin PyMOL Plugin Manager entry files.
+- `extras/`: optional standalone tools outside the canonical lifecycle.
+- `analysis/`, `workflows/`, `visualization/`, `utilities/`, `services/`:
+  compatibility paths retained for existing `run` and imports.
+- `tests/`: feature-mirrored WSL tests plus the separate Windows Host harness.
+- `docs/`: specification, status, deployment, and acceptance documentation.
+- `archive/`: historical/experimental scripts, not loaded by `pp_load`.
+
+## Licensing and third-party tools
+
+PyRosetta, ANVIL, MSMS, PLIP, and OpenBabel are separate projects with their own
+licenses and supported installation methods.  This repository does not download
+or redistribute PyRosetta, ANVIL, MSMS, or credentials.  An adapter in this
+repository is not permission to vendor third-party code.  The repository itself
+still needs an explicit top-level license before redistribution assumptions can
+be made.

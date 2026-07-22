@@ -1,45 +1,18 @@
-from pymol import cmd
+"""Compatibility loader for the historical ``macaron_style`` command."""
+
+try:
+    from visualization.styles._style_registry_loader import load_style_registry
+except ImportError:
+    import os
+    import sys
+
+    _script = globals().get("__script__", globals().get("__file__", ""))
+    _style_dir = os.path.dirname(os.path.abspath(_script))
+    if _style_dir not in sys.path:
+        sys.path.insert(0, _style_dir)
+    from _style_registry_loader import load_style_registry
 
 
-MACARON_COLORS = {
-    "color1": [176, 163, 209],  # Purple
-    "color2": [139, 208, 213],  # Cyan
-    "color3": [168, 224, 238],  # Light blue
-    "color4": [197, 225, 163],  # Light green
-    "color5": [255, 227, 139],  # Yellow
-    "color6": [245, 163, 125],  # Orange
-    "color7": [232, 141, 178],  # Pink
-}
-
-
-def apply_macaron_style(selection="polymer", ray=1):
-    """
-    Apply a "macaron" (pastel) color palette and ray-trace-friendly settings.
-
-    Args:
-        selection (str): Target selection for coloring (default: "polymer").
-        ray (int|bool): Whether to run ray tracing after applying (default: 1).
-    """
-    for name, rgb in MACARON_COLORS.items():
-        cmd.set_color(name, rgb)
-
-    palette = " ".join(MACARON_COLORS.keys())
-    cmd.spectrum("count", palette, selection)
-
-    cmd.set("specular", 0)
-    cmd.set("reflect", 0)
-    cmd.set("ambient", 1)
-    cmd.set("depth_cue", 0)
-    cmd.set("ray_trace_mode", 1)
-    cmd.set("ray_trace_depth_factor", 1)
-    cmd.set("ray_trace_disco_factor", 1)
-    cmd.set("ray_trace_gain", 0.005)
-    cmd.set("ray_shadow", 0)
-    cmd.set("antialias", 2)
-
-    if int(ray):
-        cmd.ray()
-
-
-cmd.extend("macaron_style", apply_macaron_style)
-
+_registry = load_style_registry()
+apply_macaron_style = _registry.legacy_macaron_style
+_registry.register_legacy_commands(("macaron_style",))

@@ -1,12 +1,5 @@
-# 漫画风
+# Standalone compatibility entry point, run from the repository root.
+run visualization/styles/style_registry_bootstrap.py
 
-set specular, 0
-set ambient, 0.8
-set ray_trace_mode, 1
-set ray_trace_depth_factor, 1
-set ray_trace_disco_factor, 0.05
-set antialias, 2
-set line_smooth, 1
-set ray_shadow, off
-set valence, off, sele 
-ray 2000
+# Rendering remains explicit: pp_style_render 2000, 2000
+pp_style_apply high_contrast_outline

@@ -1,0 +1,154 @@
+# Implementation Status
+
+Snapshot date: 2026-07-22 (Asia/Shanghai)
+Specification: [development_specification.md](development_specification.md)
+
+This file separates code existence, WSL evidence, automated Windows Host
+evidence, interactive Host evidence, and optional licensed-backend evidence.
+
+Current evidence anchors:
+
+- WSL: 193 standard-library unit/fake-command tests pass.
+- Windows Host: the automated PyMOL 3.1.3.1 record is
+  [automatic pass / manual pending](validation/windows_host_smoke_2026-07-22.md).
+- WSL worker: a real loopback run on Python 3.12.13 returned `status=ok` with
+  PLIP 3.0.0 available; Windows Host PyMOL reached that worker through localhost
+  forwarding and verified all 63 canonical commands.
+- Real PLIP/OpenBabel numerical validation passes both direct-backend and HTTP
+  paths on RCSB 1A4W. A separate Windows PyMOL -> WSL PLIP -> exact-ligand Host
+  render produced one QWE site, 14 interactions, and 12 manifest-owned outputs.
+  PyRosetta remains absent and no PyRosetta numerical result is claimed.
+
+Status vocabulary:
+
+- **WSL verified**: covered by current pure/fake-command tests.
+- **Host smoke verified (3.1.3.1)**: covered by the versioned automatic Host
+  record, within that check's stated limits.
+- **Implemented; interactive Host pending**: code/tests exist, but mouse,
+  callback, Qt, rendering, or another interactive behavior is not recorded.
+- **Blocked by optional licensed environment**: code/mock contract exists, but
+  a legal installed backend is required for numerical validation.
+
+PyMOL 2.x compatibility remains open even when the 3.1.3.1 smoke check passes.
+
+## Acceptance matrix
+
+### Navigation
+
+| IDs | Status | Evidence and remaining boundary |
+| --- | --- | --- |
+| NAV-01, NAV-02 | WSL verified | Empty/single/final-short batches, wrap, stride, and forward/back symmetry are covered. |
+| NAV-03 | Host smoke verified (3.1.3.1) | Nested root group remained atomic with molecule, static CGO, map, measurement, and multistate leaves; an unmanaged overlay was preserved. |
+| NAV-04 | Implemented; Host file-failure pending | Fake tests prove ordinary load rollback plus transactional `replace=1`: the prior controller, visible scene, adopted file objects, and key lease survive a failed first load. A real Host file-load failure remains manual. |
+| NAV-05 | WSL verified | Both legacy facades share the canonical hook/pin functions and controller; dual load-order tests prove overlapping aliases resolve to the same callable, and neither adapter binds keys at import. |
+| NAV-06 | WSL verified | Shared console booleans reject unknown tokens and parse false strings correctly. |
+
+Key lease restoration, third-party rebinding preservation, structured hook
+context/offset, pin clearing, and explicit session replacement are also tested.
+
+### Object/group targets
+
+| IDs | Status | Evidence and remaining boundary |
+| --- | --- | --- |
+| TARGET-01..05 | Host smoke verified (3.1.3.1) + WSL verified | Exact/glob/contains/regex/fuzzy matching, deterministic ordering, preview-only default, and explicit commit are tested. Real Host expansion of one nested group covered molecule, static CGO, map, measurement, and multistate leaves while preserving an unrelated overlay. Same-line completion markers detect the real parser's swallowed unknown-command/CmdException failures, enforce stop/continue, and leave no scene names behind. |
+
+### Group follow
+
+| IDs | Status | Evidence and remaining boundary |
+| --- | --- | --- |
+| FOLLOW-01..03, FOLLOW-06 | Host translation smoke + WSL rigid tests | Programmatic translation and undo pass for molecule/static-CGO/map/measurement/multistate under `matrix_mode=0/1/2`. WSL tests cover non-identity baselines, 180-degree rotation, repeated apply, and rebase. Real mouse rotation/translation remains manual. |
+| FOLLOW-04 | Implemented; callback Host pending | `axes_overlay.py` automatically registers callback ownership; safe default is skip, with explicit static/rebuild policies and apply/undo hook tests. A live view-callback record remains manual. |
+| FOLLOW-05 | WSL verified | External follower/group drift and stale undo are rejected before writes; `force=1` is explicit, and failed multi-follower apply rolls back prior followers. |
+
+### Sequence and rigid alignment
+
+| IDs | Status | Evidence and remaining boundary |
+| --- | --- | --- |
+| SEQ-01, SEQ-02 | Host core smoke + WSL verified | Host creates an exact chain-specific motif selection and verifies its four source atom identities. Blank/multi-character chains, insertion/negative `resi`, altloc, missing CA, modified residues, overlap, bounded gaps, ambiguity, and multi-object identity remain covered by WSL fixtures. |
+| ALIGN-01, ALIGN-02 | Host success paths + WSL failure tests | Real Host anchor, motif, and ligand fits reach zero RMSD, then commit and undo their object TTTs. WSL tests reject scale/reflection/collinearity; duplicate ligand keys produce a typed ambiguity and verified order remains explicit. |
+| ALIGN-03, ALIGN-04 | Host smoke verified (3.1.3.1) + WSL verified | Host proves preview is non-mutating, commit/undo restores the payload, motif anchors move a whole object, and a detached ligand key remains fixed while a separate payload moves. Group leaves, atomic rollback, stale checks, hashes, state, parameters, and backend provenance are WSL-tested. |
+
+### Geometry and membrane
+
+| IDs | Status | Evidence and remaining boundary |
+| --- | --- | --- |
+| GEO-01 | Host orientation/undo + WSL edge tests | Real Host smoke executes PCA and cyclic orientation preview/commit/undo in addition to mass-weighted PCA and explicit vector/two-point axes. Axis/membrane JSON records include input hashes, parameters, backend/version, warnings, and confidence; secondary roll, confidence gates, antiparallel rotation, atomic rollback, and export replacement remain WSL-tested. |
+| GEO-02, GEO-03 | Host smoke verified (3.1.3.1) for C2/C3/C6 calculation | C2 uses paired rotation; C3/C6 pass Host. WSL fixtures reject/diagnose nonuniform and helical arrangements. |
+| MEM-01 | Host numeric/CGO smoke + WSL geometry tests | Host creates a vector-normal membrane CGO and measures 30 A plane separation; WSL tests cover plane geometry and projected auto extent. Visual inspection remains open. |
+| MEM-02 | Implemented; Host slab-follow pending | The slab is a static CGO and generic static-CGO follow passes Host; the actual slab object still needs an interactive record. |
+| MEM-03 | WSL adapter verified; real ANVIL pending | DUM layers cover clean/noisy/reordered/missing-layer behavior. The shell-free executable adapter is tested with a fake executable, validates exact protein identity, rejects non-rigid coordinate changes, and maps planes back after rigid reorientation. No third-party ANVIL binary is vendored or claimed as executed. |
+
+### Styles
+
+| IDs | Status | Evidence and remaining boundary |
+| --- | --- | --- |
+| STYLE-01..04 | Host core smoke + WSL registry tests | One composed scoped style and full snapshot revert pass on Host; registry validation, normalized colors, no implicit render, load-order determinism, and detailed atom/background/representation restoration are WSL-covered. |
+| STYLE-05 | WSL verified; Host render pending | `pp_style_render` is the only canonical ray/PNG entry. A reviewed Host PNG record remains open. |
+
+### Interactions
+
+| IDs | Status | Evidence and remaining boundary |
+| --- | --- | --- |
+| INT-01..05 | Host local core + WSL failure tests | Host covers exact ligand boundary, structured result, source exclusion, manifest output, and exact clear. WSL additionally covers renderer rollback, failed-replacement restoration, output provenance fields, and `polar_qc` without global-setting mutation. |
+| INT-06 | WSL verified | Blank/insertion identity, multiple ligands, state forwarding, water/metal exclusion, long names, zero results, all eight PLIP types, and malformed data are covered. |
+| INT-07 | Headless Host success verified; interactive Qt pending | PLIP PDB/TER atom mapping passes Host smoke. A synchronous headless Windows PyMOL request completed the full WSL PLIP POST, exact QWE ligand filter, and Host render. Async HTTP is Qt-worker-only; timeout/unreachable/cancel create no pre-response output, but GUI responsiveness/cancel remain manual. |
+
+`plip_overview` and `plip_publication` now dispatch through the canonical WSL
+endpoint. The worker returns `pymolplugins.interactions/1.0`; Host filtering
+keeps only interactions containing the exact requested ligand identities.
+Real 1A4W PLIP counts were 3 sites / 18 interactions before Host filtering;
+the exact `QWE:H:373` Host selection retained 14 interactions: 6 hydrogen
+bonds, 4 hydrophobic contacts, 1 pi stack, 1 salt bridge, and 2 water bridges.
+
+### Rosetta/worker service
+
+| IDs | Status | Evidence and remaining boundary |
+| --- | --- | --- |
+| ROS-01 | WSL verified and live loopback verified | Worker starts without optional packages, health stays `ok`, and capabilities expose backend state and effective transport limits. |
+| ROS-02 | Blocked by optional licensed environment | Initialize-once and serialization are mock-tested; repeatability requires a user-supplied legal PyRosetta environment. |
+| ROS-03 | WSL mock-contract verified | CMS, bound heavy-atom bunsat, and interface-delta bunsat remain separate typed fields with explicit provenance. Numerical semantics need a real installed build. |
+| ROS-04 | WSL verified at contract boundary | Strict fields/types/options, duplicate metrics, missing/overlapping chains, auth/schema, unreachable/timeout, body/response limits, and error typing are covered. Hard C++ cancellation is explicitly not claimed. |
+| ROS-05 | Host connection verified; analysis POST pending | Windows PyMOL reached WSL `/v1/health` through the shared client. Metric requests send inline PDB only; redirects are refused and paths/commands/XML are rejected. A licensed analysis POST remains unavailable. |
+
+No PyRosetta wheel, token, ANVIL/MSMS executable, or licensed binary was
+downloaded or added.
+
+## Experience and infrastructure
+
+| Feature | Status |
+| --- | --- |
+| Unified plugin bootstrap (`pp_load`) and `pp_help` | Host smoke verified (3.1.3.1), including reload and the full 63-command manifest. |
+| Feature-oriented package ownership | Implemented and WSL architecture-tested: canonical code lives under `pymolplugins/`; AST tests reject imports back into historical namespaces; old paths are thin compatibility shims and standalone tools live under `extras/`. |
+| Runtime doctor and `pp_capabilities` | Host smoke verified for complete commands/API/cache/UNC and live PLIP worker state; configured ANVIL state is reported. |
+| Transactional interaction replacement | Implemented; a failed new render restores the prior exact result instead of leaving a blank group. |
+| Windows fixture/smoke automation | Implemented with versioned JSON, PowerShell gate, local Windows cwd, configurable exe/repository/output paths, and exact cleanup. |
+| WSL worker operational docs/probe/start wrapper | Implemented and live-loopback verified. |
+| Result freshness/caching | Not implemented; still a follow-up optimization. |
+| Navigation-triggered automatic analysis | Hook substrate exists; policy/caching orchestration remains follow-up work. |
+| Interaction table/copy/legend UI | Not implemented; structured JSON and PyMOL output tree are available now. |
+| Repository license | Missing; do not infer redistribution permission. |
+
+## Phase status
+
+| Phase | Code status | Open evidence boundary |
+| --- | --- | --- |
+| Phase 0: foundations/correctness | Implemented | Real mouse/callback follow and PyMOL 2.x. |
+| Phase 1: navigation/alignment | Implemented | Host file-failure, deeper interactive selection records, and PyMOL 2.x. |
+| Phase 2: styles/interactions | Implemented | Host PNG and interactive Qt timeout/cancel remain; real PLIP/OpenBabel succeeds. |
+| Phase 3: geometry/membrane | Implemented code/contract | Host orientation/undo and slab pass; a real user-supplied ANVIL visual record remains. |
+| Phase 4: WSL services/integration | PLIP implemented; Rosetta contract implemented | Windows health and PLIP analysis forwarding pass; a legal PyRosetta numerical environment remains. |
+
+## Verification commands
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 scripts/probe_worker_env.py --pretty
+scripts/start_worker.sh --help
+rg --files -0 -g '*.py' -g '!output/**' -g '!tmp/**' | xargs -0 python3 -m py_compile
+sh -n scripts/start_worker.sh
+git diff --check
+```
+
+Use `scripts/windows/run_host_smoke.ps1` for the automated Host subset and
+[windows_host_acceptance.md](windows_host_acceptance.md) for the remaining
+interactive and optional-backend gates.

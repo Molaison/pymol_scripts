@@ -1,21 +1,18 @@
-from pymol import cmd
+"""Compatibility loader for the historical ``pbs`` command."""
+
+try:
+    from visualization.styles._style_registry_loader import load_style_registry
+except ImportError:
+    import os
+    import sys
+
+    _script = globals().get("__script__", globals().get("__file__", ""))
+    _style_dir = os.path.dirname(os.path.abspath(_script))
+    if _style_dir not in sys.path:
+        sys.path.insert(0, _style_dir)
+    from _style_registry_loader import load_style_registry
 
 
-def publication_style():
-    """
-    Set the PyMOL visualization style to a publication-friendly format.
-    """
-    cmd.set("ray_trace_mode", 1)  # 'on' in PyMOL is 1 in Python
-    cmd.set("ray_trace_gain", 0.05)
-    cmd.set("ray_trace_depth_factor", 1)
-    cmd.set("ray_trace_disco_factor", 1)
-    cmd.set("specular", 0)
-    cmd.set("ambient", 0.8)
-    cmd.set("cartoon_side_chain_helper", 1)  # 'on' in PyMOL is 1 in Python
-    cmd.set("valence", 0)  # 'off' in PyMOL is 0 in Python
-    cmd.set("ray_shadow", 0)  # 'off' in PyMOL is 0 in Python
-    cmd.set("reflect", 0.5)
-    cmd.set("stick_radius", 0.35)
-
-
-cmd.extend("pbs", publication_style)
+_registry = load_style_registry()
+publication_style = _registry.legacy_publication_style
+_registry.register_legacy_commands(("pbs",))

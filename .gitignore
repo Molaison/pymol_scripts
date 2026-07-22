@@ -3,3 +3,23 @@ __pycache__/*
 __pycache__/
 **/__pycache__/
 *.py[cod]
+
+# Local Python/worker environments
+.venv/
+.venv-worker/
+venv/
+
+# Local configuration, Bearer tokens, and credentials
+.env
+.env.*
+!.env.example
+*.token
+*.token.txt
+.worker-token
+worker-token*
+secrets/
+
+# Generated reports, scratch files, and Windows download metadata
+/output/
+/tmp/
+*:Zone.Identifier

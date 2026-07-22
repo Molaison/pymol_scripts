@@ -1,28 +1,18 @@
-from pymol import cmd
+"""Compatibility loader for the historical ``ink_wash_style`` command."""
+
+try:
+    from visualization.styles._style_registry_loader import load_style_registry
+except ImportError:
+    import os
+    import sys
+
+    _script = globals().get("__script__", globals().get("__file__", ""))
+    _style_dir = os.path.dirname(os.path.abspath(_script))
+    if _style_dir not in sys.path:
+        sys.path.insert(0, _style_dir)
+    from _style_registry_loader import load_style_registry
 
 
-def apply_ink_wash_style(ray_size=2000):
-    """
-    Apply an "ink wash" black/white high-contrast ray-trace preset.
-
-    Args:
-        ray_size (int): Output size for `ray` (square, default: 2000).
-    """
-    cmd.set("opaque_background", 1)
-    cmd.bg_color("white")
-
-    cmd.set("transparency", 0.8)
-    cmd.set("specular", 0)
-    cmd.set("ambient", 1)
-    cmd.set("ray_trace_mode", 1)
-    cmd.set("ray_trace_gain", 1)
-    cmd.set("cartoon_highlight_color", "gray70")
-    cmd.set("ray_trace_depth_factor", 1)
-    cmd.set("ray_trace_disco_factor", 0.05)
-
-    if ray_size and int(ray_size) > 0:
-        cmd.ray(int(ray_size), int(ray_size))
-
-
-cmd.extend("ink_wash_style", apply_ink_wash_style)
-
+_registry = load_style_registry()
+apply_ink_wash_style = _registry.legacy_ink_wash_style
+_registry.register_legacy_commands(("ink_wash_style",))
