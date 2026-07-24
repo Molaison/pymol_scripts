@@ -18,6 +18,7 @@ import math
 import os
 import platform
 import sys
+import tempfile
 import time
 import traceback
 import uuid
@@ -28,7 +29,7 @@ from pymol.cgo import COLOR, SPHERE
 
 
 SCHEMA = "pymolplugins.host-smoke/1.0"
-HARNESS_VERSION = "1.1.0"
+HARNESS_VERSION = "1.2.0"
 PREFIX_ROOT = "pphs"
 TRANSLATION = (1.25, -2.0, 0.5)
 MATRIX_MODES = (0, 1, 2)
@@ -1398,6 +1399,226 @@ def _plip_export_check(suite: HostSmokeSuite) -> Dict[str, Any]:
     }
 
 
+def _annotation_state_check(suite: HostSmokeSuite) -> Dict[str, Any]:
+    annotation = importlib.import_module("pymolplugins.annotation.plugin")
+    from pymolplugins.annotation.history_store import (
+        HISTORY_ENVIRONMENT_VARIABLE,
+        HISTORY_SCHEMA,
+        global_history_path,
+        read_global_history,
+    )
+    from pymolplugins.annotation.state_store import STATE_SCHEMA, dataset_state_path
+
+    def write_model(path: str, x: float) -> None:
+        text = (
+            "ATOM      1  CA  GLY A   1    "
+            "%8.3f%8.3f%8.3f  1.00 20.00           C\nEND\n"
+            % (x, 0.0, 0.0)
+        )
+        with open(path, "w", encoding="ascii", newline="\n") as handle:
+            handle.write(text)
+
+    details: Dict[str, Any] = {}
+    previous_history_path = os.environ.get(HISTORY_ENVIRONMENT_VARIABLE)
+    try:
+        with tempfile.TemporaryDirectory(prefix="PymolPluginsHostState-") as root:
+            os.environ[HISTORY_ENVIRONMENT_VARIABLE] = os.path.join(
+                root, ".pymolplugins", "structure_annotator_history.json"
+            )
+            dataset = os.path.join(root, "dataset with spaces")
+            os.mkdir(dataset)
+            write_model(os.path.join(dataset, "a.pdb"), 0.0)
+            write_model(os.path.join(dataset, "b.pdb"), 3.0)
+
+            annotation.STATE.preload_enabled = False
+            annotation.STATE.background_decompress_gz = False
+            annotation.STATE.auto_advance = False
+            annotation.STATE.step_cmd = ""
+            load_command = 'sa_load_dir "%s"' % dataset
+            cmd.do(load_command)
+            _require(
+                len(annotation.STATE.files) == 2,
+                "quoted annotation dataset command did not load two files",
+                {"command": load_command, "files": annotation.STATE.files},
+            )
+
+            annotation.STATE.label_name = "host_review"
+            annotation.STATE.values_text = "Keep,Reject"
+            annotation.STATE.step_cmd = "show cartoon, {object}"
+            annotation.STATE.bucket_cmds = {
+                "Keep": "color cyan, {object}",
+                "Reject": "color magenta, {object}",
+            }
+            annotation.sa_goto(2)
+            state_path = annotation.sa_save_state()
+            _require(bool(state_path and os.path.isfile(state_path)), "annotation state file missing")
+
+            history_path = global_history_path()
+            history = read_global_history()
+            _require(
+                history.get("schema") == HISTORY_SCHEMA
+                and history.get("snapshots")
+                and history["snapshots"][0].get("dataset_dir") == dataset,
+                "annotation global history was not recorded",
+                history,
+            )
+            fuzzy = annotation.sa_history_search("step_cmd", "cartn")
+            fuzzy_suggestions = list(fuzzy.get("suggestions") or [])
+            _require(
+                fuzzy.get("status") == "ok"
+                and fuzzy_suggestions
+                and fuzzy_suggestions[0] == "show cartoon, {object}",
+                "annotation global history fuzzy search failed",
+                fuzzy,
+            )
+
+            # Headless automation cannot judge popup placement or keyboard
+            # feel, but it can catch real bundled-Qt API incompatibilities in
+            # QCompleter/model construction and full-field acceptance.
+            qt_completion_contract: Dict[str, Any] = {
+                "application_available": False,
+                "line_edit_acceptance": False,
+                "plain_text_acceptance": False,
+                "panel_constructed": False,
+                "panel_history_bindings": 0,
+                "panel_bucket_bindings": 0,
+            }
+            try:
+                from pymol.Qt import QtWidgets
+
+                qt_completion_contract["application_available"] = bool(
+                    QtWidgets.QApplication.instance()
+                )
+                if qt_completion_contract["application_available"]:
+                    line_edit = QtWidgets.QLineEdit()
+                    line_binding = annotation._HistoryCompletionBinding(
+                        line_edit, "step_cmd"
+                    )
+                    line_binding._accept("show cartoon, {object}")
+                    qt_completion_contract["line_edit_acceptance"] = (
+                        line_edit.text() == "show cartoon, {object}"
+                    )
+
+                    plain_edit = QtWidgets.QPlainTextEdit()
+                    plain_binding = annotation._HistoryCompletionBinding(
+                        plain_edit, "step_cmd", multiline=True
+                    )
+                    plain_binding._accept("show cartoon, {object}")
+                    qt_completion_contract["plain_text_acceptance"] = (
+                        plain_edit.toPlainText() == "show cartoon, {object}"
+                    )
+                    _require(
+                        qt_completion_contract["line_edit_acceptance"]
+                        and qt_completion_contract["plain_text_acceptance"],
+                        "annotation Qt history completion acceptance failed",
+                        qt_completion_contract,
+                    )
+                    panel = annotation.StructureAnnotatorPanel()
+                    qt_completion_contract["panel_constructed"] = True
+                    qt_completion_contract["panel_history_bindings"] = len(
+                        panel._history_bindings
+                    )
+                    qt_completion_contract["panel_bucket_bindings"] = len(
+                        panel._bucket_history_bindings
+                    )
+                    _require(
+                        qt_completion_contract["panel_history_bindings"] == 5
+                        and qt_completion_contract["panel_bucket_bindings"] == 2,
+                        "annotation panel did not install every history completer",
+                        qt_completion_contract,
+                    )
+                    panel.close()
+                    panel.deleteLater()
+                    line_binding.detach()
+                    plain_binding.detach()
+                    line_edit.deleteLater()
+                    plain_edit.deleteLater()
+            except SmokeFailure:
+                raise
+            except Exception as exc:
+                raise SmokeFailure(
+                    "annotation Qt history completion contract failed",
+                    {"error": str(exc), **qt_completion_contract},
+                ) from exc
+
+            with open(str(state_path), "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            _require(payload.get("schema") == STATE_SCHEMA, "annotation state schema mismatch", payload)
+            _require(
+                payload.get("position") == {"file": "b.pdb", "index": 1},
+                "annotation position was not persisted",
+                payload,
+            )
+            config = payload.get("config") or {}
+            _require(
+                config.get("step_cmd") == "show cartoon, {object}"
+                and config.get("bucket_cmds")
+                == {
+                    "Keep": "color cyan, {object}",
+                    "Reject": "color magenta, {object}",
+                },
+                "annotation commands were not persisted",
+                payload,
+            )
+
+            state_dir = os.path.dirname(str(state_path))
+            hidden_attribute = None
+            if os.name == "nt":
+                import ctypes
+
+                attributes = int(ctypes.windll.kernel32.GetFileAttributesW(state_dir))
+                hidden_attribute = bool(attributes != 0xFFFFFFFF and attributes & 0x2)
+                _require(
+                    hidden_attribute,
+                    "annotation state directory lacks the Windows hidden attribute",
+                    {"path": state_dir, "attributes": attributes},
+                )
+
+            annotation.STATE.label_name = "wrong"
+            annotation.STATE.step_cmd = ""
+            annotation.STATE.bucket_cmds = {}
+            annotation.sa_load_dir(dataset)
+            _require(
+                annotation.STATE.label_name == "host_review"
+                and annotation.STATE.step_cmd == "show cartoon, {object}"
+                and os.path.basename(annotation.STATE.current_file() or "") == "b.pdb",
+                "annotation state did not restore config and current file",
+                {
+                    "label": annotation.STATE.label_name,
+                    "step_cmd": annotation.STATE.step_cmd,
+                    "current_file": annotation.STATE.current_file(),
+                },
+            )
+            details = {
+                "load_command": load_command,
+                "state_path": dataset_state_path(dataset),
+                "state_schema": payload.get("schema"),
+                "position": payload.get("position"),
+                "config": config,
+                "history_path": history_path,
+                "history_schema": history.get("schema"),
+                "fuzzy_step_command": fuzzy_suggestions[0],
+                "qt_completion_contract": qt_completion_contract,
+                "windows_hidden_attribute": hidden_attribute,
+                "restored_file": os.path.basename(annotation.STATE.current_file() or ""),
+            }
+    finally:
+        if previous_history_path is None:
+            os.environ.pop(HISTORY_ENVIRONMENT_VARIABLE, None)
+        else:
+            os.environ[HISTORY_ENVIRONMENT_VARIABLE] = previous_history_path
+        try:
+            annotation.sa_unbind_keys()
+            annotation._delete_managed_objects(False)
+            annotation._reset_bg_cache()
+            annotation.STATE.files = []
+            annotation.STATE.navigation_session = None
+            annotation.STATE.current_object = None
+        except Exception:
+            traceback.print_exc()
+    return details
+
+
 def _manual_checks(fixtures: Mapping[str, str]) -> List[Dict[str, Any]]:
     driver = fixtures.get("driver", "<driver fixture unavailable>")
     root = fixtures.get("root_group_a", "<group fixture unavailable>")
@@ -1477,6 +1698,7 @@ def pp_host_smoke(output_path: str = "", keep_fixtures: Any = "") -> Dict[str, A
         suite.run_check("HOST-STYLE-01", "style apply/revert snapshot", lambda: _style_check(suite))
         suite.run_check("HOST-INTERACTION-01", "local interactions and exact manifest clear", lambda: _interaction_check(suite))
         suite.run_check("HOST-PLIP-EXPORT-01", "PLIP PDB atom identity and setting restoration", lambda: _plip_export_check(suite))
+        suite.run_check("HOST-ANNOTATION-STATE-01", "annotator dataset state and global fuzzy history", lambda: _annotation_state_check(suite))
     finally:
         cleanup = suite.cleanup()
     record = suite.result(cleanup)

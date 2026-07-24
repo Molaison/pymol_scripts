@@ -8,7 +8,7 @@ real ANVIL, and licensed PyRosetta remain manual.  Do not extend an automated re
 what its versioned JSON record actually tested.
 
 The latest reviewed record is
-[the PyMOL 3.1.3.1 smoke summary](validation/windows_host_smoke_2026-07-22.md).
+[the PyMOL 3.1.3.1 smoke summary](validation/windows_host_smoke_2026-07-24.md).
 PyMOL 2.x remains a separate compatibility gate.
 
 ## Runtime boundary
@@ -140,7 +140,37 @@ existing-object/group sessions.
 The automated `HOST-TARGETS-01` covers steps 1–4 and 6. Arbitrary command templates
 have no generic undo, so preview-before-commit is part of the public contract.
 
-## 4. Object matrices and group follow (`FOLLOW-*`)
+## 4. Structure Annotator persistence (`ANNO-*`)
+
+Use a disposable directory containing at least two structures and a space in
+its path.
+
+1. Load `plugins/structure_annotator.py`, open the panel, and load the dataset.
+2. Set a non-default label/values, `On step` command, two bucket commands,
+   preload options, and move to the second file. Run `sa_save_state`.
+3. Verify `<dataset>/.pymolplugins/structure_annotator.json`; on Windows the
+   directory must also carry the hidden attribute. `sa_state_status` must show
+   the same config and relative filename/index.
+4. Close and reopen PyMOL, then open the panel. The same dataset, config, and
+   file must restore automatically. Confirm no prior undo entry is restored.
+5. Type misspellings such as `cartn` into On step and `evrythng` into a bucket
+   command. The popup must offer the previously finalized full commands; use
+   keyboard and mouse acceptance once each.
+6. Run `sa_history_status` and `sa_history_search step_cmd, cartn`. Confirm the
+   global path is under the Windows Host user's home, not WSL, unless
+   `PYMOLPLUGINS_ANNOTATOR_HISTORY` was deliberately overridden.
+7. Clear **Restore last dataset when this panel opens**, save/close, and verify
+   the next panel open restores config/path without automatically loading it.
+
+The automated `HOST-ANNOTATION-STATE-01` covers quoted-path loading, both JSON
+schemas, Windows hidden state, cursor/config/command restoration, and fuzzy
+ranking with a temporary global history. The separate visible
+`tests/host/annotator_qt_smoke.py` covers step 5 with real Host PyQt5 widgets,
+including automatic popup visibility plus mouse/keyboard acceptance. Steps 4
+and 7 remain fresh-session gates. Only use dataset state from trusted directories: restored
+On-step and bucket templates are executable PyMOL commands.
+
+## 5. Object matrices and group follow (`FOLLOW-*`)
 
 Repeat the core test under each supported `matrix_mode` value 0, 1, and 2.  If a
 mode is unsupported by the installed PyMOL, record the exact behavior rather
@@ -164,7 +194,7 @@ than coercing it silently.
 Record before/after TTT matrices and a screenshot.  This is the gate for
 `FOLLOW-01` through `FOLLOW-06` and static-CGO `MEM-02` behavior.
 
-## 5. Sequence selection and rigid alignment (`SEQ-*`, `ALIGN-*`)
+## 6. Sequence selection and rigid alignment (`SEQ-*`, `ALIGN-*`)
 
 | Check | Expected result | Status/evidence |
 | --- | --- | --- |
@@ -183,7 +213,7 @@ degenerate failure cases remain deterministic WSL tests.
 Record exported alignment JSON, RMSD before/after, moved object names, and
 pairwise-distance preservation.
 
-## 6. Geometry and membrane (`GEO-*`, `MEM-*`)
+## 7. Geometry and membrane (`GEO-*`, `MEM-*`)
 
 1. Compute PCA on an elongated structure and orient its long axis to X/Y/Z,
    including an antiparallel target case.
@@ -205,7 +235,7 @@ geometry check separately covers C2/C3/C6 axes and a numeric 30 A slab.
 
 Save axis/membrane JSON and screenshots with the axis object visible.
 
-## 7. Styles (`STYLE-*`)
+## 8. Styles (`STYLE-*`)
 
 Build a scene with multiple representations, atom colors, scoped settings, and
 a non-default background.
@@ -228,7 +258,7 @@ Verify:
 
 Record before/apply/revert screenshots and the render output metadata.
 
-## 8. Interactions and worker (`INT-*`, `ROS-*`)
+## 9. Interactions and worker (`INT-*`, `ROS-*`)
 
 ### Local canonical presets
 
@@ -262,7 +292,7 @@ return to the main thread.  `INT-07` is still a manual Host gate until a tester
 records GUI responsiveness, success, timeout, cancel-result suppression, and
 zero partial output.  Cancellation is not hard backend interruption.
 
-## 9. Performance and lifecycle
+## 10. Performance and lifecycle
 
 Measure `pp_follow_apply` with 100 and 1000 static followers after one warm-up.
 Record elapsed time, PyMOL responsiveness, object types, and hardware.  No fixed
@@ -276,7 +306,7 @@ Then verify:
 - user objects, selections, key bindings, settings, and camera survive cleanup;
 - closing/reopening PyMOL does not require stale WSL/Windows paths.
 
-## 10. Result summary
+## 11. Result summary
 
 Complete this table in the test record:
 

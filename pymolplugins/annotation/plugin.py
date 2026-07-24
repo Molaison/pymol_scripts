@@ -16,7 +16,22 @@ import sys
 
 try:
     from pymolplugins.core.key_bindings import KeyBindingLease
+    from pymolplugins.core.parameters import extend_command
     from pymolplugins.core.windows_paths import windows_long_path
+    from pymolplugins.annotation.history_store import (
+        HISTORY_FIELDS,
+        HistoryStoreError,
+        history_summary,
+        latest_config_snapshot,
+        record_config_history,
+        search_config_history,
+    )
+    from pymolplugins.annotation.state_store import (
+        StateStoreError,
+        dataset_state_path,
+        read_dataset_state,
+        write_dataset_state,
+    )
     from pymolplugins.navigation.model import (
         NavigationEntry,
         NavigationSession,
@@ -26,7 +41,22 @@ except ImportError:
     if _ROOT not in sys.path:
         sys.path.insert(0, _ROOT)
     from pymolplugins.core.key_bindings import KeyBindingLease  # type: ignore
+    from pymolplugins.core.parameters import extend_command  # type: ignore
     from pymolplugins.core.windows_paths import windows_long_path  # type: ignore
+    from pymolplugins.annotation.history_store import (  # type: ignore
+        HISTORY_FIELDS,
+        HistoryStoreError,
+        history_summary,
+        latest_config_snapshot,
+        record_config_history,
+        search_config_history,
+    )
+    from pymolplugins.annotation.state_store import (  # type: ignore
+        StateStoreError,
+        dataset_state_path,
+        read_dataset_state,
+        write_dataset_state,
+    )
     from pymolplugins.navigation.model import (  # type: ignore
         NavigationEntry,
         NavigationSession,
@@ -307,6 +337,7 @@ class AnnotatorState:
     preload_ahead: int = 2
     preload_interval_ms: int = 250
     background_decompress_gz: bool = True
+    restore_last_dataset: bool = True
     managed_objects: List[str] = field(default_factory=list)
     current_object: Optional[str] = None
     undo_history: List[dict] = field(default_factory=list)
@@ -335,6 +366,272 @@ for _state_field in fields(AnnotatorState):
             _state_field.name,
             copy.deepcopy(getattr(_DEFAULT_STATE, _state_field.name)),
         )
+
+
+_PERSISTED_STRING_FIELDS = (
+    "pattern",
+    "label_name",
+    "values_text",
+    "step_cmd",
+)
+_PERSISTED_BOOL_FIELDS = (
+    "auto_advance",
+    "keep_previous",
+    "prefer_gz",
+    "skip_annotated",
+    "preload_enabled",
+    "background_decompress_gz",
+    "restore_last_dataset",
+)
+_PERSISTED_INT_BOUNDS = {
+    "preload_ahead": (0, 20),
+    "preload_interval_ms": (50, 5000),
+}
+
+
+def _path_identity(path: str) -> str:
+    return os.path.normcase(os.path.realpath(os.path.abspath(path)))
+
+
+def _active_dataset_directory() -> str:
+    """Return the directory proved by the currently loaded file list."""
+
+    if not STATE.files:
+        return ""
+    directories = {
+        _path_identity(os.path.dirname(os.path.abspath(path)))
+        for path in STATE.files
+    }
+    if len(directories) != 1:
+        return ""
+    return os.path.dirname(os.path.abspath(STATE.files[0]))
+
+
+def _persisted_config() -> Dict[str, object]:
+    config: Dict[str, object] = {
+        name: getattr(STATE, name) for name in _PERSISTED_STRING_FIELDS
+    }
+    config.update({name: bool(getattr(STATE, name)) for name in _PERSISTED_BOOL_FIELDS})
+    config.update({name: int(getattr(STATE, name)) for name in _PERSISTED_INT_BOUNDS})
+    config["bucket_cmds"] = {
+        str(key): str(value)
+        for key, value in STATE.bucket_cmds.items()
+        if str(key)
+    }
+    return config
+
+
+def _validate_persisted_config(raw: object) -> Dict[str, object]:
+    if not isinstance(raw, dict):
+        raise StateStoreError("state config must be a JSON object")
+    config: Dict[str, object] = {}
+    for name in _PERSISTED_STRING_FIELDS:
+        if name not in raw:
+            continue
+        value = raw[name]
+        if not isinstance(value, str):
+            raise StateStoreError(f"config.{name} must be a string")
+        if len(value) > 256 * 1024:
+            raise StateStoreError(f"config.{name} is too large")
+        config[name] = value
+    for name in _PERSISTED_BOOL_FIELDS:
+        if name not in raw:
+            continue
+        value = raw[name]
+        if type(value) is not bool:
+            raise StateStoreError(f"config.{name} must be a boolean")
+        config[name] = value
+    for name, (minimum, maximum) in _PERSISTED_INT_BOUNDS.items():
+        if name not in raw:
+            continue
+        value = raw[name]
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise StateStoreError(
+                f"config.{name} must be an integer in {minimum}..{maximum}"
+            )
+        config[name] = value
+    if "bucket_cmds" in raw:
+        commands = raw["bucket_cmds"]
+        if not isinstance(commands, dict):
+            raise StateStoreError("config.bucket_cmds must be a JSON object")
+        if len(commands) > 100:
+            raise StateStoreError("config.bucket_cmds contains too many entries")
+        clean_commands = {}
+        for key, value in commands.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise StateStoreError(
+                    "config.bucket_cmds keys and values must be strings"
+                )
+            if len(key) > 1024 or len(value) > 256 * 1024:
+                raise StateStoreError("config.bucket_cmds entry is too large")
+            clean_commands[key] = value
+        config["bucket_cmds"] = clean_commands
+    return config
+
+
+def _validate_persisted_position(raw: object) -> Dict[str, object]:
+    if not isinstance(raw, dict):
+        raise StateStoreError("state position must be a JSON object")
+    index = raw.get("index", 0)
+    filename = raw.get("file", "")
+    if type(index) is not int or index < 0:
+        raise StateStoreError("position.index must be a non-negative integer")
+    if not isinstance(filename, str) or len(filename) > 4096:
+        raise StateStoreError("position.file must be a string")
+    return {"index": index, "file": filename.replace("\\", "/")}
+
+
+def _apply_persisted_config(config: Dict[str, object]) -> None:
+    for name in _PERSISTED_STRING_FIELDS + _PERSISTED_BOOL_FIELDS:
+        if name in config:
+            setattr(STATE, name, config[name])
+    for name in _PERSISTED_INT_BOUNDS:
+        if name in config:
+            setattr(STATE, name, config[name])
+    if "bucket_cmds" in config:
+        STATE.bucket_cmds = dict(config["bucket_cmds"])
+
+
+def _read_persisted_dataset_state(dataset_dir: str) -> Optional[Dict[str, object]]:
+    try:
+        payload = read_dataset_state(dataset_dir)
+        if payload is None:
+            return None
+        return {
+            "config": _validate_persisted_config(payload.get("config")),
+            "position": _validate_persisted_position(payload.get("position")),
+        }
+    except StateStoreError as exc:
+        print(f"Structure Annotator: ignoring invalid state file: {exc}")
+        print(f"  State path: {dataset_state_path(dataset_dir)}")
+        return None
+
+
+def _relative_current_file(dataset_dir: str) -> str:
+    current = STATE.current_file()
+    if not current:
+        return ""
+    try:
+        relative = os.path.relpath(os.path.abspath(current), os.path.abspath(dataset_dir))
+    except ValueError:
+        return os.path.basename(current)
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        return os.path.basename(current)
+    return relative.replace("\\", "/")
+
+
+def _write_persisted_dataset_state(dataset_dir: str) -> Optional[str]:
+    if not dataset_dir or not STATE.files:
+        return None
+    try:
+        payload = {
+            "updated_at_utc": datetime.datetime.now(
+                datetime.timezone.utc
+            ).isoformat(),
+            "config": _persisted_config(),
+            "position": {
+                "index": int(STATE.index),
+                "file": _relative_current_file(dataset_dir),
+            },
+        }
+        return write_dataset_state(dataset_dir, payload)
+    except Exception as exc:
+        print(f"Structure Annotator: state save failed: {exc}")
+        print(f"  State path: {dataset_state_path(dataset_dir)}")
+        return None
+
+
+def _save_current_dataset_state() -> Optional[str]:
+    active = _active_dataset_directory()
+    if not active or not STATE.dataset_dir:
+        return None
+    if _path_identity(active) != _path_identity(STATE.dataset_dir):
+        return None
+    return _write_persisted_dataset_state(active)
+
+
+def _record_current_config_history() -> Optional[str]:
+    """Record one finalized config without making history a runtime dependency."""
+
+    active = _active_dataset_directory()
+    if not active:
+        return None
+    try:
+        return record_config_history(active, _persisted_config())
+    except Exception as exc:
+        print(f"Structure Annotator: global history save failed: {exc}")
+        return None
+
+
+def _restore_latest_config_from_history() -> bool:
+    """Restore the last finalized config and, when enabled, its dataset."""
+
+    if STATE.files:
+        return False
+    try:
+        snapshot = latest_config_snapshot()
+        if not snapshot:
+            return False
+        config = _validate_persisted_config(snapshot.get("config"))
+        _apply_persisted_config(config)
+        dataset_dir = str(snapshot.get("dataset_dir", "")).strip()
+        if dataset_dir:
+            STATE.dataset_dir = dataset_dir
+        if not STATE.restore_last_dataset or not dataset_dir:
+            return False
+        if not os.path.isdir(_long_path(dataset_dir)):
+            print(
+                "Structure Annotator: last dataset is unavailable; "
+                f"config restored without loading: {dataset_dir}"
+            )
+            return False
+        saved_state_exists = os.path.isfile(
+            _long_path(dataset_state_path(dataset_dir))
+        )
+        pattern_override = "" if saved_state_exists else str(
+            config.get("pattern", STRUCTURE_PATTERN)
+        )
+        sa_load_dir(dataset_dir, pattern_override)
+        restored = bool(
+            _active_dataset_directory()
+            and _path_identity(_active_dataset_directory())
+            == _path_identity(dataset_dir)
+        )
+        if restored:
+            print(f"Structure Annotator: restored last dataset: {dataset_dir}")
+        return restored
+    except (HistoryStoreError, StateStoreError) as exc:
+        print(f"Structure Annotator: ignoring invalid global history: {exc}")
+        return False
+    except Exception as exc:
+        print(f"Structure Annotator: last-session restore failed: {exc}")
+        traceback.print_exc()
+        return False
+
+
+def _history_suggestions(field: str, query: str, limit: int = 12) -> List[str]:
+    try:
+        return search_config_history(field, query, limit)
+    except HistoryStoreError as exc:
+        print(f"Structure Annotator: global history search unavailable: {exc}")
+        return []
+
+
+def _resume_index(
+    dataset_dir: str, files: List[str], position: Optional[Dict[str, object]]
+) -> int:
+    if not files or not position:
+        return 0
+    requested_file = str(position.get("file", "")).replace("\\", "/")
+    if requested_file:
+        for index, path in enumerate(files):
+            relative = os.path.relpath(
+                os.path.abspath(path), os.path.abspath(dataset_dir)
+            ).replace("\\", "/")
+            if relative == requested_file:
+                return index
+    requested_index = int(position.get("index", 0))
+    return max(0, min(requested_index, len(files) - 1))
 
 
 def _new_navigation_session(files: List[str], index: int = 0) -> NavigationSession:
@@ -720,8 +1017,10 @@ def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> O
             print(f"Structure Annotator: file not found: {load_path}")
             return None
         cmd.load(load_path_resolved, obj_name, quiet=1)
-        cmd.sync()  # Wait for all async operations to complete
-        cmd.refresh()  # Then refresh display state
+        # ``cmd.load`` is synchronous. Calling ``cmd.sync`` from an sa_* parser
+        # callback waits on the command queue which currently owns that callback
+        # and produces a real Host ``wait_queue`` timeout.
+        cmd.refresh()
     if obj_name not in STATE.managed_objects:
         STATE.managed_objects.append(obj_name)
 
@@ -745,11 +1044,12 @@ def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> O
 
     STATE.current_object = obj_name
 
-    # Extra safety check: ensure object is truly available before step_cmd
+    # Ensure the synchronous load produced an addressable object before a
+    # restored command template can run against it.
     if not _object_exists(obj_name):
-        print(f"Structure Annotator: waiting for object {obj_name} to be ready...")
-        cmd.sync()
         cmd.refresh()
+        if not _object_exists(obj_name):
+            raise RuntimeError(f"loaded object is unavailable: {obj_name}")
 
     context = {
         "object": obj_name,
@@ -851,7 +1151,9 @@ def _navigate_annotation(method: str, *args) -> str:
     getattr(session, method)(*args)
     STATE.index = session.cursor
     try:
-        return _load_current_structure()
+        loaded = _load_current_structure()
+        _save_current_dataset_state()
+        return loaded
     except Exception:
         session.goto(previous)
         STATE.index = session.cursor
@@ -876,17 +1178,20 @@ def _rescan_annotated_indices() -> None:
             pass
 
 
-def sa_load_dir(path: str = ".", pattern: str = STRUCTURE_PATTERN) -> None:
+def sa_load_dir(path: str = ".", pattern: str = "") -> None:
     """
     Load a directory of structures for annotation.
 
     Args:
         path: Directory containing .pdb/.cif (optionally .gz).
-        pattern: Regex to filter files.
+        pattern: Optional explicit regex override. Empty restores the dataset's
+            saved pattern, or uses the default for a first-time dataset.
     """
+    previous_dataset_dir = _active_dataset_directory() or STATE.dataset_dir
     previous = {
-        "dataset_dir": STATE.dataset_dir,
+        "dataset_dir": previous_dataset_dir,
         "pattern": STATE.pattern,
+        "config": copy.deepcopy(_persisted_config()),
         "files": list(STATE.files),
         "index": STATE.index,
         "undo_history": copy.deepcopy(STATE.undo_history),
@@ -894,12 +1199,26 @@ def sa_load_dir(path: str = ".", pattern: str = STRUCTURE_PATTERN) -> None:
         "navigation_session": STATE.navigation_session,
     }
     try:
+        dataset_dir = os.path.abspath(os.path.expanduser(path))
+        persisted = _read_persisted_dataset_state(dataset_dir)
+        if persisted is not None:
+            _apply_persisted_config(persisted["config"])
+        explicit_pattern = str(pattern or "").strip()
+        if explicit_pattern:
+            STATE.pattern = explicit_pattern
+        elif persisted is None:
+            STATE.pattern = STRUCTURE_PATTERN
+        effective_pattern = STATE.pattern or STRUCTURE_PATTERN
+
         label_key = normalize_label_key(STATE.label_name) if STATE.skip_annotated else None
         discovered = _list_structure_files(
-            path, pattern, STATE.prefer_gz,
+            dataset_dir, effective_pattern, STATE.prefer_gz,
             skip_annotated=STATE.skip_annotated, label_key=label_key
         )
         if not discovered:
+            _apply_persisted_config(previous["config"])
+            STATE.dataset_dir = previous["dataset_dir"]
+            STATE.pattern = previous["pattern"]
             print(f"Structure Annotator: no files matched in {path}; current dataset kept")
             return
 
@@ -907,26 +1226,36 @@ def sa_load_dir(path: str = ".", pattern: str = STRUCTURE_PATTERN) -> None:
         # exactly so a same-basename file in another dataset cannot be reused.
         _delete_managed_objects(False)
         _reset_bg_cache()
-        STATE.dataset_dir = os.path.abspath(os.path.expanduser(path))
-        STATE.pattern = pattern
+        STATE.dataset_dir = dataset_dir
+        STATE.pattern = effective_pattern
         STATE.files = discovered
-        STATE.navigation_session = _new_navigation_session(discovered, 0)
+        resume_at = _resume_index(
+            dataset_dir,
+            discovered,
+            persisted.get("position") if persisted is not None else None,
+        )
+        STATE.navigation_session = _new_navigation_session(discovered, resume_at)
         STATE.index = STATE.navigation_session.cursor
         STATE.current_object = None
         STATE.undo_history.clear()
         _rescan_annotated_indices()
         _load_current_structure()
+        state_path = _write_persisted_dataset_state(dataset_dir)
         annotated = len(STATE.annotated_indices)
         print(
             f"Structure Annotator: loaded {len(STATE.files)} files from {path} "
             f"({annotated} already annotated for '{normalize_label_key(STATE.label_name)}')"
         )
+        if state_path:
+            print(f"Structure Annotator: dataset state: {state_path}")
+        _record_current_config_history()
     except Exception as e:
         # A failed new load must not leave a writable context pointing at the
         # wrong dataset.  Restore the old cursor/domain state and reload it.
         try:
             _delete_managed_objects(False)
             _reset_bg_cache()
+            _apply_persisted_config(previous["config"])
             STATE.dataset_dir = previous["dataset_dir"]
             STATE.pattern = previous["pattern"]
             STATE.files = previous["files"]
@@ -1016,6 +1345,8 @@ def sa_annotate(value: str) -> None:
             "value": value,
         }
         _run_pymol_commands(STATE.bucket_cmds.get(value, ""), context)
+        _save_current_dataset_state()
+        _record_current_config_history()
 
         print(f"Annotated {os.path.basename(path)}: {label_key}={value}")
         if STATE.auto_advance:
@@ -1050,6 +1381,8 @@ def sa_undo() -> None:
         # Return to the file we just changed so the user can see the result.
         if 0 <= index < len(STATE.files):
             _navigate_annotation("goto", index)
+        else:
+            _save_current_dataset_state()
     except Exception as e:
         print(f"Structure Annotator undo error: {e}")
         traceback.print_exc()
@@ -1135,6 +1468,75 @@ def sa_export_csv(out_path: str = "") -> Optional[str]:
         return None
 
 
+def sa_save_state() -> Optional[str]:
+    """Persist the dataset state and finalized global config history."""
+
+    path = _save_current_dataset_state()
+    if path:
+        _record_current_config_history()
+        print(f"Structure Annotator: saved dataset state: {path}")
+    else:
+        print("Structure Annotator: no active dataset state to save")
+    return path
+
+
+def sa_state_status() -> Dict[str, object]:
+    """Return the current dataset's persistent-state location and payload."""
+
+    active = _active_dataset_directory()
+    target_dir = active or STATE.dataset_dir or "."
+    path = dataset_state_path(target_dir)
+    result: Dict[str, object] = {
+        "status": "inactive" if not active else "active",
+        "dataset_dir": active,
+        "state_path": path,
+        "exists": os.path.isfile(_long_path(path)),
+    }
+    if result["exists"]:
+        try:
+            result["state"] = read_dataset_state(target_dir)
+        except StateStoreError as exc:
+            result.update({"status": "invalid", "error": str(exc)})
+    print(result)
+    return result
+
+
+def sa_history_search(
+    field: str = "step_cmd", query: str = "", limit: int = 12
+) -> Dict[str, object]:
+    """Fuzzy-search global input history for console use and diagnostics."""
+
+    try:
+        suggestions = search_config_history(field, query, int(limit))
+        result: Dict[str, object] = {
+            "status": "ok",
+            "field": str(field),
+            "query": str(query),
+            "suggestions": suggestions,
+        }
+    except Exception as exc:
+        result = {
+            "status": "error",
+            "field": str(field),
+            "query": str(query),
+            "error": str(exc),
+            "allowed_fields": list(HISTORY_FIELDS),
+        }
+    print(result)
+    return result
+
+
+def sa_history_status() -> Dict[str, object]:
+    """Return the global history path, schema, and bounded entry counts."""
+
+    try:
+        result = {"status": "ok", **history_summary()}
+    except Exception as exc:
+        result = {"status": "invalid", "error": str(exc)}
+    print(result)
+    return result
+
+
 def _sa_key_next():
     sa_next()
     if _panel is not None:
@@ -1208,6 +1610,103 @@ def sa_unbind_keys() -> Dict[str, object]:
         return {"status": "error", "error": str(exc)}
 
 
+class _HistoryCompletionBinding:
+    """Attach dynamically fuzzy-ranked global history to one Qt text widget."""
+
+    def __init__(self, widget, field: str, multiline: bool = False):
+        self.widget = widget
+        self.field = field
+        self.multiline = bool(multiline)
+        self._accepting = False
+        self.model = QtCore.QStringListModel([], widget)
+        self.completer = QtWidgets.QCompleter(widget)
+        self.completer.setModel(self.model)
+
+        popup_mode = getattr(QtWidgets.QCompleter, "PopupCompletion", None)
+        if popup_mode is None:
+            completion_mode = getattr(QtWidgets.QCompleter, "CompletionMode", None)
+            popup_mode = getattr(completion_mode, "PopupCompletion", None)
+        if popup_mode is not None:
+            self.completer.setCompletionMode(popup_mode)
+        self.completer.setMaxVisibleItems(12)
+
+        case_insensitive = getattr(QtCore.Qt, "CaseInsensitive", None)
+        if case_insensitive is None:
+            case_enum = getattr(QtCore.Qt, "CaseSensitivity", None)
+            case_insensitive = getattr(case_enum, "CaseInsensitive", None)
+        if case_insensitive is not None:
+            self.completer.setCaseSensitivity(case_insensitive)
+
+        if self.multiline:
+            self.completer.setWidget(widget)
+            widget.textChanged.connect(self.refresh)
+        else:
+            widget.setCompleter(self.completer)
+            widget.textEdited.connect(self.refresh)
+        try:
+            self.completer.activated[str].connect(self._accept)
+        except Exception:
+            self.completer.activated.connect(self._accept)
+
+    def _current_text(self) -> str:
+        if self.multiline:
+            return str(self.widget.toPlainText())
+        return str(self.widget.text())
+
+    def refresh(self, *args) -> None:
+        if self._accepting:
+            return
+        try:
+            if not self.widget.hasFocus():
+                return
+            suggestions = _history_suggestions(
+                self.field, self._current_text(), limit=12
+            )
+            self.model.setStringList(suggestions)
+            if not suggestions:
+                self.completer.popup().hide()
+                return
+            # The model is already fuzzy-filtered. An empty completion prefix
+            # prevents QCompleter from applying a second prefix-only filter.
+            self.completer.setCompletionPrefix("")
+            self.completer.popup().setCurrentIndex(self.model.index(0, 0))
+            if self.multiline:
+                rectangle = self.widget.cursorRect()
+                width = self.completer.popup().sizeHintForColumn(0)
+                width += self.completer.popup().verticalScrollBar().sizeHint().width()
+                rectangle.setWidth(max(rectangle.width(), width))
+                self.completer.complete(rectangle)
+            else:
+                self.completer.complete()
+        except Exception:
+            # Completion is an affordance; it must never interrupt annotation.
+            try:
+                self.completer.popup().hide()
+            except Exception:
+                pass
+
+    def _accept(self, completion) -> None:
+        value = completion
+        if not isinstance(value, str) and hasattr(value, "data"):
+            value = value.data()
+        value = str(value)
+        self._accepting = True
+        try:
+            if self.multiline:
+                self.widget.setPlainText(value)
+            else:
+                self.widget.setText(value)
+            self.completer.popup().hide()
+        finally:
+            self._accepting = False
+
+    def detach(self) -> None:
+        try:
+            self.completer.popup().hide()
+        except Exception:
+            pass
+
+
 class StructureAnnotatorPanel(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1215,13 +1714,26 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         self.setMinimumWidth(520)
         self._bucket_inputs: Dict[str, QtWidgets.QLineEdit] = {}
         self._value_buttons: List[QtWidgets.QPushButton] = []
+        self._history_bindings: List[_HistoryCompletionBinding] = []
+        self._bucket_history_bindings: List[_HistoryCompletionBinding] = []
+        self._state_save_timer = QtCore.QTimer(self)
+        self._state_save_timer.setSingleShot(True)
+        self._state_save_timer.timeout.connect(self._save_ui_state)
+        _restore_latest_config_from_history()
         self._build_ui()
+        self._install_history_completers()
         self._sync_from_state()
         self._rebuild_value_controls()
         self._refresh_status()
 
     def closeEvent(self, event) -> None:
         global _panel
+        try:
+            self._state_save_timer.stop()
+            self._sync_to_state()
+            _record_current_config_history()
+        except Exception:
+            traceback.print_exc()
         sa_unbind_keys()
         _panel = None
         super().closeEvent(event)
@@ -1237,6 +1749,7 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         self.dir_browse.clicked.connect(self._browse_dir)
 
         self.pattern_edit = QtWidgets.QLineEdit()
+        self.pattern_edit.editingFinished.connect(self._save_ui_state)
 
         self.load_btn = QtWidgets.QPushButton("Load")
         self.load_btn.clicked.connect(self._load_dataset)
@@ -1271,11 +1784,28 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         self.preload_interval_spin.setSingleStep(50)
         self.preload_interval_spin.setSuffix(" ms")
         self.bg_decompress_cb = QtWidgets.QCheckBox("Background decompress .gz (IO-only)")
+        self.restore_last_cb = QtWidgets.QCheckBox(
+            "Restore last dataset when this panel opens"
+        )
+
+        for checkbox in (
+            self.auto_advance_cb,
+            self.keep_previous_cb,
+            self.prefer_gz_cb,
+            self.skip_annotated_cb,
+            self.preload_enabled_cb,
+            self.bg_decompress_cb,
+            self.restore_last_cb,
+        ):
+            checkbox.stateChanged.connect(self._schedule_state_save)
+        self.preload_ahead_spin.valueChanged.connect(self._schedule_state_save)
+        self.preload_interval_spin.valueChanged.connect(self._schedule_state_save)
 
         self.step_cmd_edit = QtWidgets.QPlainTextEdit()
         self.step_cmd_edit.setPlaceholderText("PyMOL commands; use {object}, {file}, {index}, {count}")
         self.step_cmd_edit.setMaximumBlockCount(200)
         self.step_cmd_edit.setFixedHeight(80)
+        self.step_cmd_edit.textChanged.connect(self._schedule_state_save)
 
         config_layout.addWidget(QtWidgets.QLabel("Label name:"), 0, 0)
         config_layout.addWidget(self.label_edit, 0, 1)
@@ -1297,9 +1827,10 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         preload_row_widget.setLayout(preload_row)
         config_layout.addWidget(preload_row_widget, 7, 1)
         config_layout.addWidget(self.bg_decompress_cb, 8, 1)
+        config_layout.addWidget(self.restore_last_cb, 9, 1)
 
-        config_layout.addWidget(QtWidgets.QLabel("On step (after load):"), 9, 0)
-        config_layout.addWidget(self.step_cmd_edit, 9, 1)
+        config_layout.addWidget(QtWidgets.QLabel("On step (after load):"), 10, 0)
+        config_layout.addWidget(self.step_cmd_edit, 10, 1)
 
         layout.addWidget(config_box)
 
@@ -1357,6 +1888,15 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         footer_row.addStretch()
         layout.addLayout(footer_row)
 
+    def _install_history_completers(self) -> None:
+        self._history_bindings = [
+            _HistoryCompletionBinding(self.dir_edit, "dataset_dir"),
+            _HistoryCompletionBinding(self.pattern_edit, "pattern"),
+            _HistoryCompletionBinding(self.label_edit, "label_name"),
+            _HistoryCompletionBinding(self.values_edit, "values_text"),
+            _HistoryCompletionBinding(self.step_cmd_edit, "step_cmd", multiline=True),
+        ]
+
     def _browse_dir(self) -> None:
         directory = QtWidgets.QFileDialog.getExistingDirectory(
             self, "Select Dataset Directory", self.dir_edit.text() or "."
@@ -1364,8 +1904,22 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         if directory:
             self.dir_edit.setText(directory)
 
-    def _sync_to_state(self) -> None:
-        STATE.dataset_dir = self.dir_edit.text().strip() or "."
+    def _schedule_state_save(self, *args) -> None:
+        self._state_save_timer.start(300)
+
+    def _save_ui_state(self, *args) -> None:
+        self._sync_to_state()
+
+    def _sync_to_state(
+        self, update_directory: bool = True, persist: bool = True
+    ) -> None:
+        if update_directory:
+            requested_dir = self.dir_edit.text().strip() or "."
+            active_dir = _active_dataset_directory()
+            if not active_dir or _path_identity(active_dir) == _path_identity(
+                requested_dir
+            ):
+                STATE.dataset_dir = requested_dir
         STATE.pattern = self.pattern_edit.text().strip() or STRUCTURE_PATTERN
         STATE.label_name = self.label_edit.text().strip() or "quality"
         STATE.values_text = self.values_edit.text().strip() or "Good,Bad"
@@ -1377,9 +1931,12 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         STATE.preload_ahead = int(self.preload_ahead_spin.value())
         STATE.preload_interval_ms = int(self.preload_interval_spin.value())
         STATE.background_decompress_gz = bool(self.bg_decompress_cb.isChecked())
+        STATE.restore_last_dataset = bool(self.restore_last_cb.isChecked())
         STATE.step_cmd = self.step_cmd_edit.toPlainText().strip() or ""
         for value, edit in self._bucket_inputs.items():
             STATE.bucket_cmds[value] = edit.text()
+        if persist:
+            _save_current_dataset_state()
 
     def _sync_from_state(self) -> None:
         self.dir_edit.setText(STATE.dataset_dir or ".")
@@ -1394,11 +1951,28 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         self.preload_ahead_spin.setValue(int(STATE.preload_ahead or 0))
         self.preload_interval_spin.setValue(int(STATE.preload_interval_ms or 250))
         self.bg_decompress_cb.setChecked(bool(STATE.background_decompress_gz))
+        self.restore_last_cb.setChecked(bool(STATE.restore_last_dataset))
         self.step_cmd_edit.setPlainText(STATE.step_cmd or "")
 
     def _load_dataset(self) -> None:
-        self._sync_to_state()
-        sa_load_dir(STATE.dataset_dir, STATE.pattern)
+        target_dir = self.dir_edit.text().strip() or "."
+        requested_pattern = self.pattern_edit.text().strip() or STRUCTURE_PATTERN
+        active_before = _active_dataset_directory()
+        loading_different = not active_before or (
+            _path_identity(active_before) != _path_identity(target_dir)
+        )
+        switching = bool(active_before) and loading_different
+        self._sync_to_state(update_directory=False, persist=not switching)
+        saved_path = dataset_state_path(target_dir)
+        has_saved_state = os.path.isfile(_long_path(saved_path))
+        pattern_override = (
+            "" if has_saved_state and loading_different else requested_pattern
+        )
+        sa_load_dir(target_dir, pattern_override)
+        active_after = _active_dataset_directory()
+        if active_after and _path_identity(active_after) == _path_identity(target_dir):
+            self._sync_from_state()
+            self._rebuild_value_controls(sync_to_state=False)
         self._refresh_status()
 
     def _next(self) -> None:
@@ -1468,9 +2042,14 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
             STATE.undo_history.clear()
         self._refresh_status()
 
-    def _rebuild_value_controls(self) -> None:
-        self._sync_to_state()
+    def _rebuild_value_controls(self, sync_to_state: bool = True) -> None:
+        if sync_to_state:
+            self._sync_to_state()
         values = STATE.values()
+
+        for binding in self._bucket_history_bindings:
+            binding.detach()
+        self._bucket_history_bindings = []
 
         while self.values_layout.count():
             item = self.values_layout.takeAt(0)
@@ -1499,6 +2078,10 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
             edit = QtWidgets.QLineEdit()
             edit.setPlaceholderText("On bucket cmd (optional); e.g. set_name {object}, good_{object}")
             edit.setText(STATE.bucket_cmds.get(value, ""))
+            edit.editingFinished.connect(self._save_ui_state)
+            self._bucket_history_bindings.append(
+                _HistoryCompletionBinding(edit, "bucket_cmd")
+            )
             self._bucket_inputs[value] = edit
             form.addRow(f"{value} cmd:", edit)
 
@@ -1600,14 +2183,18 @@ def __init_plugin__(app=None) -> None:
     addmenuitemqt("Structure Annotator", show_structure_annotator_panel)
 
 
-cmd.extend("sa_load_dir", sa_load_dir)
-cmd.extend("sa_next", sa_next)
-cmd.extend("sa_prev", sa_prev)
-cmd.extend("sa_annotate", sa_annotate)
-cmd.extend("sa_undo", sa_undo)
-cmd.extend("sa_goto", sa_goto)
-cmd.extend("sa_next_unannotated", sa_next_unannotated)
-cmd.extend("sa_export_csv", sa_export_csv)
-cmd.extend("sa_bind_keys", sa_bind_keys)
-cmd.extend("sa_unbind_keys", sa_unbind_keys)
-cmd.extend("show_structure_annotator_panel", show_structure_annotator_panel)
+extend_command(cmd, "sa_load_dir", sa_load_dir)
+extend_command(cmd, "sa_next", sa_next)
+extend_command(cmd, "sa_prev", sa_prev)
+extend_command(cmd, "sa_annotate", sa_annotate)
+extend_command(cmd, "sa_undo", sa_undo)
+extend_command(cmd, "sa_goto", sa_goto)
+extend_command(cmd, "sa_next_unannotated", sa_next_unannotated)
+extend_command(cmd, "sa_export_csv", sa_export_csv)
+extend_command(cmd, "sa_save_state", sa_save_state)
+extend_command(cmd, "sa_state_status", sa_state_status)
+extend_command(cmd, "sa_history_search", sa_history_search)
+extend_command(cmd, "sa_history_status", sa_history_status)
+extend_command(cmd, "sa_bind_keys", sa_bind_keys)
+extend_command(cmd, "sa_unbind_keys", sa_unbind_keys)
+extend_command(cmd, "show_structure_annotator_panel", show_structure_annotator_panel)

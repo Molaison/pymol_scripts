@@ -70,7 +70,9 @@ and Python imports continue to work.
 
 | Status | Surface | Path | Purpose / caveat |
 | --- | --- | --- | --- |
-| Standalone | Host | `pymolplugins/annotation/plugin.py` | Qt annotation/write/undo/export UI. Annotation remains a distinct domain while cursor/key lifecycle reuses canonical navigation infrastructure. |
+| Standalone | Host | `pymolplugins/annotation/plugin.py` | Qt annotation/write/undo/export UI. Annotation remains a distinct domain while cursor/key lifecycle reuses canonical navigation infrastructure; finalized configs restore on reopen and all text inputs use global fuzzy history. |
+| Standalone support | Both | `pymolplugins/annotation/state_store.py` | Versioned atomic dataset-local state at `.pymolplugins/structure_annotator.json`, with Windows hidden-directory support and bounded reads/writes. |
+| Standalone support | WSL/Host Python | `pymolplugins/annotation/history_store.py` | Bounded atomic global config snapshots plus recency/frequency-aware fuzzy field history; `PYMOLPLUGINS_ANNOTATOR_HISTORY` provides an isolation override. |
 | Standalone | Host | `extras/navigation/load_states.py` | Loads a directory as states in one object; this is a separate movie-style use case. |
 | Standalone | Host | `extras/interactions/ligand_environment.py` | Ligand-environment convenience commands; revised to keep generated output scoped, but canonical presets are preferred. |
 | Legacy | Host | `extras/interactions/contacts.py` | Historical good/bad polar-contact plugin with Tk/Qt entry points. |
@@ -108,7 +110,10 @@ and Python imports continue to work.
 - `docs/windows_host_acceptance.md`: required real-PyMOL integration record.
 - `tests/host/host_smoke.py` and `scripts/windows/run_host_smoke.ps1`: automated
   Host fixture/smoke gate; interactive mouse/callback/Qt items remain manual.
-- `docs/validation/windows_host_smoke_2026-07-22.md`: latest reviewed Host
+- `tests/host/annotator_qt_smoke.py`: visible Host-PyQt completion gate using
+  the Python/Qt bundled with Windows PyMOL; types through QtTest and accepts
+  multiline/bucket fuzzy candidates by mouse and keyboard.
+- `docs/validation/windows_host_smoke_2026-07-24.md`: latest reviewed Host
   smoke evidence summary.
 
 When adding a module, record its status and runtime surface here.  Do not label a

@@ -19,16 +19,20 @@ RosettaScripts XML.
 
 ## Status
 
-The 201 canonical Python/fake-PyMOL tests run in WSL. An automated Windows Host
+The 212 canonical Python/fake-PyMOL tests run in WSL. An automated Windows Host
 smoke run also passes on PyMOL 3.1.3.1 with all 63 commands, including
 `matrix_mode=0/1/2`, static CGO/map/measurement followers, group navigation,
 checked object/group command failures, anchor/motif/ligand alignment,
 PCA/cyclic orientation undo, style revert, and exact local interaction cleanup.
+The same Host gate now also covers Structure Annotator dataset/global state,
+Windows hidden-directory behavior, cursor/config restoration, and fuzzy history.
+A separate visible PyQt5 smoke verifies automatic popup display plus mouse and
+keyboard acceptance in the real Structure Annotator widgets.
 Windows PyMOL also reached the live WSL worker through
 localhost forwarding and validated PLIP export identity.  Real mouse movement, callback-owned CGO, Qt
 timeout/cancel, licensed PyRosetta, and PyMOL 2.x compatibility remain separate
 gates.  See [implementation status](docs/implementation_status.md), the
-[Host record](docs/validation/windows_host_smoke_2026-07-22.md), and the
+[Host record](docs/validation/windows_host_smoke_2026-07-24.md), and the
 [Windows Host acceptance checklist](docs/windows_host_acceptance.md).
 
 The following older modules are not canonical entry points:
@@ -125,6 +129,56 @@ one outer single-, double-, or triple-single-quote syntax layer is removed from
 explicit console arguments without decoding backslashes. Quoted selections,
 regexes, command templates, and Windows/UNC paths therefore reach the Python
 adapter unchanged internally.
+
+### Resume Structure Annotator work and search command history
+
+Load the standalone annotation entry from Plugin Manager, or run
+`plugins/structure_annotator.py`, then open **Structure Annotator**. After a
+dataset is loaded, the annotator atomically writes:
+
+```text
+<dataset>/.pymolplugins/structure_annotator.json
+```
+
+This dataset-local file restores the regex, label/values, `On step` command,
+per-bucket commands, preload options, and last file/cursor. Runtime-only PyMOL
+objects, caches, navigation objects, and undo entries are intentionally not
+serialized. A new PyMOL session reopens the most recently finalized dataset by
+default; clear **Restore last dataset when this panel opens** to disable that
+behavior.
+
+Finalized configurations are also stored in the Host user's global history:
+
+```text
+~/.pymolplugins/structure_annotator_history.json
+```
+
+While typing, Directory, Pattern, Label name, Values, On step, and bucket
+command inputs automatically show fuzzy-ranked global candidates. The history
+is de-duplicated, bounded, versioned, and records use count plus recency. It is
+updated when a dataset successfully loads, a configuration is explicitly
+saved or used for annotation, or the panel closes—not for every intermediate
+keystroke.
+
+Useful console diagnostics are:
+
+```pymol
+sa_save_state
+sa_state_status
+sa_history_status
+sa_history_search step_cmd, cartn
+sa_history_search bucket_cmd, evrythng
+```
+
+For isolated automation, set `PYMOLPLUGINS_ANNOTATOR_HISTORY` to an alternate
+history file. Dataset state is executable configuration: `On step` runs after
+an object loads and a bucket command runs after annotation. Only reopen state
+files from datasets you trust.
+
+The reproducible visible Host-Qt check is
+`tests/host/annotator_qt_smoke.py`; run it with the Python executable bundled
+with Windows PyMOL, not WSL Python. The latest exact command and result are in
+[the Host record](docs/validation/windows_host_smoke_2026-07-24.md).
 
 ### Move a group by following one manually moved object
 
@@ -227,7 +281,7 @@ event loop.
 The recorded validation environment completed a real RCSB 1A4W calculation
 with PLIP 3.0.0, including Windows PyMOL export, WSL HTTP analysis,
 exact-ligand filtering, and Host rendering.  See
-[the Host evidence record](docs/validation/windows_host_smoke_2026-07-22.md);
+[the Host evidence record](docs/validation/windows_host_smoke_2026-07-24.md);
 PLIP remains optional.
 
 ## Optional WSL worker

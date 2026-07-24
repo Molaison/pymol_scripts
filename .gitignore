@@ -3,6 +3,7 @@ __pycache__/*
 __pycache__/
 **/__pycache__/
 *.py[cod]
+.pymolplugins/
 
 # Local Python/worker environments
 .venv/

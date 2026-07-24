@@ -1,6 +1,6 @@
 # Implementation Status
 
-Snapshot date: 2026-07-22 (Asia/Shanghai)
+Snapshot date: 2026-07-24 (Asia/Shanghai)
 Specification: [development_specification.md](development_specification.md)
 
 This file separates code existence, WSL evidence, automated Windows Host
@@ -8,9 +8,9 @@ evidence, interactive Host evidence, and optional licensed-backend evidence.
 
 Current evidence anchors:
 
-- WSL: 201 standard-library unit/fake-command tests pass.
+- WSL: 212 standard-library unit/fake-command tests pass.
 - Windows Host: the automated PyMOL 3.1.3.1 record is
-  [automatic pass / manual pending](validation/windows_host_smoke_2026-07-22.md).
+  [automatic pass / manual pending](validation/windows_host_smoke_2026-07-24.md).
 - WSL worker: a real loopback run on Python 3.12.13 returned `status=ok` with
   PLIP 3.0.0 available; Windows Host PyMOL reached that worker through localhost
   forwarding and verified all 63 canonical commands.
@@ -45,6 +45,14 @@ PyMOL 2.x compatibility remains open even when the 3.1.3.1 smoke check passes.
 
 Key lease restoration, third-party rebinding preservation, structured hook
 context/offset, pin clearing, and explicit session replacement are also tested.
+
+### Structure Annotator state and history
+
+| IDs | Status | Evidence and remaining boundary |
+| --- | --- | --- |
+| ANNO-01, ANNO-02 | Host smoke verified (3.1.3.1) + WSL verified | Dataset-local `.pymolplugins/structure_annotator.json` is schema-checked, size-bounded, and atomically replaced. Tests cover first-load creation, independent configs for two datasets, On-step/bucket/preload restoration, relative-file cursor recovery, missing-file fallback, corrupt JSON repair, and exclusion of undo/object/cache state. Host restored `b.pdb`, the complete config, and commands from a quoted path containing spaces; the Windows hidden attribute was set. |
+| ANNO-03 | Host Qt/storage/search + WSL verified | Global history snapshots and six field histories are bounded, de-duplicated, atomically written, corrupt-file quarantined, and fuzzy-ranked by textual relevance plus frequency/recency. Headless PyMOL wrote the global schema through a temporary profile path and resolved `cartn` to the complete command. A separate visible Host PyQt5 smoke created the full panel, observed both popups, accepted On-step by mouse and bucket command by keyboard, and verified 5 fixed plus 2 dynamic completers. A latest snapshot reopens its dataset by default; a fresh-process visual check of the opt-out remains manual. |
+| ANNO-04 | Host smoke verified (3.1.3.1) | `HOST-ANNOTATION-STATE-01` is registered and passed. It uses a quoted directory containing spaces and a temporary global history path, and asserts Windows hidden state, schema/config/cursor restoration, and fuzzy command lookup without polluting the real user profile. Removing `cmd.sync()` from the parser callback eliminated the observed self-wait `wait_queue` timeout on rerun. |
 
 ### Object/group targets
 

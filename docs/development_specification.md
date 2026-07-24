@@ -310,6 +310,63 @@ pp_nav_stop
 - `NAV-05` `screen_boost` 与 `file_management` 不再维护两份独立状态或覆盖不同实现。
 - `NAV-06` PyMOL console string booleans 均按规范解析。
 
+### 5.5 Structure Annotator 可恢复状态与全局历史
+
+Structure Annotator 保留独立的 annotation write/undo/export domain，但配置
+和 cursor 必须跨 PyMOL 会话恢复。每个成功加载的 dataset 原子写入：
+
+```text
+<dataset>/.pymolplugins/structure_annotator.json
+schema = pymolplugins.structure-annotator-state/1.0
+```
+
+dataset-local state 保存 regex pattern、label name、values、`On step`、每个
+bucket command、auto-advance/keep/prefer/skip/preload 配置，以及最后一个相对
+文件名和 index。文件列表、PyMOL managed objects、cache、navigation session、
+annotated-index cache 和 undo stack 都是 runtime state，不得序列化。文件集合
+变化时先按相对文件名恢复；文件消失时才 clamp 到安全 index。
+
+跨 dataset 的最终配置另存为：
+
+```text
+~/.pymolplugins/structure_annotator_history.json
+schema = pymolplugins.structure-annotator-history/1.0
+```
+
+全局历史同时维护完整 config snapshots 与字段级去重记录。字段固定为
+`dataset_dir`、`pattern`、`label_name`、`values_text`、`step_cmd` 和
+`bucket_cmd`；候选综合 prefix、substring、subsequence、相似度、使用次数和
+recentness 排序。Qt 输入框在用户输入时动态显示 fuzzy candidates。全局历史
+只在 dataset 成功 load、显式 `sa_save_state`、实际 annotation 使用配置或关闭
+panel 时记账；300 ms dataset-state debounce 不得把每个输入片段写成历史。
+
+最新完整 snapshot 是新 PyMOL 会话寻找“上次 dataset”的指针。打开 panel
+时先恢复 config，再在 `restore_last_dataset=true` 且目录存在时调用同一个
+`sa_load_dir` 恢复文件和 cursor；UI checkbox 可主动关闭自动加载。测试或
+多 profile 部署可用 `PYMOLPLUGINS_ANNOTATOR_HISTORY` 覆盖全局路径。
+
+两类 JSON 都必须 versioned、bounded、UTF-8 和 temp-file + fsync +
+`os.replace` 原子写入。Windows 除 dot-directory 外还设置 hidden attribute。
+损坏的 dataset state 只警告并重建；损坏的 global history 在下次 finalized
+write 前改名为 `.corrupt-*` 再重建，不能阻止 annotation。
+
+命令面：
+
+```pymol
+sa_save_state
+sa_state_status
+sa_history_status
+sa_history_search field, query, limit=12
+```
+
+安全边界：恢复的 `On step` 在 object load 后执行，bucket command 在 annotate
+后执行，因此 dataset state 是 executable configuration，只能加载可信目录。
+
+- `ANNO-01` 首次成功 load 创建隐藏、版本化、原子且有大小上限的 dataset state。
+- `ANNO-02` 新会话恢复完整配置、相对文件 cursor；undo/runtime object state 不恢复。
+- `ANNO-03` 全局 snapshots/字段历史去重、有上限；输入时 fuzzy 搜索，损坏历史可恢复。
+- `ANNO-04` Windows Host 真实 `cmd.do` 可加载含空格目录，并验证 state/history JSON、hidden attribute、cursor 与 command 恢复；另用 PyMOL bundled Python/PyQt 的 visible panel 验证 popup 自动出现及鼠标/键盘接受完整候选。
+
 ## 6. Specification：group follow 刚体变换
 
 ### 6.1 Commands
