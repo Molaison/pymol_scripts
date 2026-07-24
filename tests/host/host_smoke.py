@@ -9,6 +9,7 @@ recorded as manual; they are never converted into automatic passes.
 
 from __future__ import annotations
 
+import csv
 import datetime
 import hashlib
 import importlib
@@ -29,7 +30,7 @@ from pymol.cgo import COLOR, SPHERE
 
 
 SCHEMA = "pymolplugins.host-smoke/1.0"
-HARNESS_VERSION = "1.2.0"
+HARNESS_VERSION = "1.3.0"
 PREFIX_ROOT = "pphs"
 TRANSLATION = (1.25, -2.0, 0.5)
 MATRIX_MODES = (0, 1, 2)
@@ -1420,10 +1421,14 @@ def _annotation_state_check(suite: HostSmokeSuite) -> Dict[str, Any]:
 
     details: Dict[str, Any] = {}
     previous_history_path = os.environ.get(HISTORY_ENVIRONMENT_VARIABLE)
+    previous_mapping_path = os.environ.get("PYMOLPLUGINS_ANNOTATOR_MAPPINGS")
     try:
         with tempfile.TemporaryDirectory(prefix="PymolPluginsHostState-") as root:
             os.environ[HISTORY_ENVIRONMENT_VARIABLE] = os.path.join(
                 root, ".pymolplugins", "structure_annotator_history.json"
+            )
+            os.environ["PYMOLPLUGINS_ANNOTATOR_MAPPINGS"] = os.path.join(
+                root, ".pymolplugins", "path_mappings.json"
             )
             dataset = os.path.join(root, "dataset with spaces")
             os.mkdir(dataset)
@@ -1522,7 +1527,7 @@ def _annotation_state_check(suite: HostSmokeSuite) -> Dict[str, Any]:
                         panel._bucket_history_bindings
                     )
                     _require(
-                        qt_completion_contract["panel_history_bindings"] == 5
+                        qt_completion_contract["panel_history_bindings"] == 9
                         and qt_completion_contract["panel_bucket_bindings"] == 2,
                         "annotation panel did not install every history completer",
                         qt_completion_contract,
@@ -1607,11 +1612,283 @@ def _annotation_state_check(suite: HostSmokeSuite) -> Dict[str, Any]:
             os.environ.pop(HISTORY_ENVIRONMENT_VARIABLE, None)
         else:
             os.environ[HISTORY_ENVIRONMENT_VARIABLE] = previous_history_path
+        if previous_mapping_path is None:
+            os.environ.pop("PYMOLPLUGINS_ANNOTATOR_MAPPINGS", None)
+        else:
+            os.environ["PYMOLPLUGINS_ANNOTATOR_MAPPINGS"] = previous_mapping_path
         try:
             annotation.sa_unbind_keys()
             annotation._delete_managed_objects(False)
             annotation._reset_bg_cache()
             annotation.STATE.files = []
+            annotation.STATE.navigation_session = None
+            annotation.STATE.current_object = None
+        except Exception:
+            traceback.print_exc()
+    return details
+
+
+def _annotation_csv_check(suite: HostSmokeSuite) -> Dict[str, Any]:
+    """Exercise CSV row identity and persistence through real Host PyMOL."""
+
+    annotation = importlib.import_module("pymolplugins.annotation.plugin")
+    from pymolplugins.annotation.annotation_store import ANNOTATION_SCHEMA
+    from pymolplugins.annotation.history_store import HISTORY_ENVIRONMENT_VARIABLE
+    from pymolplugins.annotation.state_store import STATE_SCHEMA
+
+    previous_history_path = os.environ.get(HISTORY_ENVIRONMENT_VARIABLE)
+    previous_mapping_path = os.environ.get("PYMOLPLUGINS_ANNOTATOR_MAPPINGS")
+    details: Dict[str, Any] = {}
+    try:
+        with tempfile.TemporaryDirectory(prefix="PymolPlugins Host CSV ") as root:
+            drive, _ = os.path.splitdrive(root)
+            _require(
+                os.name == "nt"
+                and sys.platform == "win32"
+                and bool(drive)
+                and not root.startswith("\\\\"),
+                "CSV smoke fixture must be on a Windows-local filesystem",
+                {"root": root, "drive": drive, "platform": sys.platform},
+            )
+            os.environ[HISTORY_ENVIRONMENT_VARIABLE] = os.path.join(
+                root, ".pymolplugins", "structure_annotator_history.json"
+            )
+            os.environ["PYMOLPLUGINS_ANNOTATOR_MAPPINGS"] = os.path.join(
+                root, ".pymolplugins", "path_mappings.json"
+            )
+
+            dataset = os.path.join(root, "CSV dataset with spaces")
+            os.mkdir(dataset)
+            structure = os.path.join(dataset, "shared structure with spaces.pdb")
+            structure_text = (
+                "ATOM      1  CA  GLY A   1       0.000   0.000   0.000"
+                "  1.00 20.00           C\nEND\n"
+            )
+            with open(structure, "w", encoding="ascii", newline="\n") as handle:
+                handle.write(structure_text)
+            with open(structure, "rb") as handle:
+                original_structure = handle.read()
+
+            csv_path = os.path.join(dataset, "scores with spaces.csv")
+            rows = (
+                (structure, "design_a", "0.91", "duplicate row, high score"),
+                (structure, "design_b", "0.37", "duplicate row, low score"),
+            )
+            with open(csv_path, "w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(("structure_path", "case", "iptm", "note"))
+                writer.writerows(rows)
+            with open(csv_path, "rb") as handle:
+                original_csv = handle.read()
+
+            annotation.STATE.preload_enabled = False
+            annotation.STATE.background_decompress_gz = False
+            annotation.STATE.cache_enabled = False
+            annotation.STATE.auto_advance = False
+            annotation.STATE.keep_previous = False
+            annotation.STATE.label_name = "host_csv_review"
+            annotation.STATE.values_text = "Keep,Reject"
+            annotation.STATE.step_cmd = ""
+            annotation.STATE.bucket_cmds = {}
+
+            load_command = 'sa_load_csv "%s", structure_path, case' % csv_path
+            cmd.do(load_command)
+            entries = list(annotation.STATE.entries)
+            _require(
+                annotation.STATE.source_mode == "csv"
+                and len(entries) == 2
+                and len({entry.id for entry in entries}) == 2,
+                "STRICT-parser CSV command did not load two independent rows",
+                {
+                    "command": load_command,
+                    "source_mode": annotation.STATE.source_mode,
+                    "entry_count": len(entries),
+                    "entry_ids": [entry.id for entry in entries],
+                },
+            )
+            canonical_structure = os.path.normcase(os.path.realpath(structure))
+            _require(
+                all(
+                    os.path.normcase(os.path.realpath(path)) == canonical_structure
+                    for path in annotation.STATE.files
+                ),
+                "duplicate CSV rows did not retain their shared structure path",
+                {"expected": structure, "files": annotation.STATE.files},
+            )
+            metadata = [dict(entry.metadata) for entry in entries]
+            _require(
+                [item.get("case") for item in metadata] == ["design_a", "design_b"]
+                and [item.get("iptm") for item in metadata] == ["0.91", "0.37"]
+                and metadata[0].get("note") != metadata[1].get("note"),
+                "CSV rows lost their independent metadata",
+                {"metadata": metadata},
+            )
+
+            first_id, second_id = entries[0].id, entries[1].id
+            annotation.sa_annotate("Keep")
+            annotation.sa_goto(2)
+            annotation.sa_annotate("Reject")
+            store = annotation.STATE.row_annotation_store
+            _require(store is not None, "CSV row annotation store was not created")
+            _require(
+                store.get(first_id, "host_csv_review") == "Keep"
+                and store.get(second_id, "host_csv_review") == "Reject",
+                "duplicate structure rows did not retain independent annotations",
+                {
+                    "first": store.annotations_for(first_id),
+                    "second": store.annotations_for(second_id),
+                },
+            )
+            sidecar_path = store.path
+            _require(
+                os.path.isfile(sidecar_path)
+                and os.path.dirname(sidecar_path).endswith(".pymolplugins"),
+                "CSV annotations were not written to the hidden row sidecar",
+                {"sidecar_path": sidecar_path},
+            )
+            with open(sidecar_path, "r", encoding="utf-8") as handle:
+                sidecar_events = [json.loads(line) for line in handle if line.strip()]
+            _require(
+                len(sidecar_events) == 2
+                and all(event.get("schema") == ANNOTATION_SCHEMA for event in sidecar_events)
+                and {event.get("entry_id") for event in sidecar_events}
+                == {first_id, second_id},
+                "row sidecar does not contain the two independent durable events",
+                {"events": sidecar_events},
+            )
+
+            export_path = os.path.join(dataset, "merged review with spaces.csv")
+            exported = annotation.sa_export_csv(export_path)
+            _require(
+                exported is not None and os.path.isfile(export_path),
+                "merged CSV export was not created",
+                {"requested": export_path, "returned": exported},
+            )
+            with open(export_path, "r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                exported_rows = list(reader)
+                exported_fields = list(reader.fieldnames or [])
+            _require(
+                exported_fields
+                == [
+                    "structure_path",
+                    "case",
+                    "iptm",
+                    "note",
+                    "pymol_annotation_host_csv_review",
+                ]
+                and [row["structure_path"] for row in exported_rows]
+                == [structure, structure]
+                and [row["case"] for row in exported_rows]
+                == ["design_a", "design_b"]
+                and [row["iptm"] for row in exported_rows] == ["0.91", "0.37"]
+                and [row["pymol_annotation_host_csv_review"] for row in exported_rows]
+                == ["Keep", "Reject"],
+                "merged export did not preserve source metadata and row annotations",
+                {"fields": exported_fields, "rows": exported_rows},
+            )
+
+            state_path = annotation.sa_save_state()
+            _require(
+                bool(state_path and os.path.isfile(state_path)),
+                "CSV dataset state file was not created",
+                {"state_path": state_path},
+            )
+            with open(str(state_path), "r", encoding="utf-8") as handle:
+                state_payload = json.load(handle)
+            _require(
+                state_payload.get("schema") == STATE_SCHEMA
+                and (state_payload.get("source") or {}).get("mode") == "csv"
+                and (state_payload.get("position") or {}).get("index") == 1
+                and (state_payload.get("position") or {}).get("entry_id") == second_id,
+                "CSV state did not persist source mode and stable row cursor",
+                state_payload,
+            )
+
+            annotation.STATE.label_name = "wrong"
+            annotation.STATE.values_text = "wrong"
+            annotation.STATE.display_columns = []
+            annotation.STATE.index = 0
+            cmd.do(load_command)
+            restored_entry = annotation.STATE.current_entry()
+            restored_store = annotation.STATE.row_annotation_store
+            _require(
+                annotation.STATE.source_mode == "csv"
+                and annotation.STATE.label_name == "host_csv_review"
+                and annotation.STATE.index == 1
+                and restored_entry is not None
+                and restored_entry.id == second_id
+                and annotation.STATE.display_columns == ["case", "iptm", "note"]
+                and restored_store is not None
+                and restored_store.get(first_id, "host_csv_review") == "Keep"
+                and restored_store.get(second_id, "host_csv_review") == "Reject",
+                "CSV reload did not restore configuration, cursor, metadata, and sidecar",
+                {
+                    "label": annotation.STATE.label_name,
+                    "index": annotation.STATE.index,
+                    "entry_id": restored_entry.id if restored_entry else None,
+                    "display_columns": annotation.STATE.display_columns,
+                },
+            )
+
+            with open(structure, "rb") as handle:
+                final_structure = handle.read()
+            with open(csv_path, "rb") as handle:
+                final_csv = handle.read()
+            _require(
+                final_structure == original_structure
+                and b"PYMOL_ANNOTATOR" not in final_structure,
+                "CSV annotation modified the source structure file",
+                {
+                    "before_sha256": hashlib.sha256(original_structure).hexdigest(),
+                    "after_sha256": hashlib.sha256(final_structure).hexdigest(),
+                },
+            )
+            _require(
+                final_csv == original_csv,
+                "merged export or state restore modified the source CSV",
+                {
+                    "before_sha256": hashlib.sha256(original_csv).hexdigest(),
+                    "after_sha256": hashlib.sha256(final_csv).hexdigest(),
+                },
+            )
+            details = {
+                "load_command": load_command,
+                "windows_local_root": root,
+                "csv_path": csv_path,
+                "structure_path": structure,
+                "duplicate_path_count": len(annotation.STATE.files),
+                "entry_ids": [first_id, second_id],
+                "metadata": metadata,
+                "sidecar_path": sidecar_path,
+                "sidecar_schema": ANNOTATION_SCHEMA,
+                "sidecar_event_count": len(sidecar_events),
+                "export_path": export_path,
+                "export_fields": exported_fields,
+                "state_path": state_path,
+                "state_schema": state_payload.get("schema"),
+                "restored_entry_id": restored_entry.id if restored_entry else None,
+                "source_structure_sha256": hashlib.sha256(final_structure).hexdigest(),
+                "source_csv_sha256": hashlib.sha256(final_csv).hexdigest(),
+            }
+    finally:
+        if previous_history_path is None:
+            os.environ.pop(HISTORY_ENVIRONMENT_VARIABLE, None)
+        else:
+            os.environ[HISTORY_ENVIRONMENT_VARIABLE] = previous_history_path
+        if previous_mapping_path is None:
+            os.environ.pop("PYMOLPLUGINS_ANNOTATOR_MAPPINGS", None)
+        else:
+            os.environ["PYMOLPLUGINS_ANNOTATOR_MAPPINGS"] = previous_mapping_path
+        try:
+            annotation.sa_unbind_keys()
+            annotation._delete_managed_objects(False)
+            annotation._reset_bg_cache()
+            annotation.STATE.dataset = None
+            annotation.STATE.all_entries = []
+            annotation.STATE.entries = []
+            annotation.STATE.files = []
+            annotation.STATE.row_annotation_store = None
             annotation.STATE.navigation_session = None
             annotation.STATE.current_object = None
         except Exception:
@@ -1699,6 +1976,7 @@ def pp_host_smoke(output_path: str = "", keep_fixtures: Any = "") -> Dict[str, A
         suite.run_check("HOST-INTERACTION-01", "local interactions and exact manifest clear", lambda: _interaction_check(suite))
         suite.run_check("HOST-PLIP-EXPORT-01", "PLIP PDB atom identity and setting restoration", lambda: _plip_export_check(suite))
         suite.run_check("HOST-ANNOTATION-STATE-01", "annotator dataset state and global fuzzy history", lambda: _annotation_state_check(suite))
+        suite.run_check("HOST-ANNOTATION-CSV-01", "CSV metadata, row annotations, export, and restore", lambda: _annotation_csv_check(suite))
     finally:
         cleanup = suite.cleanup()
     record = suite.result(cleanup)

@@ -1,14 +1,15 @@
 # PyMOL Plugins 统一体验改造 Specification
 
-状态：核心 implementation 与真实 PLIP 链路已完成；交互式 Host、真实 ANVIL 与合法 PyRosetta 验收仍开放
-日期：2026-07-22
+状态：核心 implementation、CSV Structure Annotator 与真实 PLIP 链路已完成；真实 ANVIL、合法 PyRosetta、PyMOL 2.x 与剩余手工交互验收仍开放
+日期：2026-07-25
 目标运行面：Windows Host PyMOL 2.x（Qt）
 开发与外部计算面：WSL2
 
 当前证据与未完成边界见
 [implementation_status.md](implementation_status.md)。PyMOL 3.1.3.1 的自动
-Host smoke 与 PLIP 3.0.0 数值/渲染链路已通过，但不替代 PyMOL 2.x、真实
-鼠标/callback/Qt、用户提供的 ANVIL，以及合法安装的 PyRosetta 数值验收。
+Host smoke、真实 Qt widget smoke、`K:` FUSE/cache、WSL staging 与 PLIP 3.0.0
+数值/渲染链路已通过，但不替代 PyMOL 2.x、真实鼠标/callback、用户提供的
+ANVIL，以及合法安装的 PyRosetta 数值验收。
 
 ## 1. 目标与边界
 
@@ -316,34 +317,40 @@ Structure Annotator 保留独立的 annotation write/undo/export domain，但配
 和 cursor 必须跨 PyMOL 会话恢复。每个成功加载的 dataset 原子写入：
 
 ```text
-<dataset>/.pymolplugins/structure_annotator.json
-schema = pymolplugins.structure-annotator-state/1.0
+<directory-dataset>/.pymolplugins/structure_annotator.json
+schema = pymolplugins.structure-annotator-state/2.0
 ```
 
-dataset-local state 保存 regex pattern、label name、values、`On step`、每个
-bucket command、auto-advance/keep/prefer/skip/preload 配置，以及最后一个相对
-文件名和 index。文件列表、PyMOL managed objects、cache、navigation session、
-annotated-index cache 和 undo stack 都是 runtime state，不得序列化。文件集合
-变化时先按相对文件名恢复；文件消失时才 clamp 到安全 index。
+dataset-local state 保存 source descriptor、regex pattern、label name、values、
+`On step`、每个 bucket command、auto-advance/keep/prefer/skip/preload/cache
+配置，以及最后一个 entry ID、相对文件名和 index。CSV source 使用同目录下按
+CSV basename 隔离的 `structure_annotator.<csv-id>.json`，并额外保存 path/ID/
+display columns、encoding/delimiter、mapping profile、relative base、WSL staging
+root/alias、filter 和 sort。文件列表、PyMOL managed objects、materialized cache、
+navigation session、annotated-index cache 和 undo stack 都是 runtime state，不得
+序列化。数据集变化时先按稳定 entry ID 或相对文件名恢复；目标消失时才 clamp
+到安全 index。version 1 directory state 可读取迁移，但新写入一律是 version 2。
 
 跨 dataset 的最终配置另存为：
 
 ```text
 ~/.pymolplugins/structure_annotator_history.json
-schema = pymolplugins.structure-annotator-history/1.0
+schema = pymolplugins.structure-annotator-history/2.0
 ```
 
-全局历史同时维护完整 config snapshots 与字段级去重记录。字段固定为
-`dataset_dir`、`pattern`、`label_name`、`values_text`、`step_cmd` 和
-`bucket_cmd`；候选综合 prefix、substring、subsequence、相似度、使用次数和
-recentness 排序。Qt 输入框在用户输入时动态显示 fuzzy candidates。全局历史
-只在 dataset 成功 load、显式 `sa_save_state`、实际 annotation 使用配置或关闭
-panel 时记账；300 ms dataset-state debounce 不得把每个输入片段写成历史。
+全局历史同时维护完整 config snapshots 与字段级去重记录。字段包括
+`dataset_dir`、`csv_path`、`source_mode`、`path_column`、`id_column`、
+`display_columns`、`mapping_profile`、`pattern`、`label_name`、`values_text`、
+`step_cmd` 和 `bucket_cmd`；候选综合 prefix、substring、subsequence、相似度、
+使用次数和 recentness 排序。Qt 输入框在用户输入时动态显示 fuzzy candidates。
+全局历史只在 source 成功 load、显式 `sa_save_state`、实际 annotation 使用配置
+或关闭 panel 时记账；300 ms dataset-state debounce 不得把每个输入片段写成历史。
 
-最新完整 snapshot 是新 PyMOL 会话寻找“上次 dataset”的指针。打开 panel
-时先恢复 config，再在 `restore_last_dataset=true` 且目录存在时调用同一个
-`sa_load_dir` 恢复文件和 cursor；UI checkbox 可主动关闭自动加载。测试或
-多 profile 部署可用 `PYMOLPLUGINS_ANNOTATOR_HISTORY` 覆盖全局路径。
+最新完整 snapshot 是新 PyMOL 会话寻找“上次 source”的指针。打开 panel
+时先恢复 config，再在 `restore_last_dataset=true` 且 source 存在时调用相同的
+`sa_load_dir` 或 `sa_load_csv` 恢复 entries 和 cursor；UI checkbox 可主动关闭
+自动加载。测试或多 profile 部署可用 `PYMOLPLUGINS_ANNOTATOR_HISTORY` 覆盖
+全局路径。
 
 两类 JSON 都必须 versioned、bounded、UTF-8 和 temp-file + fsync +
 `os.replace` 原子写入。Windows 除 dot-directory 外还设置 hidden attribute。
@@ -367,12 +374,90 @@ sa_history_search field, query, limit=12
 - `ANNO-03` 全局 snapshots/字段历史去重、有上限；输入时 fuzzy 搜索，损坏历史可恢复。
 - `ANNO-04` Windows Host 真实 `cmd.do` 可加载含空格目录，并验证 state/history JSON、hidden attribute、cursor 与 command 恢复；另用 PyMOL bundled Python/PyQt 的 visible panel 验证 popup 自动出现及鼠标/键盘接受完整候选。
 
+### 5.6 Structure Annotator CSV、路径映射与本地缓存
+
+CSV 模式必须把每一行建模为独立 `AnnotationEntry`，而不是按 structure path
+去重。source CSV 始终只读；原始 header、row values、quoted newline、physical
+row number 和 metadata 必须保留。path column 为精确 header，ID column 可选但
+若指定必须非空且唯一；没有 ID 时用 CSV basename namespace、raw path 与重复
+occurrence 生成稳定 entry ID。不同 basename 的 CSV 不共享 row identity；CSV
+和其 `.pymolplugins` 一起移动或通过 `K:`/UNC/WSL alias 访问时 identity 保持。
+
+控制面：
+
+```pymol
+sa_csv_preview csv_path, path_column, id_column="", display_columns="",
+               encoding=utf-8-sig, delimiter=auto, mapping_profile=x_k,
+               source_base="", stage_root="", stage_alias=""
+sa_load_csv csv_path, path_column=structure_path, id_column="", ...
+sa_filter query="", sort_column="", descending=0
+sa_mapping_list
+sa_mapping_add profile, source_prefix, target_prefix, provider=mapped,
+               priority=0, require_exists=1, case_sensitive=1
+sa_mapping_remove profile, source_prefix=""
+sa_cache_status include_entries=0
+sa_cache_clear force=0
+```
+
+`sa_csv_preview` 是严格只读预检：可读取 CSV、mapping store 和远端 `stage/stat`，
+但不得创建/quarantine mapping store，不得写 state/history/annotation，不得改变
+active dataset、cursor 或 PyMOL scene。Preview table 有独立 source token；点击
+preview row 只展示 metadata，不能导航旧数据集。Load 必须先解析、resolve、
+materialize 当前 entry，随后事务式 park 旧 managed objects；新对象成功后删除
+parked objects，任何失败完整恢复旧 source、cursor、enabled scene 和
+`keep_previous` 状态。
+
+路径解析优先级固定为：Windows drive/UNC direct、CSV-relative candidate、
+longest-prefix POSIX mapping。候选必须存在、可读且为 regular file；missing、
+unreadable、ambiguous、invalid 和 transport error 保留为不同 row status。内置
+`x_k` profile 将 `/xcfhome/zpzeng/mount_local`、`/xcfhome/zpzeng`、literal `~/`
+映射到 `K:\`。mapping profile 是 bounded/versioned 的全局配置；Preview 对缺失
+store 只在内存中使用默认值。
+
+默认启用 Windows-local persistent structure cache，默认上限 5 GiB/5000 项，
+根目录可由 `PYMOLPLUGINS_STRUCTURE_CACHE_DIR` 覆盖。mapped/UNC、环境变量
+`PYMOLPLUGINS_REMOTE_DRIVES` 指定的 drive（默认 `K`）和 gzip source 使用
+cache；identity 包含 provider、规范化后的实际 resolved physical target、size、
+mtime、可选 hash/version token。不同 Linux alias 映射到同一个物理 `K:` 文件
+时共享 cache key，不得以 raw CSV spelling 产生重复副本。copy/decompress 只在线程
+中做 I/O；任何 `cmd.*` load、pin 和 scene mutation 回到 PyMOL main thread。
+
+WSL-only structure 使用显式 opt-in staging。worker 只允许启动参数
+`--stage-root ALIAS=ABSOLUTE_ROOT` 注册的 regular file，Host 只发送 alias 与
+canonical relative path。顺序固定为 `stage/stat -> cache lookup -> stage/file on
+miss`；下载完成后必须使用 response 的完整 `v1-<64-hex>` metadata identity
+token 建 key，不能盲用较早的 stat identity。该 token 是
+device/inode/size/mtime/mode 的摘要，不是 content hash；它能识别通常的替换或
+metadata 变化，但不能识别刻意保留全部这些字段的原位内容改写。每次下载使用
+独立临时目录，验证 schema/root/size/identity、拒绝 redirect，并以 adjacent
+`.part + fsync + os.replace` 发布；worker 不提供 list/write/delete/shell surface。
+
+CSV annotation 是按 `(entry_id, label)` 的 append-only JSONL sidecar：
+
+```text
+<csv-parent>/.pymolplugins/
+  structure_annotator.<csv-id>.annotations.jsonl
+```
+
+每个完整 event `flush + fsync`；尾部未换行的 torn event 可忽略/修复，完整坏行
+必须报错。`sa_undo` 追加 undo event，不重写 source CSV。`sa_export_csv` 拒绝覆盖
+source，原样保留 source rows，并写 collision-safe `pymol_annotation_<label>` 列；
+export 必须可再次 import，且重复 path 的 annotation 仍保持独立。
+
+- `ANNO-CSV-01` UTF-8 BOM、auto/explicit delimiter、ragged/duplicate/empty row、typed score、quoted newline 与 duplicate path 行语义确定。
+- `ANNO-CSV-02` Preview 不写、不换 scene；load/filter/sort 的成功切换与所有失败路径均事务回滚。
+- `ANNO-CSV-03` per-CSV v2 state 恢复 parser/mapping/staging/view/cursor；新 CSV 不继承上一个 CSV 的 ID/display/delimiter/base/staging 配置。ID/base/staging 用显式空字符串清空；display columns 的空字符串表示 auto，显式 `[]` 才表示无 display column。
+- `ANNO-CSV-04` JSONL annotation、undo、source-preserving merged export 与 re-import 通过；source CSV/PDB bytes 不变。
+- `ANNO-CSV-05` 默认 `x_k` 三个 alias 与 direct `K:` 在真实 Windows FUSE drive 上 resolve；mapped aliases 共享 cold/warm Windows-local cache。
+- `ANNO-CSV-06` 真实 WSL worker 的独立 client/cache/materializer E2E 只出现 `stat -> file -> stat`，第二次以完整 metadata token 命中重开的 persistent cache；controller load 复用刚完成的 resolve stat，错误 Bearer、missing 和 containment failure 被拒绝。
+- `ANNO-CSV-07` Windows PyMOL `cmd.do` 含空格路径完成 load/annotate/undo/export/restore；visible Qt smoke 验证 Source/Annotate/Scores 与 Preview source isolation。
+
 ## 6. Specification：group follow 刚体变换
 
 ### 6.1 Commands
 
 ```pymol
-pp_follow_arm driver, group="", followers="", cgo_policy=static,
+pp_follow_arm driver, group="", followers="", cgo_policy=skip_callback,
               allow_external_changes=0
 pp_follow_apply
 pp_follow_rebase
@@ -509,7 +594,7 @@ pp_membrane_slab selection=all, axis_source=pca|cyclic|vector|two_points|anvil,
                  padding=8, name=pp_membrane, color=gray70,
                  transparency=0.65
 pp_membrane_from_anvil input_or_selection, executable="",
-                       arguments="{input}", timeout=120, name=pp_membrane
+                       arguments="{input}", timeout=120, name=pp_membrane_anvil
 ```
 
 ### 8.3 PCA
@@ -800,6 +885,9 @@ cache、Windows/WSL path、PLIP/Rosetta/ANVIL endpoints、optional dependencies
 
 - 已实现：interaction manifest、alignment record 和 remote result 保存 input
   fingerprint/参数/backend；alignment commit/undo 对 stale 状态拒绝覆盖。
+- 已实现：Structure Annotator 的 mapped/remote-drive/gzip/WSL-stage structure
+  输入使用 resolved physical identity 或完整 worker version token 的原子持久
+  cache；这只缓存 loadable structure，不缓存分析结果。
 - 后续：PLIP/Rosetta 按 input hash + backend version + parameters 建持久 cache，
   并对 session 重开后的 stale result 提示。
 
@@ -832,6 +920,8 @@ cache、Windows/WSL path、PLIP/Rosetta/ANVIL endpoints、optional dependencies
 
 - pure math、Kabsch、TTT、sequence index、cyclic axis、membrane/ANVIL parser；
 - navigation state、manifest、参数 parser；
+- CSV/directory source model、path mapping、per-source state/history、JSONL row
+  annotation、cache/materializer、worker staging containment 与 HTTP client；
 - fake-cmd mutation boundary、preview/commit/undo；
 - interaction/Rosetta JSON schema 和 HTTP mock。
 

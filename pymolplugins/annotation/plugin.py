@@ -4,13 +4,17 @@ import copy
 import datetime
 import gzip
 import hashlib
+import json
+import ntpath
 import os
+import posixpath
 import re
 import shutil
 import tempfile
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field, fields
-from typing import Dict, List, Optional
+from dataclasses import dataclass, field, fields, replace
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 import traceback
 import sys
 
@@ -28,10 +32,55 @@ try:
     )
     from pymolplugins.annotation.state_store import (
         StateStoreError,
+        dataset_state_directory,
         dataset_state_path,
         read_dataset_state,
         write_dataset_state,
     )
+    from pymolplugins.annotation.annotation_store import (
+        RowAnnotationStore,
+        annotation_sidecar_path,
+    )
+    from pymolplugins.annotation.cache import (
+        PersistentStructureCache,
+        SourceIdentity,
+    )
+    from pymolplugins.annotation.mapping_store import (
+        DEFAULT_PROFILE_NAME,
+        MappingStoreError,
+        get_mapping_profile,
+        get_mapping_profile_readonly,
+        list_mapping_profiles,
+        mapping_store_status,
+        remove_mapping_profile,
+        upsert_mapping_profile,
+    )
+    from pymolplugins.annotation.materializer import (
+        CopyMaterializer,
+        DirectMaterializer,
+        MaterializedStructure,
+    )
+    from pymolplugins.annotation.model import (
+        AVAILABILITY_AVAILABLE,
+        AVAILABILITY_ERROR,
+        AVAILABILITY_INVALID,
+        AVAILABILITY_MISSING,
+        AVAILABILITY_UNCHECKED,
+        AVAILABILITY_UNREADABLE,
+        AnnotationDataset,
+        AnnotationEntry,
+    )
+    from pymolplugins.annotation.path_resolver import (
+        PathResolution,
+        PathResolver,
+    )
+    from pymolplugins.annotation.sources import (
+        AUTO_DELIMITER,
+        DEFAULT_ENCODING,
+        CsvDatasetSource,
+    )
+    from pymolplugins.remote.staging import download_staged_file, stat_staged_file
+    from pymolplugins.remote.client import WorkerRequestError
     from pymolplugins.navigation.model import (
         NavigationEntry,
         NavigationSession,
@@ -53,10 +102,58 @@ except ImportError:
     )
     from pymolplugins.annotation.state_store import (  # type: ignore
         StateStoreError,
+        dataset_state_directory,
         dataset_state_path,
         read_dataset_state,
         write_dataset_state,
     )
+    from pymolplugins.annotation.annotation_store import (  # type: ignore
+        RowAnnotationStore,
+        annotation_sidecar_path,
+    )
+    from pymolplugins.annotation.cache import (  # type: ignore
+        PersistentStructureCache,
+        SourceIdentity,
+    )
+    from pymolplugins.annotation.mapping_store import (  # type: ignore
+        DEFAULT_PROFILE_NAME,
+        MappingStoreError,
+        get_mapping_profile,
+        get_mapping_profile_readonly,
+        list_mapping_profiles,
+        mapping_store_status,
+        remove_mapping_profile,
+        upsert_mapping_profile,
+    )
+    from pymolplugins.annotation.materializer import (  # type: ignore
+        CopyMaterializer,
+        DirectMaterializer,
+        MaterializedStructure,
+    )
+    from pymolplugins.annotation.model import (  # type: ignore
+        AVAILABILITY_AVAILABLE,
+        AVAILABILITY_ERROR,
+        AVAILABILITY_INVALID,
+        AVAILABILITY_MISSING,
+        AVAILABILITY_UNCHECKED,
+        AVAILABILITY_UNREADABLE,
+        AnnotationDataset,
+        AnnotationEntry,
+    )
+    from pymolplugins.annotation.path_resolver import (  # type: ignore
+        PathResolution,
+        PathResolver,
+    )
+    from pymolplugins.annotation.sources import (  # type: ignore
+        AUTO_DELIMITER,
+        DEFAULT_ENCODING,
+        CsvDatasetSource,
+    )
+    from pymolplugins.remote.staging import (  # type: ignore
+        download_staged_file,
+        stat_staged_file,
+    )
+    from pymolplugins.remote.client import WorkerRequestError  # type: ignore
     from pymolplugins.navigation.model import (  # type: ignore
         NavigationEntry,
         NavigationSession,
@@ -321,8 +418,25 @@ def remove_structure_annotation(path: str, label_key: str) -> None:
 
 @dataclass
 class AnnotatorState:
+    source_mode: str = "directory"
     dataset_dir: str = "."
+    csv_path: str = ""
+    path_column: str = "structure_path"
+    id_column: str = ""
+    display_columns: List[str] = field(default_factory=list)
+    csv_encoding: str = DEFAULT_ENCODING
+    csv_delimiter: str = AUTO_DELIMITER
+    source_base: str = ""
+    mapping_profile: str = DEFAULT_PROFILE_NAME
+    filter_text: str = ""
+    sort_column: str = ""
+    sort_descending: bool = False
+    stage_root: str = ""
+    stage_alias: str = ""
     pattern: str = STRUCTURE_PATTERN
+    dataset: Optional[AnnotationDataset] = None
+    all_entries: List[AnnotationEntry] = field(default_factory=list)
+    entries: List[AnnotationEntry] = field(default_factory=list)
     files: List[str] = field(default_factory=list)
     index: int = 0
     label_name: str = "quality"
@@ -337,11 +451,16 @@ class AnnotatorState:
     preload_ahead: int = 2
     preload_interval_ms: int = 250
     background_decompress_gz: bool = True
+    cache_enabled: bool = True
     restore_last_dataset: bool = True
     managed_objects: List[str] = field(default_factory=list)
     current_object: Optional[str] = None
     undo_history: List[dict] = field(default_factory=list)
     annotated_indices: set = field(default_factory=set)
+    annotated_entry_ids: set = field(default_factory=set)
+    row_annotation_store: Optional[RowAnnotationStore] = None
+    materialized_paths: Dict[str, MaterializedStructure] = field(default_factory=dict)
+    materialization_errors: Dict[str, str] = field(default_factory=dict)
     navigation_session: Optional[NavigationSession] = None
 
     def values(self) -> List[str]:
@@ -353,6 +472,17 @@ class AnnotatorState:
         if self.navigation_session is not None:
             self.index = self.navigation_session.cursor
         return self.files[self.index % len(self.files)]
+
+    def current_entry(self) -> Optional[AnnotationEntry]:
+        if not self.entries:
+            return None
+        if self.navigation_session is not None:
+            self.index = self.navigation_session.cursor
+        return self.entries[self.index % len(self.entries)]
+
+    def current_entry_id(self) -> str:
+        entry = self.current_entry()
+        return entry.id if entry is not None else ""
 
 
 STATE = globals().get("STATE", AnnotatorState())
@@ -381,21 +511,178 @@ _PERSISTED_BOOL_FIELDS = (
     "skip_annotated",
     "preload_enabled",
     "background_decompress_gz",
+    "cache_enabled",
     "restore_last_dataset",
 )
 _PERSISTED_INT_BOUNDS = {
     "preload_ahead": (0, 20),
     "preload_interval_ms": (50, 5000),
 }
+_PERSISTED_SOURCE_STRING_FIELDS = (
+    "source_mode",
+    "csv_path",
+    "path_column",
+    "id_column",
+    "mapping_profile",
+)
 
 
 def _path_identity(path: str) -> str:
     return os.path.normcase(os.path.realpath(os.path.abspath(path)))
 
 
+def _active_source_reference() -> str:
+    if STATE.source_mode == "csv":
+        return str(STATE.csv_path or "")
+    return _active_dataset_directory()
+
+
+def _source_parent(path: str) -> str:
+    if ntpath.splitdrive(path)[0] or path.startswith("\\\\"):
+        return ntpath.dirname(path)
+    return os.path.dirname(path)
+
+
+def _state_kwargs() -> Dict[str, str]:
+    if STATE.source_mode == "csv":
+        return {"source_mode": "csv", "csv_path": STATE.csv_path}
+    return {"source_mode": "directory"}
+
+
+def _entry_source_path(entry: AnnotationEntry) -> str:
+    return str(entry.resolved_path or entry.source_path)
+
+
+def _directory_entries(dataset_dir: str, files: Sequence[str]) -> List[AnnotationEntry]:
+    result = []
+    for index, path in enumerate(files):
+        absolute = os.path.abspath(path)
+        result.append(
+            AnnotationEntry(
+                id=f"file:{absolute}",
+                ordinal=index,
+                display_name=os.path.basename(path),
+                source_path=absolute,
+                source_kind="directory",
+                source_base=dataset_dir,
+                metadata={
+                    "structure_path": absolute,
+                    "name": os.path.basename(path),
+                },
+                raw_values=(absolute, os.path.basename(path)),
+                resolved_path=absolute,
+                path_resolution="directory",
+                availability=AVAILABILITY_AVAILABLE,
+            )
+        )
+    return result
+
+
+def _entry_filter_match(entry: AnnotationEntry, query: str) -> bool:
+    needle = str(query or "").strip().casefold()
+    if not needle:
+        return True
+    values = [entry.display_name, entry.source_path, entry.resolved_path]
+    values.extend(entry.metadata.values())
+    return any(needle in str(value).casefold() for value in values)
+
+
+def _view_entries(
+    entries: Sequence[AnnotationEntry],
+    *,
+    filter_text: Optional[str] = None,
+    sort_column: Optional[str] = None,
+    sort_descending: Optional[bool] = None,
+) -> List[AnnotationEntry]:
+    active_filter = STATE.filter_text if filter_text is None else str(filter_text)
+    active_sort = STATE.sort_column if sort_column is None else str(sort_column)
+    active_descending = (
+        bool(STATE.sort_descending)
+        if sort_descending is None
+        else bool(sort_descending)
+    )
+    visible = [
+        entry
+        for entry in entries
+        if entry.is_navigable
+        and not entry.error
+        and bool(_entry_source_path(entry))
+        and _entry_filter_match(entry, active_filter)
+    ]
+    if active_sort:
+        column = active_sort
+
+        def _key(entry: AnnotationEntry):
+            value = entry.display_metadata.get(column)
+            if value is None:
+                value = entry.metadata.get(column, "")
+            return (value is None or value == "", value if value is not None else "")
+
+        visible.sort(key=_key, reverse=active_descending)
+    return visible
+
+
+def _resume_entry_index(
+    entries: Sequence[AnnotationEntry], entry_id: str, index: int
+) -> int:
+    resume = max(0, min(int(index), len(entries) - 1))
+    if entry_id:
+        for candidate, entry in enumerate(entries):
+            if entry.id == entry_id:
+                return candidate
+    return resume
+
+
+def _install_entries(
+    entries: Sequence[AnnotationEntry], *, resume_entry_id: str = "", index: int = 0
+) -> None:
+    active = _view_entries(entries)
+    if not active:
+        raise RuntimeError("Structure Annotator: no navigable structure rows")
+    STATE.entries = list(active)
+    STATE.files = [_entry_source_path(entry) for entry in active]
+    resume = _resume_entry_index(active, resume_entry_id, index)
+    STATE.navigation_session = _new_navigation_session(STATE.entries, resume)
+    STATE.index = STATE.navigation_session.cursor
+
+
+def _runtime_snapshot() -> Dict[str, object]:
+    names = (
+        "source_mode", "dataset_dir", "csv_path", "path_column", "id_column",
+        "display_columns", "csv_encoding", "csv_delimiter", "source_base",
+        "mapping_profile", "filter_text", "sort_column", "sort_descending",
+        "stage_root", "stage_alias", "pattern", "dataset", "all_entries",
+        "entries", "files", "index", "undo_history", "annotated_indices",
+        "annotated_entry_ids", "row_annotation_store", "materialized_paths",
+        "materialization_errors", "navigation_session", "managed_objects",
+        "current_object",
+    )
+    snapshot: Dict[str, object] = {}
+    for name in names:
+        value = getattr(STATE, name)
+        if isinstance(value, list):
+            value = list(value)
+        elif isinstance(value, dict):
+            value = dict(value)
+        elif isinstance(value, set):
+            value = set(value)
+        snapshot[name] = value
+    snapshot["config"] = copy.deepcopy(_persisted_config())
+    return snapshot
+
+
+def _restore_runtime_snapshot(snapshot: Mapping[str, object]) -> None:
+    _apply_persisted_config(dict(snapshot["config"]))
+    for name, value in snapshot.items():
+        if name != "config":
+            setattr(STATE, name, value)
+
+
 def _active_dataset_directory() -> str:
     """Return the directory proved by the currently loaded file list."""
 
+    if STATE.source_mode == "csv" and STATE.csv_path:
+        return _source_parent(STATE.csv_path)
     if not STATE.files:
         return ""
     directories = {
@@ -411,6 +698,10 @@ def _persisted_config() -> Dict[str, object]:
     config: Dict[str, object] = {
         name: getattr(STATE, name) for name in _PERSISTED_STRING_FIELDS
     }
+    config.update(
+        {name: str(getattr(STATE, name) or "") for name in _PERSISTED_SOURCE_STRING_FIELDS}
+    )
+    config["display_columns"] = [str(value) for value in STATE.display_columns]
     config.update({name: bool(getattr(STATE, name)) for name in _PERSISTED_BOOL_FIELDS})
     config.update({name: int(getattr(STATE, name)) for name in _PERSISTED_INT_BOUNDS})
     config["bucket_cmds"] = {
@@ -434,6 +725,24 @@ def _validate_persisted_config(raw: object) -> Dict[str, object]:
         if len(value) > 256 * 1024:
             raise StateStoreError(f"config.{name} is too large")
         config[name] = value
+    for name in _PERSISTED_SOURCE_STRING_FIELDS:
+        if name not in raw:
+            continue
+        value = raw[name]
+        if not isinstance(value, str) or len(value) > 4096:
+            raise StateStoreError(f"config.{name} must be a bounded string")
+        config[name] = value
+    if "source_mode" in config and config["source_mode"] not in {"directory", "csv"}:
+        raise StateStoreError("config.source_mode must be directory or csv")
+    if "display_columns" in raw:
+        columns = raw["display_columns"]
+        if (
+            not isinstance(columns, list)
+            or len(columns) > 1000
+            or any(not isinstance(value, str) or len(value) > 4096 for value in columns)
+        ):
+            raise StateStoreError("config.display_columns must be bounded strings")
+        config["display_columns"] = list(columns)
     for name in _PERSISTED_BOOL_FIELDS:
         if name not in raw:
             continue
@@ -474,15 +783,26 @@ def _validate_persisted_position(raw: object) -> Dict[str, object]:
         raise StateStoreError("state position must be a JSON object")
     index = raw.get("index", 0)
     filename = raw.get("file", "")
+    entry_id = raw.get("entry_id", "")
     if type(index) is not int or index < 0:
         raise StateStoreError("position.index must be a non-negative integer")
     if not isinstance(filename, str) or len(filename) > 4096:
         raise StateStoreError("position.file must be a string")
-    return {"index": index, "file": filename.replace("\\", "/")}
+    if not isinstance(entry_id, str) or len(entry_id) > 4096:
+        raise StateStoreError("position.entry_id must be a string")
+    return {
+        "index": index,
+        "file": filename.replace("\\", "/"),
+        "entry_id": entry_id,
+    }
 
 
 def _apply_persisted_config(config: Dict[str, object]) -> None:
-    for name in _PERSISTED_STRING_FIELDS + _PERSISTED_BOOL_FIELDS:
+    for name in (
+        _PERSISTED_STRING_FIELDS
+        + _PERSISTED_SOURCE_STRING_FIELDS
+        + _PERSISTED_BOOL_FIELDS
+    ):
         if name in config:
             setattr(STATE, name, config[name])
     for name in _PERSISTED_INT_BOUNDS:
@@ -490,20 +810,38 @@ def _apply_persisted_config(config: Dict[str, object]) -> None:
             setattr(STATE, name, config[name])
     if "bucket_cmds" in config:
         STATE.bucket_cmds = dict(config["bucket_cmds"])
+    if "display_columns" in config:
+        STATE.display_columns = list(config["display_columns"])
 
 
-def _read_persisted_dataset_state(dataset_dir: str) -> Optional[Dict[str, object]]:
+def _read_persisted_dataset_state(
+    source_reference: str, source_mode: str = "directory"
+) -> Optional[Dict[str, object]]:
     try:
-        payload = read_dataset_state(dataset_dir)
+        kwargs = (
+            {"source_mode": "csv", "csv_path": source_reference}
+            if source_mode == "csv"
+            else {"source_mode": "directory"}
+        )
+        payload = read_dataset_state(source_reference, **kwargs)
         if payload is None:
             return None
         return {
             "config": _validate_persisted_config(payload.get("config")),
             "position": _validate_persisted_position(payload.get("position")),
+            "source": dict(payload.get("source") or {}),
+            "csv": dict(payload.get("csv") or {}),
+            "view": dict(payload.get("view") or {}),
+            "mapping_profile": payload.get("mapping_profile", ""),
         }
     except StateStoreError as exc:
         print(f"Structure Annotator: ignoring invalid state file: {exc}")
-        print(f"  State path: {dataset_state_path(dataset_dir)}")
+        kwargs = (
+            {"source_mode": "csv", "csv_path": source_reference}
+            if source_mode == "csv"
+            else {"source_mode": "directory"}
+        )
+        print(f"  State path: {dataset_state_path(source_reference, **kwargs)}")
         return None
 
 
@@ -520,32 +858,67 @@ def _relative_current_file(dataset_dir: str) -> str:
     return relative.replace("\\", "/")
 
 
-def _write_persisted_dataset_state(dataset_dir: str) -> Optional[str]:
-    if not dataset_dir or not STATE.files:
+def _write_persisted_dataset_state(source_reference: str) -> Optional[str]:
+    if not source_reference or not STATE.files:
         return None
     try:
+        position = {
+            "index": int(STATE.index),
+            "file": (
+                ""
+                if STATE.source_mode == "csv"
+                else _relative_current_file(source_reference)
+            ),
+        }
+        if STATE.source_mode == "csv":
+            position["entry_id"] = STATE.current_entry_id()
         payload = {
             "updated_at_utc": datetime.datetime.now(
                 datetime.timezone.utc
             ).isoformat(),
             "config": _persisted_config(),
-            "position": {
-                "index": int(STATE.index),
-                "file": _relative_current_file(dataset_dir),
+            "position": position,
+            "source": (
+                {"mode": "csv", "csv_path": STATE.csv_path}
+                if STATE.source_mode == "csv"
+                else {"mode": "directory", "dataset_dir": STATE.dataset_dir}
+            ),
+            "csv": {
+                "csv_path": STATE.csv_path,
+                "path_column": STATE.path_column,
+                "id_column": STATE.id_column,
+                "display_columns": list(STATE.display_columns),
+                "encoding": STATE.csv_encoding,
+                "delimiter": STATE.csv_delimiter,
+                "source_base": STATE.source_base,
+                "stage_root": STATE.stage_root,
+                "stage_alias": STATE.stage_alias,
             },
+            "view": {
+                "display_columns": list(STATE.display_columns),
+                "filters": {"text": STATE.filter_text},
+                "sort": {
+                    "column": STATE.sort_column,
+                    "descending": bool(STATE.sort_descending),
+                },
+            },
+            "mapping_profile": STATE.mapping_profile,
         }
-        return write_dataset_state(dataset_dir, payload)
+        return write_dataset_state(source_reference, payload, **_state_kwargs())
     except Exception as exc:
         print(f"Structure Annotator: state save failed: {exc}")
-        print(f"  State path: {dataset_state_path(dataset_dir)}")
+        print(f"  State path: {dataset_state_path(source_reference, **_state_kwargs())}")
         return None
 
 
 def _save_current_dataset_state() -> Optional[str]:
-    active = _active_dataset_directory()
-    if not active or not STATE.dataset_dir:
+    active = _active_source_reference()
+    if not active:
         return None
-    if _path_identity(active) != _path_identity(STATE.dataset_dir):
+    if STATE.source_mode == "directory" and (
+        not STATE.dataset_dir
+        or _path_identity(active) != _path_identity(STATE.dataset_dir)
+    ):
         return None
     return _write_persisted_dataset_state(active)
 
@@ -553,11 +926,25 @@ def _save_current_dataset_state() -> Optional[str]:
 def _record_current_config_history() -> Optional[str]:
     """Record one finalized config without making history a runtime dependency."""
 
-    active = _active_dataset_directory()
+    active = _active_source_reference()
     if not active:
         return None
     try:
-        return record_config_history(active, _persisted_config())
+        dataset_dir = (
+            _source_parent(STATE.csv_path)
+            if STATE.source_mode == "csv"
+            else active
+        )
+        return record_config_history(
+            dataset_dir,
+            _persisted_config(),
+            source_mode=STATE.source_mode,
+            csv_path=STATE.csv_path if STATE.source_mode == "csv" else "",
+            path_column=STATE.path_column,
+            id_column=STATE.id_column,
+            display_columns=STATE.display_columns,
+            mapping_profile=STATE.mapping_profile,
+        )
     except Exception as exc:
         print(f"Structure Annotator: global history save failed: {exc}")
         return None
@@ -574,17 +961,56 @@ def _restore_latest_config_from_history() -> bool:
             return False
         config = _validate_persisted_config(snapshot.get("config"))
         _apply_persisted_config(config)
+        source_mode = str(
+            snapshot.get("source_mode")
+            or config.get("source_mode")
+            or "directory"
+        )
+        csv_path = str(
+            snapshot.get("csv_path") or config.get("csv_path") or ""
+        ).strip()
         dataset_dir = str(snapshot.get("dataset_dir", "")).strip()
+        STATE.source_mode = source_mode
+        if csv_path:
+            STATE.csv_path = csv_path
         if dataset_dir:
             STATE.dataset_dir = dataset_dir
-        if not STATE.restore_last_dataset or not dataset_dir:
+        source_reference = csv_path if source_mode == "csv" else dataset_dir
+        if not STATE.restore_last_dataset or not source_reference:
             return False
-        if not os.path.isdir(_long_path(dataset_dir)):
+        source_available = (
+            os.path.isfile(_long_path(source_reference))
+            if source_mode == "csv"
+            else os.path.isdir(_long_path(source_reference))
+        )
+        if not source_available:
             print(
                 "Structure Annotator: last dataset is unavailable; "
-                f"config restored without loading: {dataset_dir}"
+                f"config restored without loading: {source_reference}"
             )
             return False
+        if source_mode == "csv":
+            sa_load_csv(
+                csv_path=csv_path,
+                path_column=str(
+                    config.get("path_column") or STATE.path_column
+                ),
+                id_column=str(config.get("id_column") or ""),
+                display_columns=config.get("display_columns"),
+                mapping_profile=str(
+                    config.get("mapping_profile")
+                    or STATE.mapping_profile
+                    or DEFAULT_PROFILE_NAME
+                ),
+            )
+            restored = bool(
+                STATE.source_mode == "csv"
+                and STATE.csv_path
+                and _path_identity(STATE.csv_path) == _path_identity(csv_path)
+            )
+            if restored:
+                print(f"Structure Annotator: restored last CSV dataset: {csv_path}")
+            return restored
         saved_state_exists = os.path.isfile(
             _long_path(dataset_state_path(dataset_dir))
         )
@@ -618,10 +1044,18 @@ def _history_suggestions(field: str, query: str, limit: int = 12) -> List[str]:
 
 
 def _resume_index(
-    dataset_dir: str, files: List[str], position: Optional[Dict[str, object]]
+    dataset_dir: str,
+    files: List[str],
+    position: Optional[Dict[str, object]],
+    entries: Optional[Sequence[AnnotationEntry]] = None,
 ) -> int:
     if not files or not position:
         return 0
+    requested_entry = str(position.get("entry_id", ""))
+    if requested_entry and entries:
+        for index, entry in enumerate(entries):
+            if entry.id == requested_entry:
+                return index
     requested_file = str(position.get("file", "")).replace("\\", "/")
     if requested_file:
         for index, path in enumerate(files):
@@ -634,16 +1068,35 @@ def _resume_index(
     return max(0, min(requested_index, len(files) - 1))
 
 
-def _new_navigation_session(files: List[str], index: int = 0) -> NavigationSession:
-    entries = [
-        NavigationEntry(
-            id=f"file:{os.path.abspath(path)}",
-            kind="file",
-            display_name=os.path.basename(path),
-            source_paths=(os.path.abspath(path),),
-        )
-        for path in files
-    ]
+def _new_navigation_session(
+    source_entries: Sequence[object], index: int = 0
+) -> NavigationSession:
+    entries = []
+    for value in source_entries:
+        if isinstance(value, AnnotationEntry):
+            path = _entry_source_path(value)
+            entries.append(
+                NavigationEntry(
+                    id=value.id,
+                    kind="file",
+                    display_name=value.display_name,
+                    source_paths=(path,),
+                    metadata={
+                        "entry_id": value.id,
+                        "row_number": value.row_number,
+                    },
+                )
+            )
+        else:
+            path = str(value)
+            entries.append(
+                NavigationEntry(
+                    id=f"file:{os.path.abspath(path)}",
+                    kind="file",
+                    display_name=os.path.basename(path),
+                    source_paths=(os.path.abspath(path),),
+                )
+            )
     session = NavigationSession(
         entries=entries,
         batch_size=max(1, len(entries)),
@@ -657,11 +1110,15 @@ def _new_navigation_session(files: List[str], index: int = 0) -> NavigationSessi
 
 def _ensure_navigation_session() -> NavigationSession:
     session = STATE.navigation_session
-    expected_ids = [f"file:{os.path.abspath(path)}" for path in STATE.files]
+    expected_ids = (
+        [entry.id for entry in STATE.entries]
+        if STATE.entries
+        else [f"file:{os.path.abspath(path)}" for path in STATE.files]
+    )
     if session is None or [entry.id for entry in session.entries] != expected_ids:
         if not STATE.files:
             raise RuntimeError("Structure Annotator: no dataset loaded")
-        session = _new_navigation_session(STATE.files, STATE.index)
+        session = _new_navigation_session(STATE.entries or STATE.files, STATE.index)
         STATE.navigation_session = session
     STATE.index = session.cursor
     return session
@@ -750,8 +1207,13 @@ def _object_name_for_index(path: str, index: int) -> str:
             base_lower = base_lower[: -len(ext)]
             break
     base_token = _sanitize_token(base, "structure")
+    identity = (
+        STATE.entries[index].id
+        if 0 <= index < len(STATE.entries)
+        else os.path.abspath(path)
+    )
     digest = hashlib.sha1(
-        os.path.abspath(path).encode("utf-8", errors="surrogatepass")
+        identity.encode("utf-8", errors="surrogatepass")
     ).hexdigest()[:8]
     return f"{OBJECT_PREFIX}_{index + 1:05d}_{base_token}_{digest}"
 
@@ -802,6 +1264,30 @@ _bg_executor = globals().get("_bg_executor", None)
 _bg_cache_dir = globals().get("_bg_cache_dir", None)
 _bg_decompress_futures = globals().get("_bg_decompress_futures", {})
 _bg_decompressed_paths = globals().get("_bg_decompressed_paths", {})
+_materialization_futures = globals().get("_materialization_futures", {})
+_materialization_generation = globals().get("_materialization_generation", 0)
+_structure_cache = globals().get("_structure_cache", None)
+_copy_materializer = globals().get("_copy_materializer", None)
+_direct_materializer = globals().get("_direct_materializer", None)
+
+
+@dataclass(frozen=True)
+class _MaterializationContext:
+    """Immutable I/O settings captured before a background job is submitted."""
+
+    generation: int
+    cache_enabled: bool
+    stage_root: str
+    stage_alias: str
+
+
+def _materialization_context() -> _MaterializationContext:
+    return _MaterializationContext(
+        generation=int(_materialization_generation),
+        cache_enabled=bool(STATE.cache_enabled),
+        stage_root=str(STATE.stage_root or ""),
+        stage_alias=str(STATE.stage_alias or ""),
+    )
 
 
 def _get_bg_executor() -> ThreadPoolExecutor:
@@ -814,6 +1300,216 @@ def _get_bg_executor() -> ThreadPoolExecutor:
     return _bg_executor
 
 
+def _get_structure_cache() -> PersistentStructureCache:
+    global _structure_cache
+    if _structure_cache is None:
+        _structure_cache = PersistentStructureCache()
+    return _structure_cache
+
+
+def _get_copy_materializer() -> CopyMaterializer:
+    global _copy_materializer
+    if _copy_materializer is None:
+        _copy_materializer = CopyMaterializer(_get_structure_cache())
+    return _copy_materializer
+
+
+def _get_direct_materializer() -> DirectMaterializer:
+    global _direct_materializer
+    if _direct_materializer is None:
+        _direct_materializer = DirectMaterializer()
+    return _direct_materializer
+
+
+def _entry_provider(entry: AnnotationEntry) -> str:
+    resolution = entry.path_resolution
+    if isinstance(resolution, Mapping):
+        return str(resolution.get("provider") or "direct")
+    return str(getattr(resolution, "provider", "") or "direct")
+
+
+def _is_remote_host_path(path: str, provider: str) -> bool:
+    value = str(path)
+    configured_drives = {
+        token.strip().rstrip(":").upper() + ":"
+        for token in re.split(
+            r"[,;\s]+",
+            os.environ.get("PYMOLPLUGINS_REMOTE_DRIVES", "K"),
+        )
+        if token.strip()
+    }
+    drive = ntpath.splitdrive(value)[0].upper()
+    return (
+        provider not in {"direct", "directory", "windows-host", "local"}
+        or value.startswith("\\\\")
+        or provider.startswith("wsl-stage:")
+        or drive in configured_drives
+    )
+
+
+def _stage_relative_path(
+    entry: AnnotationEntry, context: _MaterializationContext
+) -> Tuple[str, str]:
+    raw_root = str(context.stage_root or "").strip()
+    source = posixpath.normpath(entry.source_path)
+    alias = str(context.stage_alias or "").strip()
+    if not raw_root or not alias:
+        raise RuntimeError("WSL staging requires stage_root and stage_alias")
+    root = posixpath.normpath(raw_root)
+    if source == root:
+        raise RuntimeError("WSL staging source must be a file below stage_root")
+    if not source.startswith(root.rstrip("/") + "/"):
+        raise RuntimeError("WSL staging source is outside the configured stage_root")
+    relative = posixpath.relpath(source, root)
+    if relative in {"", "."} or relative.startswith("../"):
+        raise RuntimeError("invalid WSL staging relative path")
+    return alias, relative
+
+
+def _materialize_wsl_entry(
+    entry: AnnotationEntry,
+    context: _MaterializationContext,
+    observed: Optional[object] = None,
+) -> MaterializedStructure:
+    alias, relative = _stage_relative_path(entry, context)
+    if observed is None:
+        observed = stat_staged_file(alias, relative)
+    observed_identity = SourceIdentity(
+        provider=f"wsl-stage:{alias}",
+        canonical_source=f"{alias}/{relative}",
+        size=int(observed.size),
+        mtime_ns=int(observed.mtime_ns),
+        version_token=str(observed.token),
+    )
+    hit = _get_structure_cache().lookup(observed_identity)
+    if hit is not None:
+        return MaterializedStructure(
+            source_path=entry.source_path,
+            path=hit.path,
+            identity=observed_identity,
+            mode="cache",
+            cache_key=hit.key,
+            cache_hit=True,
+        )
+    suffix = "".join(
+        extension
+        for extension in (".pdb", ".cif", ".gz")
+        if entry.source_path.lower().endswith(extension)
+    )
+    with tempfile.TemporaryDirectory(prefix="pymol_sa_stage_") as stage_dir:
+        destination = os.path.join(stage_dir, "download" + suffix)
+        downloaded = download_staged_file(alias, relative, destination)
+        identity = SourceIdentity(
+            provider=f"wsl-stage:{alias}",
+            canonical_source=f"{alias}/{relative}",
+            size=int(downloaded.source.size),
+            mtime_ns=int(downloaded.source.mtime_ns),
+            version_token=str(downloaded.source.token),
+        )
+        materialized = _get_copy_materializer().materialize(
+            downloaded.destination,
+            provider=identity.provider,
+            canonical_source=identity.canonical_source,
+            source_identity=identity,
+            logical_path=entry.source_path,
+        )
+        return replace(materialized, source_path=entry.source_path)
+
+
+def _cache_canonical_source(path: str) -> str:
+    value = str(path)
+    if ntpath.splitdrive(value)[0] or value.startswith("\\\\"):
+        return ntpath.normcase(ntpath.normpath(value))
+    return os.path.normcase(os.path.realpath(os.path.abspath(value)))
+
+
+def _materialize_entry(
+    entry: AnnotationEntry,
+    context: _MaterializationContext,
+    *,
+    staged_source_identity: Optional[object] = None,
+) -> MaterializedStructure:
+    provider = _entry_provider(entry)
+    if provider.startswith("wsl-stage:"):
+        return _materialize_wsl_entry(
+            entry, context, observed=staged_source_identity
+        )
+    source = _entry_source_path(entry)
+    use_cache = bool(context.cache_enabled) and (
+        _is_remote_host_path(source, provider) or _is_gz_path(source)
+    )
+    if use_cache:
+        return _get_copy_materializer().materialize(
+            _long_path(source),
+            provider=provider,
+            canonical_source=_cache_canonical_source(source),
+            logical_path=entry.source_path,
+        )
+    return _get_direct_materializer().materialize(
+        _long_path(source),
+        provider=provider,
+        canonical_source=_cache_canonical_source(source),
+    )
+
+
+def _materialize_index(index: int, *, allow_background: bool) -> Optional[MaterializedStructure]:
+    global _materialization_futures
+    if not STATE.entries:
+        return None
+    index %= len(STATE.entries)
+    entry = STATE.entries[index]
+    context = _materialization_context()
+    future_key = (context.generation, entry.id)
+    cached = STATE.materialized_paths.get(entry.id)
+    if cached and os.path.isfile(_long_path(cached.path)):
+        return cached
+    future = _materialization_futures.get(future_key)
+    if future is not None:
+        if not future.done():
+            if allow_background:
+                return None
+        try:
+            result = future.result()
+        except Exception as exc:
+            if context.generation == _materialization_generation:
+                STATE.materialization_errors[entry.id] = str(exc)
+            _materialization_futures.pop(future_key, None)
+            raise
+        _materialization_futures.pop(future_key, None)
+        if (
+            context.generation == _materialization_generation
+            and entry.id in {candidate.id for candidate in STATE.entries}
+        ):
+            STATE.materialized_paths[entry.id] = result
+            STATE.materialization_errors.pop(entry.id, None)
+        return result
+    if allow_background:
+        _materialization_futures[future_key] = _get_bg_executor().submit(
+            _materialize_entry, entry, context
+        )
+        return None
+    result = _materialize_entry(entry, context)
+    if context.generation == _materialization_generation:
+        STATE.materialized_paths[entry.id] = result
+        STATE.materialization_errors.pop(entry.id, None)
+    return result
+
+
+def _update_cache_navigation_pins() -> None:
+    if _structure_cache is None or not STATE.entries:
+        return
+    current = STATE.materialized_paths.get(STATE.current_entry_id())
+    preload = []
+    for index in _desired_indices_ahead():
+        materialized = STATE.materialized_paths.get(STATE.entries[index].id)
+        if materialized is not None and materialized.cache_key:
+            preload.append(materialized)
+    _structure_cache.set_navigation_pins(
+        current=(current if current is not None and current.cache_key else None),
+        preload=preload,
+    )
+
+
 def _ensure_bg_cache_dir() -> str:
     global _bg_cache_dir
     if _bg_cache_dir is None:
@@ -824,6 +1520,7 @@ def _ensure_bg_cache_dir() -> str:
 
 def _reset_bg_cache() -> None:
     global _bg_cache_dir, _bg_decompress_futures, _bg_decompressed_paths
+    global _materialization_futures, _materialization_generation
     global _preload_generation, _preload_queue
     timer = globals().get("_preload_panel_timer")
     if timer is not None:
@@ -832,9 +1529,23 @@ def _reset_bg_cache() -> None:
         except Exception:
             pass
     _preload_generation = int(globals().get("_preload_generation", 0)) + 1
+    _materialization_generation = int(_materialization_generation) + 1
     _preload_queue = []
     _bg_decompress_futures = {}
     _bg_decompressed_paths = {}
+    for future in list(_materialization_futures.values()):
+        try:
+            future.cancel()
+        except Exception:
+            pass
+    _materialization_futures = {}
+    STATE.materialized_paths = {}
+    STATE.materialization_errors = {}
+    if _structure_cache is not None:
+        try:
+            _structure_cache.set_navigation_pins(current=None, preload=())
+        except Exception:
+            pass
     if _bg_cache_dir and os.path.isdir(_bg_cache_dir):
         try:
             shutil.rmtree(_bg_cache_dir, ignore_errors=True)
@@ -938,6 +1649,99 @@ def _run_pymol_commands(template: str, context: Dict[str, str]) -> None:
             traceback.print_exc()
 
 
+@dataclass(frozen=True)
+class _ParkedManagedObject:
+    original: str
+    parked: str
+    enabled: bool
+
+
+def _park_managed_objects() -> List[_ParkedManagedObject]:
+    """Rename owned objects so a new dataset can be loaded transactionally."""
+
+    if not STATE.managed_objects:
+        return []
+    if not hasattr(cmd, "set_name"):
+        raise RuntimeError(
+            "Host PyMOL lacks cmd.set_name required for transactional dataset swap"
+        )
+    try:
+        existing = set(cmd.get_names("objects"))
+        enabled = set(cmd.get_names("objects", enabled_only=1))
+    except Exception:
+        existing = set(cmd.get_names("all"))
+        enabled = set(cmd.get_names("all", enabled_only=1))
+    parked: List[_ParkedManagedObject] = []
+    token = uuid.uuid4().hex[:12]
+    try:
+        for index, original in enumerate(list(STATE.managed_objects)):
+            if original not in existing:
+                continue
+            candidate = f"sa_tx_{token}_{index + 1}"
+            while candidate in existing:
+                candidate += "x"
+            cmd.set_name(original, candidate)
+            existing.discard(original)
+            existing.add(candidate)
+            parked.append(
+                _ParkedManagedObject(
+                    original=original,
+                    parked=candidate,
+                    enabled=original in enabled,
+                )
+            )
+    except Exception:
+        for record in reversed(parked):
+            try:
+                cmd.set_name(record.parked, record.original)
+            except Exception:
+                traceback.print_exc()
+        raise
+    return parked
+
+
+def _restore_parked_objects(records: Sequence[_ParkedManagedObject]) -> None:
+    for record in reversed(list(records)):
+        cmd.set_name(record.parked, record.original)
+        if record.enabled:
+            cmd.enable(record.original)
+        else:
+            cmd.disable(record.original)
+
+
+def _discard_parked_objects(records: Sequence[_ParkedManagedObject]) -> None:
+    for record in records:
+        try:
+            cmd.delete(record.parked)
+        except Exception:
+            traceback.print_exc()
+
+
+def _begin_scene_swap() -> List[_ParkedManagedObject]:
+    parked = _park_managed_objects()
+    previous_managed = list(STATE.managed_objects)
+    previous_current = STATE.current_object
+    try:
+        STATE.managed_objects = []
+        STATE.current_object = None
+        _reset_bg_cache()
+    except Exception:
+        STATE.managed_objects = previous_managed
+        STATE.current_object = previous_current
+        _restore_parked_objects(parked)
+        raise
+    return parked
+
+
+def _rollback_scene_swap(
+    previous: Mapping[str, object], records: Sequence[_ParkedManagedObject]
+) -> None:
+    _delete_managed_objects(False)
+    _reset_bg_cache()
+    _restore_runtime_snapshot(previous)
+    _restore_parked_objects(records)
+
+
 def _delete_managed_objects(keep: bool) -> None:
     if keep:
         return
@@ -994,6 +1798,7 @@ def _evict_unneeded_objects() -> None:
                 STATE.managed_objects.remove(obj)
 
     _evict_decompressed_except(desired)
+    _update_cache_navigation_pins()
 
 
 def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> Optional[str]:
@@ -1005,7 +1810,14 @@ def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> O
 
     if not _object_exists(obj_name):
         load_path = path
-        if _is_gz_path(path) and STATE.background_decompress_gz:
+        if STATE.entries:
+            materialized = _materialize_index(
+                index, allow_background=(not focus and not allow_gz_fallback)
+            )
+            if materialized is None:
+                return None
+            load_path = materialized.path
+        elif _is_gz_path(path) and STATE.background_decompress_gz:
             requested = _request_decompressed_path(index)
             if requested and os.path.exists(_long_path(requested)):
                 load_path = requested
@@ -1016,7 +1828,16 @@ def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> O
         if not os.path.exists(load_path_resolved):
             print(f"Structure Annotator: file not found: {load_path}")
             return None
-        cmd.load(load_path_resolved, obj_name, quiet=1)
+        if obj_name not in STATE.managed_objects:
+            STATE.managed_objects.append(obj_name)
+        try:
+            cmd.load(load_path_resolved, obj_name, quiet=1)
+        except Exception:
+            # Some Host loaders can leave a partial object before raising. Keep
+            # that name owned so a transaction rollback can delete it exactly.
+            if not _object_exists(obj_name) and obj_name in STATE.managed_objects:
+                STATE.managed_objects.remove(obj_name)
+            raise
         # ``cmd.load`` is synchronous. Calling ``cmd.sync`` from an sa_* parser
         # callback waits on the command queue which currently owns that callback
         # and produces a real Host ``wait_queue`` timeout.
@@ -1043,6 +1864,7 @@ def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> O
         pass
 
     STATE.current_object = obj_name
+    _update_cache_navigation_pins()
 
     # Ensure the synchronous load produced an addressable object before a
     # restored command template can run against it.
@@ -1056,6 +1878,13 @@ def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> O
         "file": path,
         "index": str(index),
         "count": str(len(STATE.files)),
+        "entry_id": STATE.current_entry_id(),
+        "row_number": str(
+            STATE.current_entry().row_number
+            if STATE.current_entry() is not None
+            and STATE.current_entry().row_number is not None
+            else ""
+        ),
     }
     _run_pymol_commands(STATE.step_cmd, context)
     return obj_name
@@ -1090,15 +1919,40 @@ def _kick_preload() -> None:
 
     desired = _desired_indices_ahead()
     pending = []
+    generation = int(_materialization_generation)
+    desired_entry_ids = {
+        STATE.entries[idx].id for idx in desired if idx < len(STATE.entries)
+    }
+    for key, future in list(_materialization_futures.items()):
+        if (
+            not isinstance(key, tuple)
+            or len(key) != 2
+            or key[0] != generation
+            or key[1] in desired_entry_ids
+        ):
+            continue
+        try:
+            removable = future.cancel() or future.done()
+        except Exception:
+            removable = True
+        if removable:
+            _materialization_futures.pop(key, None)
     for idx in desired:
         obj = _object_name_for_index(STATE.files[idx], idx)
         if not _object_exists(obj):
-            pending.append(idx)
+            entry_id = STATE.entries[idx].id if idx < len(STATE.entries) else ""
+            pending.append((generation, entry_id, idx))
 
     _preload_generation += 1
     _preload_queue = pending
+    if STATE.entries:
+        for _generation, _entry_id, idx in list(_preload_queue):
+            try:
+                _materialize_index(idx, allow_background=True)
+            except Exception:
+                pass
     if STATE.background_decompress_gz:
-        for idx in list(_preload_queue):
+        for _generation, _entry_id, idx in list(_preload_queue):
             try:
                 _request_decompressed_path(idx)
             except Exception:
@@ -1111,9 +1965,22 @@ def _process_preload_tick() -> None:
     global _preload_queue
     if not _preload_queue:
         return
-    _collect_ready_decompressed(list(_preload_queue))
+    generation, entry_id, idx = _preload_queue[0]
+    if (
+        generation != _materialization_generation
+        or idx < 0
+        or idx >= len(STATE.files)
+        or (
+            entry_id
+            and (idx >= len(STATE.entries) or STATE.entries[idx].id != entry_id)
+        )
+    ):
+        _preload_queue.pop(0)
+        if _preload_queue:
+            _schedule_preload_tick()
+        return
+    _collect_ready_decompressed([idx])
 
-    idx = _preload_queue[0]
     try:
         loaded = _ensure_loaded(idx, focus=False, allow_gz_fallback=False)
         if loaded is None:
@@ -1164,18 +2031,531 @@ def _navigate_annotation(method: str, *args) -> str:
         raise
 
 
+def _annotations_for_index(index: int) -> Dict[str, str]:
+    if not STATE.files or index < 0 or index >= len(STATE.files):
+        return {}
+    if STATE.source_mode == "csv":
+        if STATE.row_annotation_store is None or index >= len(STATE.entries):
+            return {}
+        return STATE.row_annotation_store.annotations_for(STATE.entries[index].id)
+    return read_structure_annotations(_resolve_annotation_path(STATE.files[index]))
+
+
+def _set_entry_annotation(index: int, label: str, value: str) -> Dict[str, object]:
+    if STATE.source_mode == "csv":
+        if STATE.row_annotation_store is None:
+            raise RuntimeError("CSV annotation store is unavailable")
+        return STATE.row_annotation_store.set(STATE.entries[index].id, label, value)
+    path = _resolve_annotation_path(STATE.files[index])
+    previous = read_structure_annotations(path).get(label)
+    annotate_structure_file(path, label, value)
+    return {
+        "entry_id": STATE.entries[index].id if STATE.entries else "",
+        "path": path,
+        "previous": previous,
+        "current": value,
+        "had_previous": previous is not None,
+    }
+
+
+def _remove_entry_annotation(index: int, label: str) -> Dict[str, object]:
+    if STATE.source_mode == "csv":
+        if STATE.row_annotation_store is None:
+            raise RuntimeError("CSV annotation store is unavailable")
+        return STATE.row_annotation_store.remove(STATE.entries[index].id, label)
+    path = _resolve_annotation_path(STATE.files[index])
+    previous = read_structure_annotations(path).get(label)
+    remove_structure_annotation(path, label)
+    return {
+        "entry_id": STATE.entries[index].id if STATE.entries else "",
+        "path": path,
+        "previous": previous,
+        "current": None,
+        "had_previous": previous is not None,
+    }
+
+
 def _rescan_annotated_indices() -> None:
     """Populate STATE.annotated_indices for progress tracking under the current label."""
     STATE.annotated_indices = set()
     if not STATE.files:
         return
     label_key = normalize_label_key(STATE.label_name)
-    for idx, path in enumerate(STATE.files):
+    STATE.annotated_entry_ids = set()
+    for idx, _path in enumerate(STATE.files):
         try:
-            if has_annotation_fast(_resolve_annotation_path(path), label_key):
+            if _annotations_for_index(idx).get(label_key) is not None:
                 STATE.annotated_indices.add(idx)
+                if idx < len(STATE.entries):
+                    STATE.annotated_entry_ids.add(STATE.entries[idx].id)
         except Exception:
             pass
+
+
+def _display_column_names(value: object) -> Optional[List[str]]:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.startswith("["):
+        parsed = json.loads(text)
+        if not isinstance(parsed, list) or any(not isinstance(item, str) for item in parsed):
+            raise ValueError("display_columns JSON must be an array of strings")
+        return list(parsed)
+    return _split_values(text.replace("|", ";"))
+
+
+def _mapping_rules(
+    profile_name: str, *, read_only: bool = False
+) -> Sequence[Mapping[str, object]]:
+    profile = (
+        get_mapping_profile_readonly(profile_name)
+        if read_only
+        else get_mapping_profile(profile_name)
+    )
+    if profile is None:
+        raise MappingStoreError(f"unknown path mapping profile: {profile_name}")
+    rules = profile.get("rules", [])
+    if not isinstance(rules, list):
+        raise MappingStoreError("mapping profile rules must be a list")
+    return rules
+
+
+@dataclass(frozen=True)
+class _StagedPathResolution(PathResolution):
+    """Path result carrying one already-validated worker stat observation."""
+
+    staged_source_identity: Optional[object] = field(
+        default=None, compare=False, repr=False
+    )
+
+
+def _stage_resolution(
+    entry: AnnotationEntry,
+    stage_root: str,
+    stage_alias: str,
+    *,
+    require_exists: bool,
+) -> Optional[PathResolution]:
+    root = str(stage_root or "").strip()
+    alias = str(stage_alias or "").strip()
+    source = str(entry.source_path or "").strip()
+    if not root or not alias or not source.startswith("/"):
+        return None
+    normalized_root = posixpath.normpath(root)
+    normalized_source = posixpath.normpath(source)
+    if not (
+        normalized_source != normalized_root
+        and normalized_source.startswith(normalized_root.rstrip("/") + "/")
+    ):
+        return None
+    provider = f"wsl-stage:{alias}"
+    if not require_exists:
+        return _StagedPathResolution(
+            raw_path=entry.source_path,
+            resolved_path=normalized_source,
+            status=AVAILABILITY_UNCHECKED,
+            provider=provider,
+            method="wsl-stage-unchecked",
+            matched_rule=normalized_root,
+        )
+    relative = posixpath.relpath(normalized_source, normalized_root)
+    observed = None
+    try:
+        observed = stat_staged_file(alias, relative)
+        status = AVAILABILITY_AVAILABLE
+        diagnostics: Tuple[str, ...] = ()
+    except WorkerRequestError as exc:
+        code = str(getattr(exc, "code", ""))
+        if code == "stage_file_not_found":
+            status = AVAILABILITY_MISSING
+        elif code in {"stage_file_unreadable", "stage_path_forbidden"}:
+            status = AVAILABILITY_UNREADABLE
+        elif code in {"invalid_stage_path", "stage_not_regular_file"}:
+            status = AVAILABILITY_INVALID
+        else:
+            status = AVAILABILITY_ERROR
+        diagnostics = (f"WSL staging {code or 'error'}: {exc}",)
+    except Exception as exc:
+        status = AVAILABILITY_ERROR
+        diagnostics = (f"WSL staging error: {exc}",)
+    return _StagedPathResolution(
+        raw_path=entry.source_path,
+        resolved_path=normalized_source,
+        status=status,
+        provider=provider,
+        method="wsl-stage-stat",
+        matched_rule=normalized_root,
+        diagnostics=diagnostics,
+        staged_source_identity=observed,
+    )
+
+
+def _resolve_csv_dataset(
+    dataset: AnnotationDataset,
+    mapping_profile: str,
+    *,
+    stage_root: str = "",
+    stage_alias: str = "",
+    require_exists: bool = True,
+    read_only_mappings: bool = False,
+) -> AnnotationDataset:
+    resolver = PathResolver(
+        rules=_mapping_rules(mapping_profile, read_only=read_only_mappings),
+        exists=lambda path: os.path.exists(_long_path(path)),
+        readable=lambda path: os.access(_long_path(path), os.R_OK),
+        is_file=lambda path: os.path.isfile(_long_path(path)),
+    )
+    resolved_entries = []
+    stage_cache: Dict[str, PathResolution] = {}
+    for entry in dataset.entries:
+        stage_key = str(entry.source_path)
+        resolution = stage_cache.get(stage_key)
+        if resolution is None:
+            resolution = _stage_resolution(
+                entry,
+                stage_root,
+                stage_alias,
+                require_exists=require_exists,
+            )
+            if resolution is not None:
+                stage_cache[stage_key] = resolution
+        if resolution is None and os.name != "nt" and not entry.source_path.startswith("~"):
+            candidate = entry.source_path
+            if not os.path.isabs(candidate):
+                candidate = os.path.join(entry.source_base, candidate)
+            candidate = os.path.abspath(candidate)
+            if os.path.isfile(candidate) and os.access(candidate, os.R_OK):
+                resolution = PathResolution(
+                    raw_path=entry.source_path,
+                    resolved_path=candidate,
+                    status=AVAILABILITY_AVAILABLE,
+                    provider="local",
+                    method="local-direct",
+                )
+        if resolution is None:
+            resolution = resolver.resolve(
+                entry.source_path,
+                source_base=entry.source_base,
+                require_exists=require_exists,
+            )
+        resolved_entries.append(entry.with_resolution(resolution))
+    return replace(dataset, entries=tuple(resolved_entries))
+
+
+def _csv_preview_payload(
+    dataset: AnnotationDataset,
+    mapping_profile: str,
+    *,
+    row_limit: int = 50,
+) -> Dict[str, object]:
+    counts: Dict[str, int] = {}
+    rule_counts: Dict[str, int] = {}
+    for entry in dataset.entries:
+        counts[entry.status] = counts.get(entry.status, 0) + 1
+        rule = getattr(entry.path_resolution, "matched_rule", "")
+        if rule:
+            rule_counts[str(rule)] = rule_counts.get(str(rule), 0) + 1
+    rows = []
+    for entry in dataset.entries[: max(0, int(row_limit))]:
+        resolution = entry.path_resolution
+        rows.append(
+            {
+                "entry_id": entry.id,
+                "row_number": entry.row_number,
+                "display_name": entry.display_name,
+                "raw_path": entry.source_path,
+                "resolved_path": entry.resolved_path or None,
+                "status": entry.status,
+                "provider": getattr(resolution, "provider", None),
+                "matched_rule": getattr(resolution, "matched_rule", None),
+                "error": entry.error or None,
+                "metadata": dict(entry.metadata),
+            }
+        )
+    return {
+        "schema": "pymolplugins.structure-annotator-csv-preview/1.0",
+        "status": "ok",
+        "csv_path": dataset.source_path,
+        "path_column": dataset.path_column,
+        "id_column": dataset.id_column,
+        "delimiter": dataset.delimiter,
+        "encoding": dataset.encoding,
+        "columns": list(dataset.columns),
+        "display_columns": list(dataset.display_columns),
+        "mapping_profile": mapping_profile,
+        "row_count": dataset.count,
+        "status_counts": counts,
+        "rule_counts": rule_counts,
+        "rows": rows,
+        "preview_truncated": dataset.count > len(rows),
+    }
+
+
+def sa_csv_preview(
+    csv_path: str,
+    path_column: str,
+    id_column: str = "",
+    display_columns: str = "",
+    encoding: str = DEFAULT_ENCODING,
+    delimiter: str = AUTO_DELIMITER,
+    mapping_profile: str = DEFAULT_PROFILE_NAME,
+    source_base: str = "",
+    stage_root: str = "",
+    stage_alias: str = "",
+) -> Dict[str, object]:
+    """Parse and resolve a CSV without changing PyMOL or dataset state."""
+
+    source = CsvDatasetSource(
+        os.path.abspath(os.path.expanduser(str(csv_path))),
+        str(path_column),
+        id_column=str(id_column or ""),
+        display_columns=_display_column_names(display_columns),
+        encoding=str(encoding or DEFAULT_ENCODING),
+        delimiter=str(delimiter or AUTO_DELIMITER),
+        source_base=str(source_base or ""),
+    )
+    dataset = _resolve_csv_dataset(
+        source.load(),
+        str(mapping_profile or DEFAULT_PROFILE_NAME),
+        stage_root=str(stage_root or ""),
+        stage_alias=str(stage_alias or ""),
+        require_exists=True,
+        read_only_mappings=True,
+    )
+    payload = _csv_preview_payload(dataset, str(mapping_profile or DEFAULT_PROFILE_NAME))
+    print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False))
+    return payload
+
+
+def sa_load_csv(
+    csv_path: str,
+    path_column: Optional[str] = None,
+    id_column: Optional[str] = None,
+    display_columns: Optional[object] = None,
+    encoding: Optional[str] = None,
+    delimiter: Optional[str] = None,
+    mapping_profile: Optional[str] = None,
+    source_base: Optional[str] = None,
+    stage_root: Optional[str] = None,
+    stage_alias: Optional[str] = None,
+) -> Optional[Dict[str, object]]:
+    """Load one independently annotatable entry per CSV row.
+
+    Optional source arguments are tri-state: ``None`` restores this CSV's
+    saved value (or the active value when reloading the same CSV), while an
+    explicit empty string clears an optional value.  A different CSV never
+    inherits delimiter, ID or display columns from the previously open source.
+    """
+
+    previous = _runtime_snapshot()
+    parked: List[_ParkedManagedObject] = []
+    scene_swap_started = False
+    canonical_csv = os.path.abspath(os.path.expanduser(str(csv_path)))
+    try:
+        same_active_csv = bool(
+            STATE.source_mode == "csv"
+            and STATE.csv_path
+            and _path_identity(STATE.csv_path) == _path_identity(canonical_csv)
+        )
+        persisted = _read_persisted_dataset_state(canonical_csv, "csv")
+        if persisted is not None:
+            _apply_persisted_config(persisted["config"])
+        saved_csv = dict(persisted.get("csv") or {}) if persisted else {}
+        saved_view = dict(persisted.get("view") or {}) if persisted else {}
+
+        def _source_value(
+            supplied: Optional[object],
+            saved_name: str,
+            active_value: object,
+            default: object,
+        ) -> object:
+            if supplied is not None:
+                return supplied
+            if saved_name in saved_csv:
+                return saved_csv[saved_name]
+            if same_active_csv:
+                return active_value
+            return default
+
+        effective_path_column = str(
+            _source_value(
+                path_column, "path_column", STATE.path_column, "structure_path"
+            )
+        )
+        if not effective_path_column:
+            raise ValueError("path_column is required for CSV mode")
+        effective_id_column = str(
+            _source_value(id_column, "id_column", STATE.id_column, "") or ""
+        )
+        raw_display_columns = _source_value(
+            display_columns,
+            "display_columns",
+            STATE.display_columns,
+            None,
+        )
+        effective_display_columns = _display_column_names(raw_display_columns)
+        effective_encoding = str(
+            _source_value(
+                encoding, "encoding", STATE.csv_encoding, DEFAULT_ENCODING
+            )
+            or DEFAULT_ENCODING
+        )
+        effective_delimiter = str(
+            _source_value(
+                delimiter, "delimiter", STATE.csv_delimiter, AUTO_DELIMITER
+            )
+            or AUTO_DELIMITER
+        )
+        saved_profile = (
+            persisted.get("mapping_profile") if persisted is not None else None
+        )
+        if mapping_profile is not None:
+            effective_profile = str(mapping_profile or DEFAULT_PROFILE_NAME)
+        elif saved_profile:
+            effective_profile = str(saved_profile)
+        else:
+            effective_profile = str(
+                STATE.mapping_profile or DEFAULT_PROFILE_NAME
+            )
+        effective_source_base = str(
+            _source_value(source_base, "source_base", STATE.source_base, "") or ""
+        )
+        effective_stage_root = str(
+            _source_value(stage_root, "stage_root", STATE.stage_root, "") or ""
+        )
+        effective_stage_alias = str(
+            _source_value(stage_alias, "stage_alias", STATE.stage_alias, "") or ""
+        )
+        filters = saved_view.get("filters") if persisted else {}
+        sorting = saved_view.get("sort") if persisted else {}
+        next_filter = str(filters.get("text", "")) if isinstance(filters, dict) else ""
+        next_sort_column = (
+            str(sorting.get("column", "")) if isinstance(sorting, dict) else ""
+        )
+        next_sort_descending = (
+            bool(sorting.get("descending", False)) if isinstance(sorting, dict) else False
+        )
+        if persisted is None and same_active_csv:
+            next_filter = str(STATE.filter_text or "")
+            next_sort_column = str(STATE.sort_column or "")
+            next_sort_descending = bool(STATE.sort_descending)
+
+        source = CsvDatasetSource(
+            canonical_csv,
+            effective_path_column,
+            id_column=effective_id_column,
+            display_columns=effective_display_columns,
+            encoding=effective_encoding,
+            delimiter=effective_delimiter,
+            source_base=effective_source_base,
+        )
+        dataset = _resolve_csv_dataset(
+            source.load(),
+            effective_profile,
+            stage_root=effective_stage_root,
+            stage_alias=effective_stage_alias,
+            require_exists=True,
+        )
+        position = persisted.get("position") if persisted else None
+        requested_index = int((position or {}).get("index", 0))
+        requested_entry = str((position or {}).get("entry_id", ""))
+        active_entries = _view_entries(
+            dataset.entries,
+            filter_text=next_filter,
+            sort_column=next_sort_column,
+            sort_descending=next_sort_descending,
+        )
+        if not active_entries:
+            raise RuntimeError("CSV contains no resolvable, valid structure rows")
+        resume_index = _resume_entry_index(
+            active_entries, requested_entry, requested_index
+        )
+        selected_entry = active_entries[resume_index]
+        row_annotation_store = RowAnnotationStore(
+            annotation_sidecar_path(dataset.source_path)
+        )
+        preflight_context = _MaterializationContext(
+            generation=int(_materialization_generation),
+            cache_enabled=bool(STATE.cache_enabled),
+            stage_root=effective_stage_root,
+            stage_alias=effective_stage_alias,
+        )
+        preflight_materialized = _materialize_entry(
+            selected_entry,
+            preflight_context,
+            staged_source_identity=getattr(
+                selected_entry.path_resolution,
+                "staged_source_identity",
+                None,
+            ),
+        )
+
+        parked = _begin_scene_swap()
+        scene_swap_started = True
+        STATE.source_mode = "csv"
+        STATE.csv_path = dataset.source_path
+        STATE.dataset_dir = _source_parent(dataset.source_path)
+        STATE.path_column = dataset.path_column
+        STATE.id_column = dataset.id_column
+        STATE.display_columns = list(dataset.display_columns)
+        STATE.csv_encoding = dataset.encoding
+        STATE.csv_delimiter = dataset.delimiter
+        STATE.source_base = dataset.source_base
+        STATE.mapping_profile = effective_profile
+        STATE.stage_root = effective_stage_root
+        STATE.stage_alias = effective_stage_alias
+        STATE.filter_text = next_filter
+        STATE.sort_column = next_sort_column
+        STATE.sort_descending = next_sort_descending
+        STATE.dataset = dataset
+        STATE.all_entries = list(dataset.entries)
+        STATE.row_annotation_store = row_annotation_store
+        STATE.undo_history.clear()
+        STATE.annotated_indices.clear()
+        STATE.annotated_entry_ids.clear()
+        _install_entries(
+            dataset.entries,
+            resume_entry_id=requested_entry,
+            index=requested_index,
+        )
+        STATE.materialized_paths[selected_entry.id] = preflight_materialized
+        _rescan_annotated_indices()
+        _load_current_structure()
+        _discard_parked_objects(parked)
+        parked = []
+        scene_swap_started = False
+        state_path = _write_persisted_dataset_state(dataset.source_path)
+        _record_current_config_history()
+        payload = _csv_preview_payload(dataset, effective_profile, row_limit=20)
+        payload.update(
+            {
+                "status": "loaded",
+                "active_count": len(STATE.entries),
+                "state_path": state_path,
+                "annotation_path": STATE.row_annotation_store.path,
+            }
+        )
+        print(
+            f"Structure Annotator: loaded {len(STATE.entries)} navigable rows "
+            f"from {dataset.source_path} ({dataset.count} total rows)"
+        )
+        print(f"Structure Annotator: CSV state: {state_path}")
+        return payload
+    except Exception as exc:
+        try:
+            if scene_swap_started:
+                _rollback_scene_swap(previous, parked)
+            else:
+                _restore_runtime_snapshot(previous)
+        except Exception:
+            traceback.print_exc()
+        print(f"Structure Annotator CSV load error: {exc}")
+        traceback.print_exc()
+        return None
 
 
 def sa_load_dir(path: str = ".", pattern: str = "") -> None:
@@ -1187,20 +2567,12 @@ def sa_load_dir(path: str = ".", pattern: str = "") -> None:
         pattern: Optional explicit regex override. Empty restores the dataset's
             saved pattern, or uses the default for a first-time dataset.
     """
-    previous_dataset_dir = _active_dataset_directory() or STATE.dataset_dir
-    previous = {
-        "dataset_dir": previous_dataset_dir,
-        "pattern": STATE.pattern,
-        "config": copy.deepcopy(_persisted_config()),
-        "files": list(STATE.files),
-        "index": STATE.index,
-        "undo_history": copy.deepcopy(STATE.undo_history),
-        "annotated_indices": set(STATE.annotated_indices),
-        "navigation_session": STATE.navigation_session,
-    }
+    previous = _runtime_snapshot()
+    parked: List[_ParkedManagedObject] = []
+    scene_swap_started = False
     try:
         dataset_dir = os.path.abspath(os.path.expanduser(path))
-        persisted = _read_persisted_dataset_state(dataset_dir)
+        persisted = _read_persisted_dataset_state(dataset_dir, "directory")
         if persisted is not None:
             _apply_persisted_config(persisted["config"])
         explicit_pattern = str(pattern or "").strip()
@@ -1216,30 +2588,64 @@ def sa_load_dir(path: str = ".", pattern: str = "") -> None:
             skip_annotated=STATE.skip_annotated, label_key=label_key
         )
         if not discovered:
-            _apply_persisted_config(previous["config"])
-            STATE.dataset_dir = previous["dataset_dir"]
-            STATE.pattern = previous["pattern"]
+            _restore_runtime_snapshot(previous)
             print(f"Structure Annotator: no files matched in {path}; current dataset kept")
             return
 
-        # Commit only after discovery succeeds.  Old owned objects are removed
-        # exactly so a same-basename file in another dataset cannot be reused.
-        _delete_managed_objects(False)
-        _reset_bg_cache()
-        STATE.dataset_dir = dataset_dir
-        STATE.pattern = effective_pattern
-        STATE.files = discovered
+        entries = _directory_entries(dataset_dir, discovered)
         resume_at = _resume_index(
             dataset_dir,
             discovered,
             persisted.get("position") if persisted is not None else None,
+            entries,
         )
-        STATE.navigation_session = _new_navigation_session(discovered, resume_at)
-        STATE.index = STATE.navigation_session.cursor
+        selected_entry = entries[resume_at]
+        preflight_materialized = _materialize_entry(
+            selected_entry,
+            _MaterializationContext(
+                generation=int(_materialization_generation),
+                cache_enabled=bool(STATE.cache_enabled),
+                stage_root="",
+                stage_alias="",
+            ),
+        )
+        # Keep old owned objects parked until the replacement has loaded.  This
+        # preserves the complete keep_previous scene if the new load fails.
+        parked = _begin_scene_swap()
+        scene_swap_started = True
+        STATE.source_mode = "directory"
+        STATE.dataset_dir = dataset_dir
+        STATE.csv_path = ""
+        STATE.path_column = "structure_path"
+        STATE.id_column = ""
+        STATE.display_columns = []
+        STATE.source_base = dataset_dir
+        STATE.filter_text = ""
+        STATE.sort_column = ""
+        STATE.sort_descending = False
+        STATE.stage_root = ""
+        STATE.stage_alias = ""
+        STATE.pattern = effective_pattern
+        STATE.dataset = AnnotationDataset(
+            source_kind="directory",
+            source_path=dataset_dir,
+            source_base=dataset_dir,
+            entries=tuple(entries),
+            columns=("structure_path", "name"),
+            path_column="structure_path",
+        )
+        STATE.all_entries = list(entries)
+        STATE.row_annotation_store = None
+        _install_entries(entries, index=resume_at)
+        STATE.materialized_paths[selected_entry.id] = preflight_materialized
         STATE.current_object = None
         STATE.undo_history.clear()
+        STATE.annotated_entry_ids.clear()
         _rescan_annotated_indices()
         _load_current_structure()
+        _discard_parked_objects(parked)
+        parked = []
+        scene_swap_started = False
         state_path = _write_persisted_dataset_state(dataset_dir)
         annotated = len(STATE.annotated_indices)
         print(
@@ -1253,20 +2659,10 @@ def sa_load_dir(path: str = ".", pattern: str = "") -> None:
         # A failed new load must not leave a writable context pointing at the
         # wrong dataset.  Restore the old cursor/domain state and reload it.
         try:
-            _delete_managed_objects(False)
-            _reset_bg_cache()
-            _apply_persisted_config(previous["config"])
-            STATE.dataset_dir = previous["dataset_dir"]
-            STATE.pattern = previous["pattern"]
-            STATE.files = previous["files"]
-            STATE.index = previous["index"]
-            STATE.undo_history = previous["undo_history"]
-            STATE.annotated_indices = previous["annotated_indices"]
-            STATE.navigation_session = previous["navigation_session"]
-            STATE.current_object = None
-            if STATE.files:
-                _set_annotation_index(STATE.index)
-                _load_current_structure()
+            if scene_swap_started:
+                _rollback_scene_swap(previous, parked)
+            else:
+                _restore_runtime_snapshot(previous)
         except Exception:
             traceback.print_exc()
         print(f"Structure Annotator load error: {e}")
@@ -1320,14 +2716,17 @@ def sa_annotate(value: str) -> None:
             return
 
         label_key = normalize_label_key(STATE.label_name)
-        anno_path = _resolve_annotation_path(path)
-        prev_value = read_structure_annotations(anno_path).get(label_key)
-        annotate_structure_file(anno_path, label_key, value)
+        entry = STATE.current_entry()
+        entry_id = entry.id if entry is not None else ""
+        prev_value = _annotations_for_index(STATE.index).get(label_key)
+        change = _set_entry_annotation(STATE.index, label_key, value)
 
         # Record for undo (bounded stack).
         STATE.undo_history.append({
             "index": STATE.index,
-            "path": anno_path,
+            "entry_id": entry_id,
+            "path": change.get("path", path),
+            "mode": STATE.source_mode,
             "label_key": label_key,
             "prev_value": prev_value,
             "value": value,
@@ -1335,6 +2734,8 @@ def sa_annotate(value: str) -> None:
         if len(STATE.undo_history) > 100:
             STATE.undo_history.pop(0)
         STATE.annotated_indices.add(STATE.index)
+        if entry_id:
+            STATE.annotated_entry_ids.add(entry_id)
 
         context = {
             "object": obj_name,
@@ -1343,12 +2744,15 @@ def sa_annotate(value: str) -> None:
             "count": str(len(STATE.files)),
             "label": label_key,
             "value": value,
+            "entry_id": entry_id,
+            "row_number": str(entry.row_number if entry and entry.row_number else ""),
         }
         _run_pymol_commands(STATE.bucket_cmds.get(value, ""), context)
         _save_current_dataset_state()
         _record_current_config_history()
 
-        print(f"Annotated {os.path.basename(path)}: {label_key}={value}")
+        display_name = entry.display_name if entry is not None else os.path.basename(path)
+        print(f"Annotated {display_name}: {label_key}={value}")
         if STATE.auto_advance:
             sa_next()
     except Exception as e:
@@ -1364,20 +2768,39 @@ def sa_undo() -> None:
             return
         entry = STATE.undo_history.pop()
         path = entry["path"]
+        entry_id = str(entry.get("entry_id", ""))
         label_key = entry["label_key"]
         prev_value = entry["prev_value"]
         index = entry["index"]
 
-        if prev_value is None:
-            remove_structure_annotation(path, label_key)
-            STATE.annotated_indices.discard(index)
-            restored = "(none)"
+        if entry.get("mode") == "csv":
+            if STATE.row_annotation_store is None:
+                raise RuntimeError("CSV annotation store is unavailable")
+            change = STATE.row_annotation_store.undo(entry_id=entry_id, label=label_key)
+            if change is None:
+                raise RuntimeError("CSV annotation history no longer contains this change")
+            current = change.get("current")
+            restored = "(none)" if current is None else str(current)
+            for candidate, source_entry in enumerate(STATE.entries):
+                if source_entry.id == entry_id:
+                    index = candidate
+                    break
         else:
-            annotate_structure_file(path, label_key, prev_value)
-            STATE.annotated_indices.add(index)
-            restored = prev_value
+            if prev_value is None:
+                remove_structure_annotation(path, label_key)
+                restored = "(none)"
+            else:
+                annotate_structure_file(path, label_key, prev_value)
+                restored = prev_value
 
-        print(f"Undo: {os.path.basename(path)} {label_key} -> {restored}")
+        _rescan_annotated_indices()
+
+        display = (
+            STATE.entries[index].display_name
+            if 0 <= index < len(STATE.entries)
+            else os.path.basename(path)
+        )
+        print(f"Undo: {display} {label_key} -> {restored}")
         # Return to the file we just changed so the user can see the result.
         if 0 <= index < len(STATE.files):
             _navigate_annotation("goto", index)
@@ -1427,6 +2850,16 @@ def sa_next_unannotated() -> None:
         traceback.print_exc()
 
 
+def _unique_csv_column(base: str, used: set) -> str:
+    candidate = str(base)
+    suffix = 2
+    while candidate in used:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    used.add(candidate)
+    return candidate
+
+
 def sa_export_csv(out_path: str = "") -> Optional[str]:
     """
     Export all annotations in the current dataset to a CSV file.
@@ -1442,6 +2875,84 @@ def sa_export_csv(out_path: str = "") -> Optional[str]:
             print("Structure Annotator: no dataset loaded (use sa_load_dir)")
             return None
         label_key = normalize_label_key(STATE.label_name)
+        if STATE.source_mode == "csv":
+            if STATE.dataset is None or STATE.row_annotation_store is None:
+                raise RuntimeError("CSV dataset or annotation store is unavailable")
+            if not out_path:
+                stem = os.path.splitext(os.path.basename(STATE.csv_path))[0]
+                out_path = os.path.join(
+                    STATE.dataset_dir,
+                    f"{stem}_annotated_{label_key}.csv",
+                )
+            destination = os.path.abspath(os.path.expanduser(out_path))
+            if _path_identity(destination) == _path_identity(STATE.csv_path):
+                raise ValueError("CSV export refuses to overwrite the source document")
+            annotations = STATE.row_annotation_store.export_mapping()
+            source_width = len(STATE.dataset.columns)
+            extra_width = max(
+                [max(0, len(entry.raw_values) - source_width) for entry in STATE.dataset.entries]
+                or [0]
+            )
+            header = list(STATE.dataset.columns)
+            used_headers = set(header)
+            extra_headers = [
+                _unique_csv_column(f"__extra_{index + 1}", used_headers)
+                for index in range(extra_width)
+            ]
+            header.extend(extra_headers)
+            annotation_header = f"pymol_annotation_{label_key}"
+            existing_annotation_index = (
+                header.index(annotation_header)
+                if annotation_header in header
+                else None
+            )
+            if existing_annotation_index is None:
+                annotation_header = _unique_csv_column(
+                    annotation_header, used_headers
+                )
+                header.append(annotation_header)
+            rows = []
+            for entry in STATE.dataset.entries:
+                values = list(entry.raw_values)
+                values.extend([""] * (source_width + extra_width - len(values)))
+                annotation_value = annotations.get(entry.id, {}).get(label_key, "")
+                if existing_annotation_index is None:
+                    values.append(annotation_value)
+                else:
+                    values[existing_annotation_index] = annotation_value
+                rows.append(values)
+            os.makedirs(os.path.dirname(destination) or os.curdir, exist_ok=True)
+            descriptor, temporary = tempfile.mkstemp(
+                prefix=".structure_annotations.", suffix=".tmp",
+                dir=os.path.dirname(destination) or os.curdir,
+            )
+            try:
+                with os.fdopen(
+                    descriptor, "w", newline="", encoding="utf-8-sig"
+                ) as fh:
+                    writer = csv.writer(fh, delimiter=STATE.dataset.delimiter or ",")
+                    writer.writerow(header)
+                    writer.writerows(rows)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(temporary, destination)
+                temporary = ""
+            finally:
+                if temporary:
+                    try:
+                        os.unlink(temporary)
+                    except OSError:
+                        pass
+            annotated = sum(
+                1
+                for entry in STATE.dataset.entries
+                if annotations.get(entry.id, {}).get(label_key, "")
+            )
+            print(
+                f"Structure Annotator: exported {len(rows)} CSV rows "
+                f"({annotated} annotated) to {destination}"
+            )
+            return destination
         if not out_path:
             out_path = os.path.join(
                 STATE.dataset_dir or ".", f"annotations_{label_key}.csv"
@@ -1483,18 +2994,22 @@ def sa_save_state() -> Optional[str]:
 def sa_state_status() -> Dict[str, object]:
     """Return the current dataset's persistent-state location and payload."""
 
-    active = _active_dataset_directory()
-    target_dir = active or STATE.dataset_dir or "."
-    path = dataset_state_path(target_dir)
+    active = _active_source_reference()
+    target = active or STATE.csv_path or STATE.dataset_dir or "."
+    kwargs = _state_kwargs() if active else {"source_mode": "directory"}
+    path = dataset_state_path(target, **kwargs)
     result: Dict[str, object] = {
         "status": "inactive" if not active else "active",
-        "dataset_dir": active,
+        "source_mode": STATE.source_mode,
+        "source": active,
+        "dataset_dir": _active_dataset_directory(),
+        "csv_path": STATE.csv_path if STATE.source_mode == "csv" else "",
         "state_path": path,
         "exists": os.path.isfile(_long_path(path)),
     }
     if result["exists"]:
         try:
-            result["state"] = read_dataset_state(target_dir)
+            result["state"] = read_dataset_state(target, **kwargs)
         except StateStoreError as exc:
             result.update({"status": "invalid", "error": str(exc)})
     print(result)
@@ -1533,6 +3048,162 @@ def sa_history_status() -> Dict[str, object]:
         result = {"status": "ok", **history_summary()}
     except Exception as exc:
         result = {"status": "invalid", "error": str(exc)}
+    print(result)
+    return result
+
+
+def _flag(value: object) -> bool:
+    if type(value) is bool:
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off", ""}:
+        return False
+    raise ValueError(f"expected a boolean flag, got {value!r}")
+
+
+def sa_cache_status(include_entries: int = 0) -> Dict[str, object]:
+    result = _get_structure_cache().status(include_entries=_flag(include_entries))
+    print(json.dumps(result, indent=2, sort_keys=True, ensure_ascii=False))
+    return result
+
+
+def sa_cache_clear(force: int = 0) -> Dict[str, object]:
+    result = _get_structure_cache().clear(force=_flag(force))
+    print(result)
+    return result
+
+
+def sa_mapping_list() -> Dict[str, object]:
+    result = {
+        "status": "ok",
+        **mapping_store_status(),
+        "profiles": list_mapping_profiles(),
+    }
+    print(json.dumps(result, indent=2, sort_keys=True, ensure_ascii=False))
+    return result
+
+
+def sa_mapping_add(
+    profile: str,
+    source_prefix: str,
+    target_prefix: str,
+    provider: str = "mapped",
+    priority: int = 0,
+    require_exists: int = 1,
+    case_sensitive: int = 1,
+) -> Dict[str, object]:
+    current = get_mapping_profile(str(profile))
+    rules = list(current.get("rules", [])) if current else []
+    replacement = {
+        "source_prefix": str(source_prefix),
+        "target_prefix": str(target_prefix),
+        "priority": int(priority),
+        "enabled": True,
+        "case_sensitive": _flag(case_sensitive),
+        "require_exists": _flag(require_exists),
+        "provider": str(provider or "mapped"),
+    }
+    rules = [
+        rule
+        for rule in rules
+        if str(rule.get("source_prefix", "")) != str(source_prefix)
+    ]
+    rules.append(replacement)
+    saved = upsert_mapping_profile(
+        str(profile),
+        rules,
+        description=str((current or {}).get("description", "")),
+    )
+    print(json.dumps(saved, indent=2, sort_keys=True, ensure_ascii=False))
+    return saved
+
+
+def sa_mapping_remove(profile: str, source_prefix: str = "") -> Dict[str, object]:
+    name = str(profile)
+    source = str(source_prefix or "")
+    if not source:
+        removed = remove_mapping_profile(name)
+        result = {"status": "removed" if removed else "missing", "profile": name}
+        print(result)
+        return result
+    current = get_mapping_profile(name)
+    if current is None:
+        result = {"status": "missing", "profile": name, "source_prefix": source}
+        print(result)
+        return result
+    rules = [
+        rule for rule in current.get("rules", [])
+        if str(rule.get("source_prefix", "")) != source
+    ]
+    saved = upsert_mapping_profile(
+        name, rules, description=str(current.get("description", ""))
+    )
+    result = {"status": "ok", "profile": saved}
+    print(json.dumps(result, indent=2, sort_keys=True, ensure_ascii=False))
+    return result
+
+
+def sa_filter(
+    query: str = "", sort_column: str = "", descending: int = 0
+) -> Dict[str, object]:
+    if not STATE.all_entries:
+        result = {"status": "inactive", "error": "no dataset loaded"}
+        print(result)
+        return result
+    previous = _runtime_snapshot()
+    current_id = STATE.current_entry_id()
+    parked: List[_ParkedManagedObject] = []
+    scene_swap_started = False
+    try:
+        next_filter = str(query or "")
+        next_sort = str(sort_column or "")
+        next_descending = _flag(descending)
+        active_entries = _view_entries(
+            STATE.all_entries,
+            filter_text=next_filter,
+            sort_column=next_sort,
+            sort_descending=next_descending,
+        )
+        if not active_entries:
+            raise RuntimeError("Structure Annotator: no navigable structure rows")
+        selected_index = _resume_entry_index(active_entries, current_id, STATE.index)
+        selected_entry = active_entries[selected_index]
+        preflight_materialized = _materialize_entry(
+            selected_entry, _materialization_context()
+        )
+        parked = _begin_scene_swap()
+        scene_swap_started = True
+        STATE.filter_text = next_filter
+        STATE.sort_column = next_sort
+        STATE.sort_descending = next_descending
+        _install_entries(STATE.all_entries, resume_entry_id=current_id)
+        STATE.materialized_paths[selected_entry.id] = preflight_materialized
+        STATE.undo_history.clear()
+        _rescan_annotated_indices()
+        _load_current_structure()
+        _discard_parked_objects(parked)
+        parked = []
+        scene_swap_started = False
+        _save_current_dataset_state()
+        result = {
+            "status": "ok",
+            "query": STATE.filter_text,
+            "sort_column": STATE.sort_column,
+            "descending": STATE.sort_descending,
+            "active_count": len(STATE.entries),
+            "total_count": len(STATE.all_entries),
+        }
+    except Exception as exc:
+        try:
+            if scene_swap_started:
+                _rollback_scene_swap(previous, parked)
+            else:
+                _restore_runtime_snapshot(previous)
+        except Exception:
+            traceback.print_exc()
+        result = {"status": "error", "error": str(exc)}
     print(result)
     return result
 
@@ -1711,11 +3382,16 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Structure Annotator")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(900)
+        self.setMinimumHeight(720)
         self._bucket_inputs: Dict[str, QtWidgets.QLineEdit] = {}
         self._value_buttons: List[QtWidgets.QPushButton] = []
         self._history_bindings: List[_HistoryCompletionBinding] = []
         self._bucket_history_bindings: List[_HistoryCompletionBinding] = []
+        self._dataset_table_signature = None
+        self._table_mode = "active"
+        self._table_source_token = ""
+        self._preview_rows_by_id: Dict[str, Dict[str, object]] = {}
         self._state_save_timer = QtCore.QTimer(self)
         self._state_save_timer.setSingleShot(True)
         self._state_save_timer.timeout.connect(self._save_ui_state)
@@ -1740,9 +3416,25 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
 
     def _build_ui(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
+        self.main_tabs = QtWidgets.QTabWidget()
+        source_tab = QtWidgets.QWidget()
+        source_tab_layout = QtWidgets.QVBoxLayout(source_tab)
+        annotation_tab = QtWidgets.QWidget()
+        annotation_tab_layout = QtWidgets.QVBoxLayout(annotation_tab)
+        scores_tab = QtWidgets.QWidget()
+        scores_tab_layout = QtWidgets.QVBoxLayout(scores_tab)
+        self.main_tabs.addTab(source_tab, "Source")
+        self.main_tabs.addTab(annotation_tab, "Annotate")
+        self.main_tabs.addTab(scores_tab, "Scores")
+        layout.addWidget(self.main_tabs, 1)
 
         dataset_box = QtWidgets.QGroupBox("Dataset")
         dataset_layout = QtWidgets.QGridLayout(dataset_box)
+
+        self.source_mode_combo = QtWidgets.QComboBox()
+        self.source_mode_combo.addItem("Directory", "directory")
+        self.source_mode_combo.addItem("CSV + scores", "csv")
+        self.source_mode_combo.currentIndexChanged.connect(self._source_mode_changed)
 
         self.dir_edit = QtWidgets.QLineEdit()
         self.dir_browse = QtWidgets.QPushButton("Browse…")
@@ -1754,14 +3446,90 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         self.load_btn = QtWidgets.QPushButton("Load")
         self.load_btn.clicked.connect(self._load_dataset)
 
-        dataset_layout.addWidget(QtWidgets.QLabel("Directory:"), 0, 0)
-        dataset_layout.addWidget(self.dir_edit, 0, 1)
-        dataset_layout.addWidget(self.dir_browse, 0, 2)
-        dataset_layout.addWidget(QtWidgets.QLabel("Pattern:"), 1, 0)
-        dataset_layout.addWidget(self.pattern_edit, 1, 1, 1, 2)
-        dataset_layout.addWidget(self.load_btn, 2, 2)
+        self.csv_edit = QtWidgets.QLineEdit()
+        self.csv_browse = QtWidgets.QPushButton("Browse CSV…")
+        self.csv_browse.clicked.connect(self._browse_csv)
+        self.path_column_edit = QtWidgets.QLineEdit()
+        self.path_column_edit.setPlaceholderText("required exact header, e.g. structure_path")
+        self.id_column_edit = QtWidgets.QLineEdit()
+        self.id_column_edit.setPlaceholderText("optional unique row ID column")
+        self.display_columns_edit = QtWidgets.QLineEdit()
+        self.display_columns_edit.setPlaceholderText("optional; semicolon-separated; default all scores")
+        self.encoding_combo = QtWidgets.QComboBox()
+        self.encoding_combo.setEditable(True)
+        self.encoding_combo.addItems(["utf-8-sig", "utf-8", "gb18030"])
+        self.delimiter_combo = QtWidgets.QComboBox()
+        self.delimiter_combo.setEditable(True)
+        self.delimiter_combo.addItems(["auto", "comma", "tab", "semicolon"])
+        self.mapping_profile_combo = QtWidgets.QComboBox()
+        self.mapping_profile_combo.setEditable(True)
+        try:
+            self.mapping_profile_combo.addItems(
+                [str(profile["name"]) for profile in list_mapping_profiles()]
+            )
+        except Exception:
+            self.mapping_profile_combo.addItem(DEFAULT_PROFILE_NAME)
+        self.source_base_edit = QtWidgets.QLineEdit()
+        self.source_base_edit.setPlaceholderText("optional base for relative structure paths")
+        self.stage_root_edit = QtWidgets.QLineEdit()
+        self.stage_root_edit.setPlaceholderText("optional WSL allowed root, e.g. /home/admin/data")
+        self.stage_alias_edit = QtWidgets.QLineEdit()
+        self.stage_alias_edit.setPlaceholderText("worker --stage-root alias")
+        self.csv_preview_btn = QtWidgets.QPushButton("Preview mapping")
+        self.csv_preview_btn.clicked.connect(self._preview_csv)
+        self.csv_load_btn = QtWidgets.QPushButton("Load CSV")
+        self.csv_load_btn.clicked.connect(self._load_csv_dataset)
 
-        layout.addWidget(dataset_box)
+        dataset_layout.addWidget(QtWidgets.QLabel("Source mode:"), 0, 0)
+        dataset_layout.addWidget(self.source_mode_combo, 0, 1, 1, 2)
+        dataset_layout.addWidget(QtWidgets.QLabel("Directory:"), 1, 0)
+        dataset_layout.addWidget(self.dir_edit, 1, 1)
+        dataset_layout.addWidget(self.dir_browse, 1, 2)
+        dataset_layout.addWidget(QtWidgets.QLabel("Pattern:"), 2, 0)
+        dataset_layout.addWidget(self.pattern_edit, 2, 1)
+        dataset_layout.addWidget(self.load_btn, 2, 2)
+        dataset_layout.addWidget(QtWidgets.QLabel("CSV file:"), 3, 0)
+        dataset_layout.addWidget(self.csv_edit, 3, 1)
+        dataset_layout.addWidget(self.csv_browse, 3, 2)
+        dataset_layout.addWidget(QtWidgets.QLabel("Path / ID columns:"), 4, 0)
+        csv_columns_row = QtWidgets.QHBoxLayout()
+        csv_columns_row.addWidget(self.path_column_edit)
+        csv_columns_row.addWidget(self.id_column_edit)
+        csv_columns_widget = QtWidgets.QWidget()
+        csv_columns_widget.setLayout(csv_columns_row)
+        dataset_layout.addWidget(csv_columns_widget, 4, 1, 1, 2)
+        dataset_layout.addWidget(QtWidgets.QLabel("Display columns:"), 5, 0)
+        dataset_layout.addWidget(self.display_columns_edit, 5, 1, 1, 2)
+        dataset_layout.addWidget(QtWidgets.QLabel("CSV parsing:"), 6, 0)
+        parsing_row = QtWidgets.QHBoxLayout()
+        parsing_row.addWidget(QtWidgets.QLabel("Encoding"))
+        parsing_row.addWidget(self.encoding_combo)
+        parsing_row.addWidget(QtWidgets.QLabel("Delimiter"))
+        parsing_row.addWidget(self.delimiter_combo)
+        parsing_row.addWidget(QtWidgets.QLabel("Mapping"))
+        parsing_row.addWidget(self.mapping_profile_combo)
+        parsing_widget = QtWidgets.QWidget()
+        parsing_widget.setLayout(parsing_row)
+        dataset_layout.addWidget(parsing_widget, 6, 1, 1, 2)
+        dataset_layout.addWidget(QtWidgets.QLabel("Relative base:"), 7, 0)
+        dataset_layout.addWidget(self.source_base_edit, 7, 1, 1, 2)
+        dataset_layout.addWidget(QtWidgets.QLabel("WSL staging:"), 8, 0)
+        stage_row = QtWidgets.QHBoxLayout()
+        stage_row.addWidget(self.stage_root_edit)
+        stage_row.addWidget(self.stage_alias_edit)
+        stage_widget = QtWidgets.QWidget()
+        stage_widget.setLayout(stage_row)
+        dataset_layout.addWidget(stage_widget, 8, 1, 1, 2)
+        csv_buttons = QtWidgets.QHBoxLayout()
+        csv_buttons.addStretch()
+        csv_buttons.addWidget(self.csv_preview_btn)
+        csv_buttons.addWidget(self.csv_load_btn)
+        csv_buttons_widget = QtWidgets.QWidget()
+        csv_buttons_widget.setLayout(csv_buttons)
+        dataset_layout.addWidget(csv_buttons_widget, 9, 1, 1, 2)
+
+        source_tab_layout.addWidget(dataset_box)
+        source_tab_layout.addStretch()
 
         config_box = QtWidgets.QGroupBox("Annotation")
         config_layout = QtWidgets.QGridLayout(config_box)
@@ -1784,6 +3552,9 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         self.preload_interval_spin.setSingleStep(50)
         self.preload_interval_spin.setSuffix(" ms")
         self.bg_decompress_cb = QtWidgets.QCheckBox("Background decompress .gz (IO-only)")
+        self.cache_enabled_cb = QtWidgets.QCheckBox(
+            "Use persistent Windows-local cache for remote/.gz structures"
+        )
         self.restore_last_cb = QtWidgets.QCheckBox(
             "Restore last dataset when this panel opens"
         )
@@ -1795,6 +3566,7 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
             self.skip_annotated_cb,
             self.preload_enabled_cb,
             self.bg_decompress_cb,
+            self.cache_enabled_cb,
             self.restore_last_cb,
         ):
             checkbox.stateChanged.connect(self._schedule_state_save)
@@ -1827,16 +3599,50 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         preload_row_widget.setLayout(preload_row)
         config_layout.addWidget(preload_row_widget, 7, 1)
         config_layout.addWidget(self.bg_decompress_cb, 8, 1)
-        config_layout.addWidget(self.restore_last_cb, 9, 1)
+        config_layout.addWidget(self.cache_enabled_cb, 9, 1)
+        config_layout.addWidget(self.restore_last_cb, 10, 1)
 
-        config_layout.addWidget(QtWidgets.QLabel("On step (after load):"), 10, 0)
-        config_layout.addWidget(self.step_cmd_edit, 10, 1)
+        config_layout.addWidget(QtWidgets.QLabel("On step (after load):"), 11, 0)
+        config_layout.addWidget(self.step_cmd_edit, 11, 1)
 
-        layout.addWidget(config_box)
+        annotation_tab_layout.addWidget(config_box)
 
         self.values_box = QtWidgets.QGroupBox("Buckets")
         self.values_layout = QtWidgets.QVBoxLayout(self.values_box)
-        layout.addWidget(self.values_box)
+        annotation_tab_layout.addWidget(self.values_box)
+        annotation_tab_layout.addStretch()
+
+        scores_box = QtWidgets.QGroupBox("CSV scores / metadata")
+        scores_layout = QtWidgets.QVBoxLayout(scores_box)
+        view_row = QtWidgets.QHBoxLayout()
+        self.filter_edit = QtWidgets.QLineEdit()
+        self.filter_edit.setPlaceholderText("Filter rows by any displayed/raw value")
+        self.sort_column_combo = QtWidgets.QComboBox()
+        self.sort_column_combo.setEditable(True)
+        self.sort_desc_cb = QtWidgets.QCheckBox("Descending")
+        self.apply_view_btn = QtWidgets.QPushButton("Apply view")
+        self.apply_view_btn.clicked.connect(self._apply_view)
+        view_row.addWidget(QtWidgets.QLabel("Filter:"))
+        view_row.addWidget(self.filter_edit, 2)
+        view_row.addWidget(QtWidgets.QLabel("Sort:"))
+        view_row.addWidget(self.sort_column_combo, 1)
+        view_row.addWidget(self.sort_desc_cb)
+        view_row.addWidget(self.apply_view_btn)
+        scores_layout.addLayout(view_row)
+
+        tables_row = QtWidgets.QHBoxLayout()
+        self.dataset_table = QtWidgets.QTableWidget(0, 3)
+        self.dataset_table.setHorizontalHeaderLabels(["Row", "Status", "Structure"])
+        self.dataset_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.dataset_table.cellClicked.connect(self._dataset_row_clicked)
+        self.metadata_table = QtWidgets.QTableWidget(0, 2)
+        self.metadata_table.setHorizontalHeaderLabels(["Field", "Value"])
+        self.metadata_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.metadata_table.horizontalHeader().setStretchLastSection(True)
+        tables_row.addWidget(self.dataset_table, 3)
+        tables_row.addWidget(self.metadata_table, 2)
+        scores_layout.addLayout(tables_row)
+        scores_tab_layout.addWidget(scores_box, 1)
 
         nav_row = QtWidgets.QHBoxLayout()
         self.prev_btn = QtWidgets.QPushButton("Prev (Alt+Left)")
@@ -1891,6 +3697,12 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
     def _install_history_completers(self) -> None:
         self._history_bindings = [
             _HistoryCompletionBinding(self.dir_edit, "dataset_dir"),
+            _HistoryCompletionBinding(self.csv_edit, "csv_path"),
+            _HistoryCompletionBinding(self.path_column_edit, "path_column"),
+            _HistoryCompletionBinding(self.id_column_edit, "id_column"),
+            _HistoryCompletionBinding(
+                self.mapping_profile_combo.lineEdit(), "mapping_profile"
+            ),
             _HistoryCompletionBinding(self.pattern_edit, "pattern"),
             _HistoryCompletionBinding(self.label_edit, "label_name"),
             _HistoryCompletionBinding(self.values_edit, "values_text"),
@@ -1903,6 +3715,205 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         )
         if directory:
             self.dir_edit.setText(directory)
+
+    def _browse_csv(self) -> None:
+        filename, _selected = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select Structure Score CSV",
+            self.csv_edit.text() or STATE.dataset_dir or ".",
+            "Delimited tables (*.csv *.tsv *.txt);;All files (*)",
+        )
+        if filename:
+            self.csv_edit.setText(filename)
+            self._set_csv_source_widgets(filename)
+
+    def _set_csv_source_widgets(self, csv_path: str) -> None:
+        """Populate source-specific controls from this CSV, never the old CSV."""
+
+        persisted = _read_persisted_dataset_state(str(csv_path), "csv")
+        saved_csv = dict(persisted.get("csv") or {}) if persisted else {}
+        saved_view = dict(persisted.get("view") or {}) if persisted else {}
+        view_columns = saved_view.get("display_columns")
+        columns = saved_csv.get("display_columns", view_columns)
+        if not isinstance(columns, (list, tuple)):
+            columns = []
+        self.path_column_edit.setText(
+            str(saved_csv.get("path_column") or "structure_path")
+        )
+        self.id_column_edit.setText(str(saved_csv.get("id_column") or ""))
+        self.display_columns_edit.setText(";".join(str(value) for value in columns))
+        self.encoding_combo.setCurrentText(
+            str(saved_csv.get("encoding") or DEFAULT_ENCODING)
+        )
+        self.delimiter_combo.setCurrentText(
+            str(saved_csv.get("delimiter") or AUTO_DELIMITER)
+        )
+        self.mapping_profile_combo.setCurrentText(
+            str(
+                (persisted or {}).get("mapping_profile")
+                or STATE.mapping_profile
+                or DEFAULT_PROFILE_NAME
+            )
+        )
+        self.source_base_edit.setText(str(saved_csv.get("source_base") or ""))
+        self.stage_root_edit.setText(str(saved_csv.get("stage_root") or ""))
+        self.stage_alias_edit.setText(str(saved_csv.get("stage_alias") or ""))
+
+    def _source_mode(self) -> str:
+        return str(self.source_mode_combo.currentData() or "directory")
+
+    def _source_mode_changed(self, *args) -> None:
+        csv_mode = self._source_mode() == "csv"
+        for widget in (
+            self.csv_edit, self.csv_browse, self.path_column_edit,
+            self.id_column_edit, self.display_columns_edit, self.encoding_combo,
+            self.delimiter_combo, self.mapping_profile_combo, self.source_base_edit,
+            self.stage_root_edit, self.stage_alias_edit, self.csv_preview_btn,
+            self.csv_load_btn,
+        ):
+            widget.setEnabled(csv_mode)
+        for widget in (self.dir_edit, self.dir_browse, self.pattern_edit, self.load_btn):
+            widget.setEnabled(not csv_mode)
+
+    def _csv_arguments(self) -> Dict[str, str]:
+        return {
+            "csv_path": self.csv_edit.text().strip(),
+            "path_column": self.path_column_edit.text(),
+            "id_column": self.id_column_edit.text(),
+            "display_columns": self.display_columns_edit.text(),
+            "encoding": self.encoding_combo.currentText().strip(),
+            "delimiter": self.delimiter_combo.currentText().strip(),
+            "mapping_profile": self.mapping_profile_combo.currentText().strip(),
+            "source_base": self.source_base_edit.text().strip(),
+            "stage_root": self.stage_root_edit.text().strip(),
+            "stage_alias": self.stage_alias_edit.text().strip(),
+        }
+
+    def _preview_csv(self) -> None:
+        try:
+            payload = sa_csv_preview(**self._csv_arguments())
+            self._populate_preview_table(payload)
+            counts = payload.get("status_counts", {})
+            self.status_label.setText(
+                f"CSV preview: {payload.get('row_count', 0)} rows; {counts}"
+            )
+        except Exception as exc:
+            self.status_label.setText(f"CSV preview failed: {exc}")
+            traceback.print_exc()
+
+    def _load_csv_dataset(self) -> None:
+        self._sync_to_state(update_directory=False, persist=False)
+        result = sa_load_csv(**self._csv_arguments())
+        if result is not None:
+            self._sync_from_state()
+            self._rebuild_value_controls(sync_to_state=False)
+        self._refresh_status()
+
+    @staticmethod
+    def _user_role():
+        role = getattr(QtCore.Qt, "UserRole", None)
+        if role is not None:
+            return role
+        return QtCore.Qt.ItemDataRole.UserRole
+
+    def _populate_preview_table(self, payload: Mapping[str, object]) -> None:
+        rows = list(payload.get("rows") or [])
+        self._table_mode = "preview"
+        self._table_source_token = _path_identity(str(payload.get("csv_path") or "."))
+        self._dataset_table_signature = None
+        self._preview_rows_by_id = {
+            str(dict(row).get("entry_id", "")): dict(row) for row in rows
+        }
+        display_columns = list(payload.get("display_columns") or [])
+        headers = ["Row", "Status", "Structure"] + display_columns
+        self.dataset_table.clear()
+        self.dataset_table.setColumnCount(len(headers))
+        self.dataset_table.setHorizontalHeaderLabels(headers)
+        self.dataset_table.setRowCount(len(rows))
+        for row_index, raw in enumerate(rows):
+            row = dict(raw)
+            values = [
+                row.get("row_number", ""),
+                row.get("status", ""),
+                row.get("display_name", ""),
+            ]
+            metadata = dict(row.get("metadata") or {})
+            values.extend(metadata.get(column, "") for column in display_columns)
+            for column_index, value in enumerate(values):
+                item = QtWidgets.QTableWidgetItem(str(value if value is not None else ""))
+                item.setData(self._user_role(), str(row.get("entry_id", "")))
+                self.dataset_table.setItem(row_index, column_index, item)
+
+    def _apply_view(self) -> None:
+        sa_filter(
+            self.filter_edit.text(),
+            self.sort_column_combo.currentText(),
+            int(self.sort_desc_cb.isChecked()),
+        )
+        self._refresh_status()
+
+    def _dataset_row_clicked(self, row: int, column: int) -> None:
+        item = self.dataset_table.item(row, 0)
+        if item is None:
+            return
+        entry_id = str(item.data(self._user_role()) or "")
+        if self._table_mode == "preview":
+            preview = self._preview_rows_by_id.get(entry_id, {})
+            metadata = dict(preview.get("metadata") or {})
+            rows = [
+                ("entry_id", entry_id),
+                ("row_number", preview.get("row_number", "")),
+                ("raw_path", preview.get("raw_path", "")),
+                ("resolved_path", preview.get("resolved_path", "")),
+                ("status", preview.get("status", "")),
+                ("provider", preview.get("provider", "")),
+                ("matched_rule", preview.get("matched_rule", "")),
+                ("error", preview.get("error", "")),
+            ]
+            rows.extend(metadata.items())
+            self.metadata_table.setRowCount(len(rows))
+            for preview_row, (name, value) in enumerate(rows):
+                self.metadata_table.setItem(
+                    preview_row, 0, QtWidgets.QTableWidgetItem(str(name))
+                )
+                self.metadata_table.setItem(
+                    preview_row,
+                    1,
+                    QtWidgets.QTableWidgetItem(
+                        str(value if value is not None else "")
+                    ),
+                )
+            self.status_label.setText(
+                "CSV preview row; load this CSV before navigating it."
+            )
+            return
+        active_token = (
+            _path_identity(_active_source_reference())
+            if _active_source_reference()
+            else ""
+        )
+        if self._table_source_token != active_token:
+            self.status_label.setText(
+                "Dataset table is stale; refresh or load the selected source again."
+            )
+            return
+        for index, entry in enumerate(STATE.entries):
+            if entry.id == entry_id:
+                self._sync_to_state()
+                sa_goto(index + 1)
+                self._refresh_status()
+                return
+        for entry in STATE.all_entries:
+            if entry.id == entry_id:
+                if entry.is_navigable and not entry.error:
+                    message = "excluded by the current filter; clear or change the filter"
+                else:
+                    message = entry.error or entry.status
+                self.status_label.setText(
+                    f"Row {entry.row_number or entry.ordinal + 1} is not active: "
+                    f"{message}"
+                )
+                return
 
     def _schedule_state_save(self, *args) -> None:
         self._state_save_timer.start(300)
@@ -1920,6 +3931,27 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
                 requested_dir
             ):
                 STATE.dataset_dir = requested_dir
+        requested_csv = self.csv_edit.text().strip()
+        if STATE.source_mode == "csv" and requested_csv:
+            try:
+                same_csv = _path_identity(requested_csv) == _path_identity(STATE.csv_path)
+            except Exception:
+                same_csv = False
+            if same_csv:
+                STATE.path_column = self.path_column_edit.text()
+                STATE.id_column = self.id_column_edit.text()
+                try:
+                    columns = _display_column_names(self.display_columns_edit.text())
+                    if columns is not None:
+                        STATE.display_columns = columns
+                except Exception:
+                    pass
+                STATE.csv_encoding = self.encoding_combo.currentText().strip()
+                STATE.csv_delimiter = self.delimiter_combo.currentText().strip()
+                STATE.mapping_profile = self.mapping_profile_combo.currentText().strip()
+                STATE.source_base = self.source_base_edit.text().strip()
+                STATE.stage_root = self.stage_root_edit.text().strip()
+                STATE.stage_alias = self.stage_alias_edit.text().strip()
         STATE.pattern = self.pattern_edit.text().strip() or STRUCTURE_PATTERN
         STATE.label_name = self.label_edit.text().strip() or "quality"
         STATE.values_text = self.values_edit.text().strip() or "Good,Bad"
@@ -1931,6 +3963,7 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         STATE.preload_ahead = int(self.preload_ahead_spin.value())
         STATE.preload_interval_ms = int(self.preload_interval_spin.value())
         STATE.background_decompress_gz = bool(self.bg_decompress_cb.isChecked())
+        STATE.cache_enabled = bool(self.cache_enabled_cb.isChecked())
         STATE.restore_last_dataset = bool(self.restore_last_cb.isChecked())
         STATE.step_cmd = self.step_cmd_edit.toPlainText().strip() or ""
         for value, edit in self._bucket_inputs.items():
@@ -1939,7 +3972,24 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
             _save_current_dataset_state()
 
     def _sync_from_state(self) -> None:
+        mode_index = self.source_mode_combo.findData(STATE.source_mode)
+        self.source_mode_combo.setCurrentIndex(max(0, mode_index))
         self.dir_edit.setText(STATE.dataset_dir or ".")
+        self.csv_edit.setText(STATE.csv_path or "")
+        self.path_column_edit.setText(STATE.path_column or "structure_path")
+        self.id_column_edit.setText(STATE.id_column or "")
+        self.display_columns_edit.setText(";".join(STATE.display_columns))
+        self.encoding_combo.setCurrentText(STATE.csv_encoding or DEFAULT_ENCODING)
+        self.delimiter_combo.setCurrentText(STATE.csv_delimiter or AUTO_DELIMITER)
+        self.mapping_profile_combo.setCurrentText(
+            STATE.mapping_profile or DEFAULT_PROFILE_NAME
+        )
+        self.source_base_edit.setText(STATE.source_base or "")
+        self.stage_root_edit.setText(STATE.stage_root or "")
+        self.stage_alias_edit.setText(STATE.stage_alias or "")
+        self.filter_edit.setText(STATE.filter_text or "")
+        self.sort_column_combo.setCurrentText(STATE.sort_column or "")
+        self.sort_desc_cb.setChecked(bool(STATE.sort_descending))
         self.pattern_edit.setText(STATE.pattern or STRUCTURE_PATTERN)
         self.label_edit.setText(STATE.label_name or "quality")
         self.values_edit.setText(STATE.values_text or "Good,Bad")
@@ -1951,10 +4001,15 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         self.preload_ahead_spin.setValue(int(STATE.preload_ahead or 0))
         self.preload_interval_spin.setValue(int(STATE.preload_interval_ms or 250))
         self.bg_decompress_cb.setChecked(bool(STATE.background_decompress_gz))
+        self.cache_enabled_cb.setChecked(bool(STATE.cache_enabled))
         self.restore_last_cb.setChecked(bool(STATE.restore_last_dataset))
         self.step_cmd_edit.setPlainText(STATE.step_cmd or "")
+        self._source_mode_changed()
 
     def _load_dataset(self) -> None:
+        if self._source_mode() == "csv":
+            self._load_csv_dataset()
+            return
         target_dir = self.dir_edit.text().strip() or "."
         requested_pattern = self.pattern_edit.text().strip() or STRUCTURE_PATTERN
         active_before = _active_dataset_directory()
@@ -2024,7 +4079,15 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
     def _export_csv(self) -> None:
         self._sync_to_state()
         label_key = normalize_label_key(STATE.label_name)
-        default = os.path.join(STATE.dataset_dir or ".", f"annotations_{label_key}.csv")
+        if STATE.source_mode == "csv" and STATE.csv_path:
+            stem = os.path.splitext(os.path.basename(STATE.csv_path))[0]
+            default = os.path.join(
+                STATE.dataset_dir or ".", f"{stem}_annotated_{label_key}.csv"
+            )
+        else:
+            default = os.path.join(
+                STATE.dataset_dir or ".", f"annotations_{label_key}.csv"
+            )
         out_path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "Export Annotations", default, "CSV Files (*.csv)"
         )
@@ -2097,11 +4160,126 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         sa_annotate(value)
         self._refresh_status()
 
+    def _refresh_dataset_table(self) -> None:
+        entries = list(STATE.all_entries or STATE.entries)
+        display_columns = list(STATE.display_columns)
+        label_key = normalize_label_key(STATE.label_name)
+        annotation_values: Dict[str, str] = {}
+        if STATE.source_mode == "csv" and STATE.row_annotation_store is not None:
+            annotation_values = {
+                entry_id: str(values.get(label_key, ""))
+                for entry_id, values in STATE.row_annotation_store.export_mapping().items()
+            }
+        source_token = (
+            _path_identity(_active_source_reference())
+            if _active_source_reference()
+            else ""
+        )
+        signature = (
+            source_token,
+            tuple(entry.id for entry in entries),
+            tuple(display_columns),
+            label_key,
+        )
+        if (
+            self._table_mode == "active"
+            and source_token == self._table_source_token
+            and signature == self._dataset_table_signature
+        ):
+            current_id = STATE.current_entry_id()
+            for row in range(self.dataset_table.rowCount()):
+                item = self.dataset_table.item(row, 0)
+                row_entry_id = str(item.data(self._user_role()) or "") if item else ""
+                if STATE.source_mode == "csv":
+                    annotation_item = self.dataset_table.item(row, 3)
+                    if annotation_item is not None:
+                        annotation_item.setText(
+                            annotation_values.get(row_entry_id, "")
+                        )
+                if item is not None and row_entry_id == current_id:
+                    self.dataset_table.selectRow(row)
+                    break
+            return
+        self._table_mode = "active"
+        self._table_source_token = source_token
+        self._preview_rows_by_id = {}
+        self._dataset_table_signature = signature
+        headers = ["Row", "Status", "Structure"]
+        if STATE.source_mode == "csv":
+            headers.append(f"Annotation ({label_key})")
+        headers.extend(display_columns)
+        self.dataset_table.clear()
+        self.dataset_table.setColumnCount(len(headers))
+        self.dataset_table.setHorizontalHeaderLabels(headers)
+        self.dataset_table.setRowCount(len(entries))
+        current_id = STATE.current_entry_id()
+        current_row = -1
+        for row, entry in enumerate(entries):
+            values = [
+                entry.row_number if entry.row_number is not None else entry.ordinal + 1,
+                entry.status,
+                entry.display_name,
+            ]
+            if STATE.source_mode == "csv":
+                values.append(annotation_values.get(entry.id, ""))
+            values.extend(entry.metadata.get(column, "") for column in display_columns)
+            for column, value in enumerate(values):
+                item = QtWidgets.QTableWidgetItem(
+                    str(value if value is not None else "")
+                )
+                item.setData(self._user_role(), entry.id)
+                self.dataset_table.setItem(row, column, item)
+            if entry.id == current_id:
+                current_row = row
+        if current_row >= 0:
+            self.dataset_table.selectRow(current_row)
+        selected_sort = self.sort_column_combo.currentText()
+        self.sort_column_combo.blockSignals(True)
+        self.sort_column_combo.clear()
+        self.sort_column_combo.addItem("")
+        self.sort_column_combo.addItems(display_columns)
+        self.sort_column_combo.setCurrentText(selected_sort or STATE.sort_column)
+        self.sort_column_combo.blockSignals(False)
+
+    def _refresh_metadata_table(self) -> None:
+        entry = STATE.current_entry()
+        rows: List[Tuple[str, object]] = []
+        if entry is not None:
+            resolution = entry.path_resolution
+            materialized = STATE.materialized_paths.get(entry.id)
+            rows.extend(
+                [
+                    ("row_number", entry.row_number or entry.ordinal + 1),
+                    ("entry_id", entry.id),
+                    ("raw_path", entry.source_path),
+                    ("resolved_path", entry.resolved_path),
+                    ("status", entry.status),
+                    ("provider", _entry_provider(entry)),
+                    ("matched_rule", getattr(resolution, "matched_rule", "")),
+                    ("materialized_path", materialized.path if materialized else ""),
+                    ("cache_hit", materialized.cache_hit if materialized else ""),
+                    ("error", entry.error or STATE.materialization_errors.get(entry.id, "")),
+                ]
+            )
+            rows.extend((name, value) for name, value in entry.metadata.items())
+        self.metadata_table.setRowCount(len(rows))
+        for row, (name, value) in enumerate(rows):
+            self.metadata_table.setItem(row, 0, QtWidgets.QTableWidgetItem(str(name)))
+            self.metadata_table.setItem(
+                row, 1, QtWidgets.QTableWidgetItem(str(value if value is not None else ""))
+            )
+
     def _refresh_status(self) -> None:
         if not STATE.files:
             self.status_label.setText("No dataset loaded.")
             self.goto_spin.setRange(1, 1)
             self.undo_btn.setEnabled(False)
+            self.dataset_table.setRowCount(0)
+            self.metadata_table.setRowCount(0)
+            self._dataset_table_signature = None
+            self._table_mode = "active"
+            self._table_source_token = ""
+            self._preview_rows_by_id = {}
             return
 
         _ensure_navigation_session()
@@ -2114,12 +4292,13 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         self.undo_btn.setEnabled(bool(STATE.undo_history))
 
         path = STATE.current_file() or ""
-        basename = os.path.basename(path)
+        entry = STATE.current_entry()
+        basename = entry.display_name if entry is not None else os.path.basename(path)
         annotated = len(STATE.annotated_indices)
         total = len(STATE.files)
         remaining = total - annotated
         status_text = (
-            f"{STATE.index + 1}/{total}: {basename}\n"
+            f"{STATE.index + 1}/{total}: {basename} [{STATE.source_mode}]\n"
             f"Progress: {annotated} annotated, {remaining} remaining "
             f"(label '{normalize_label_key(STATE.label_name)}')"
         )
@@ -2128,7 +4307,7 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         label_key = normalize_label_key(STATE.label_name)
         current_value = None
         try:
-            annotations = read_structure_annotations(path)
+            annotations = _annotations_for_index(STATE.index)
             current_value = annotations.get(label_key)
             if annotations:
                 anno_str = ", ".join(f"{k}={v}" for k, v in annotations.items())
@@ -2142,6 +4321,8 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
             status_text += f"\nThis file: {label_key} = {current_value}"
 
         status_text += f"\n{path}"
+        if entry is not None and entry.source_path != path:
+            status_text += f"\nCSV source: {entry.source_path}"
 
         # Highlight the bucket button matching the current file's annotation.
         for btn in self._value_buttons:
@@ -2163,6 +4344,8 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
                     status_text += f"\nClick Reload to sync."
 
         self.status_label.setText(status_text)
+        self._refresh_dataset_table()
+        self._refresh_metadata_table()
 
 
 def show_structure_annotator_panel() -> QtWidgets.QDialog:
@@ -2184,6 +4367,8 @@ def __init_plugin__(app=None) -> None:
 
 
 extend_command(cmd, "sa_load_dir", sa_load_dir)
+extend_command(cmd, "sa_csv_preview", sa_csv_preview)
+extend_command(cmd, "sa_load_csv", sa_load_csv)
 extend_command(cmd, "sa_next", sa_next)
 extend_command(cmd, "sa_prev", sa_prev)
 extend_command(cmd, "sa_annotate", sa_annotate)
@@ -2195,6 +4380,12 @@ extend_command(cmd, "sa_save_state", sa_save_state)
 extend_command(cmd, "sa_state_status", sa_state_status)
 extend_command(cmd, "sa_history_search", sa_history_search)
 extend_command(cmd, "sa_history_status", sa_history_status)
+extend_command(cmd, "sa_cache_status", sa_cache_status)
+extend_command(cmd, "sa_cache_clear", sa_cache_clear)
+extend_command(cmd, "sa_mapping_list", sa_mapping_list)
+extend_command(cmd, "sa_mapping_add", sa_mapping_add)
+extend_command(cmd, "sa_mapping_remove", sa_mapping_remove)
+extend_command(cmd, "sa_filter", sa_filter)
 extend_command(cmd, "sa_bind_keys", sa_bind_keys)
 extend_command(cmd, "sa_unbind_keys", sa_unbind_keys)
 extend_command(cmd, "show_structure_annotator_panel", show_structure_annotator_panel)

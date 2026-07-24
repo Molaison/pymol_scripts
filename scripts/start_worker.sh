@@ -12,6 +12,9 @@ host=127.0.0.1
 port=8765
 max_body_mb=10
 socket_timeout=15
+stage_roots=
+max_stage_mb=256
+stage_timeout=60
 allow_no_token=0
 allow_non_loopback=0
 
@@ -30,6 +33,10 @@ Options:
   --port PORT               TCP port (default: 8765).
   --max-body-mb NUMBER      Request body limit in MiB (default: 10).
   --socket-timeout SECONDS  Client read timeout (default: 15).
+  --stage-root ALIAS=PATH   Allow single-file staging below PATH (repeatable).
+                            Staging is disabled when this option is absent.
+  --max-stage-mb NUMBER     Maximum staged file size in MiB (default: 256).
+  --stage-timeout SECONDS   Staging transfer deadline (default: 60).
   --allow-no-token          Explicitly allow no Bearer token on loopback only.
   --allow-non-loopback      Explicitly allow one exact non-loopback address;
                             requires a non-empty, sufficiently long token.
@@ -44,6 +51,7 @@ Examples:
   export PYMOLPLUGINS_WORKER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
   scripts/start_worker.sh
   scripts/start_worker.sh --python .venv-worker/bin/python --port 8876
+  scripts/start_worker.sh --stage-root structures=/home/user/structures
 
 For an exact WSL IPv4 fallback, use both --host <address> and
 --allow-non-loopback. Wildcard binds (0.0.0.0 and ::) are always refused.
@@ -83,6 +91,29 @@ while [ "$#" -gt 0 ]; do
         --socket-timeout)
             need_value "$@"
             socket_timeout=$2
+            shift 2
+            ;;
+        --stage-root)
+            need_value "$@"
+            case "$2" in
+                *'
+'*)
+                    echo "Error: --stage-root must not contain a newline" >&2
+                    exit 2
+                    ;;
+            esac
+            stage_roots="${stage_roots}${stage_roots:+
+}$2"
+            shift 2
+            ;;
+        --max-stage-mb)
+            need_value "$@"
+            max_stage_mb=$2
+            shift 2
+            ;;
+        --stage-timeout)
+            need_value "$@"
+            stage_timeout=$2
             shift 2
             ;;
         --allow-no-token)
@@ -185,7 +216,25 @@ set -- "$python_bin" -m pymolplugins.worker.app \
     --host "$host" \
     --port "$port" \
     --max-body-mb "$max_body_mb" \
-    --socket-timeout "$socket_timeout"
+    --socket-timeout "$socket_timeout" \
+    --max-stage-mb "$max_stage_mb" \
+    --stage-timeout "$stage_timeout"
+if [ -n "$stage_roots" ]; then
+    old_ifs=$IFS
+    case $- in
+        *f*) restore_glob=0 ;;
+        *) restore_glob=1; set -f ;;
+    esac
+    IFS='
+'
+    for stage_root in $stage_roots; do
+        set -- "$@" --stage-root "$stage_root"
+    done
+    IFS=$old_ifs
+    if [ "$restore_glob" -eq 1 ]; then
+        set +f
+    fi
+fi
 if [ "$is_loopback" -ne 1 ]; then
     set -- "$@" --allow-non-loopback
 fi

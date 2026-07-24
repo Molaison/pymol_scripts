@@ -79,6 +79,12 @@ def _seed_config() -> Dict[str, object]:
 
 
 def run_qt_smoke(repository: str) -> Dict[str, Any]:
+    trace_enabled = os.environ.get("PP_QT_SMOKE_TRACE", "").strip() == "1"
+
+    def progress(message: str) -> None:
+        if trace_enabled:
+            print(f"QT_SMOKE_TRACE {message}", flush=True)
+
     repository = os.path.abspath(repository)
     if repository not in sys.path:
         sys.path.insert(0, repository)
@@ -92,8 +98,12 @@ def run_qt_smoke(repository: str) -> Dict[str, Any]:
 
     history_root = tempfile.mkdtemp(prefix="PymolPluginsQtHistory-")
     previous_history = os.environ.get("PYMOLPLUGINS_ANNOTATOR_HISTORY")
+    previous_mappings = os.environ.get("PYMOLPLUGINS_ANNOTATOR_MAPPINGS")
     os.environ["PYMOLPLUGINS_ANNOTATOR_HISTORY"] = os.path.join(
         history_root, "history.json"
+    )
+    os.environ["PYMOLPLUGINS_ANNOTATOR_MAPPINGS"] = os.path.join(
+        history_root, "path_mappings.json"
     )
     panel = None
     try:
@@ -104,8 +114,10 @@ def run_qt_smoke(repository: str) -> Dict[str, Any]:
         import pymolplugins.annotation.plugin as annotation
 
         panel = annotation.StructureAnnotatorPanel()
+        progress("panel-created")
         panel.show()
         app.processEvents()
+        progress("panel-shown")
         _require(
             panel.dir_edit.text() == dataset_hint,
             "latest global snapshot did not restore the dataset path",
@@ -119,12 +131,54 @@ def run_qt_smoke(repository: str) -> Dict[str, Any]:
             not panel.restore_last_cb.isChecked(),
             "restore-last opt-out was not restored from global history",
         )
+        _require(
+            panel.dataset_table.columnCount() >= 3
+            and panel.metadata_table.columnCount() == 2,
+            "CSV metadata widgets were not constructed",
+        )
+        preview_navigation_calls = []
+        original_goto = annotation.sa_goto
+        try:
+            annotation.sa_goto = lambda position: preview_navigation_calls.append(position)
+            panel._populate_preview_table(
+                {
+                    "csv_path": os.path.join(history_root, "preview.csv"),
+                    "display_columns": ["score"],
+                    "rows": [
+                        {
+                            "entry_id": "preview-entry",
+                            "row_number": 2,
+                            "display_name": "preview.pdb",
+                            "raw_path": "/remote/preview.pdb",
+                            "resolved_path": "K:\\preview.pdb",
+                            "status": "available",
+                            "provider": "sshfs-win",
+                            "matched_rule": "x_k",
+                            "error": None,
+                            "metadata": {"score": "0.9"},
+                        }
+                    ],
+                }
+            )
+            panel._dataset_row_clicked(0, 0)
+            _require(
+                panel._table_mode == "preview"
+                and not preview_navigation_calls
+                and "before navigating" in panel.status_label.text(),
+                "preview table click navigated or was not source-isolated",
+            )
+        finally:
+            annotation.sa_goto = original_goto
+        progress("panel-contract-checked")
+        panel.main_tabs.setCurrentIndex(1)
+        app.processEvents()
 
         step_edit = panel.step_cmd_edit
         step_edit.clear()
         step_edit.setFocus()
         qt_test.QTest.keyClicks(step_edit, "cartn")
         app.processEvents()
+        progress("step-typed")
         step_binding = panel._history_bindings[-1]
         step_suggestions = list(step_binding.model.stringList())
         step_popup = bool(step_binding.completer.popup().isVisible())
@@ -142,6 +196,7 @@ def run_qt_smoke(repository: str) -> Dict[str, Any]:
             pos=rectangle.center(),
         )
         app.processEvents()
+        progress("step-accepted")
         _require(
             step_edit.toPlainText() == "show cartoon, {object}",
             "mouse completion did not replace the full multiline field",
@@ -152,6 +207,7 @@ def run_qt_smoke(repository: str) -> Dict[str, Any]:
         bucket_edit.setFocus()
         qt_test.QTest.keyClicks(bucket_edit, "evrythng")
         app.processEvents()
+        progress("bucket-typed")
         bucket_binding = panel._bucket_history_bindings[0]
         bucket_suggestions = list(bucket_binding.model.stringList())
         bucket_popup = bool(bucket_binding.completer.popup().isVisible())
@@ -168,6 +224,7 @@ def run_qt_smoke(repository: str) -> Dict[str, Any]:
             bucket_edit, _qt_enum(QtCore.Qt, "Key", "Key_Return")
         )
         app.processEvents()
+        progress("bucket-accepted")
         _require(
             bucket_edit.text() == "hide everything, {object}",
             "keyboard completion did not replace the full bucket field",
@@ -193,17 +250,25 @@ def run_qt_smoke(repository: str) -> Dict[str, Any]:
             "bucket_popup_visible": bucket_popup,
             "bucket_suggestions": bucket_suggestions,
             "bucket_keyboard_accepted": bucket_edit.text(),
+            "preview_click_navigation_calls": preview_navigation_calls,
         }
     finally:
+        progress("cleanup-begin")
         if panel is not None:
             panel.close()
             panel.deleteLater()
             app.processEvents()
+        progress("cleanup-panel-done")
         if previous_history is None:
             os.environ.pop("PYMOLPLUGINS_ANNOTATOR_HISTORY", None)
         else:
             os.environ["PYMOLPLUGINS_ANNOTATOR_HISTORY"] = previous_history
+        if previous_mappings is None:
+            os.environ.pop("PYMOLPLUGINS_ANNOTATOR_MAPPINGS", None)
+        else:
+            os.environ["PYMOLPLUGINS_ANNOTATOR_MAPPINGS"] = previous_mappings
         shutil.rmtree(history_root, ignore_errors=True)
+        progress("cleanup-complete")
 
 
 def _write_result(path: str, result: Dict[str, Any]) -> None:

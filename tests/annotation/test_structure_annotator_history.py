@@ -7,6 +7,7 @@ import unittest
 from pymolplugins.annotation.history_store import (
     HISTORY_ENVIRONMENT_VARIABLE,
     HISTORY_SCHEMA,
+    HISTORY_SCHEMA_V1,
     HistoryStoreError,
     global_history_path,
     history_summary,
@@ -139,6 +140,102 @@ class StructureAnnotatorHistoryTests(unittest.TestCase):
     def test_unknown_search_field_is_rejected(self):
         with self.assertRaisesRegex(HistoryStoreError, "unknown history field"):
             search_config_history("not-a-field", "anything")
+
+    def test_records_csv_source_fields_and_fuzzy_column_history(self):
+        csv_path = os.path.join(self.temporary.name, "ranked designs.csv")
+        with open(csv_path, "w", encoding="utf-8") as handle:
+            handle.write("structure,iptm,interface_ddg\nmodel.pdb,0.9,-3.1\n")
+
+        record_config_history(
+            "",
+            self._config(),
+            source_mode="csv",
+            csv_path=csv_path,
+            path_column="structure",
+            id_column="design_id",
+            display_columns=["iptm", "interface_ddg"],
+            mapping_profile={"name": "x_k", "rules": []},
+        )
+
+        snapshot = latest_config_snapshot()
+        self.assertEqual(snapshot["source_mode"], "csv")
+        self.assertEqual(snapshot["csv_path"], os.path.abspath(csv_path))
+        self.assertEqual(snapshot["dataset_dir"], os.path.dirname(csv_path))
+        self.assertEqual(snapshot["config"]["path_column"], "structure")
+        self.assertEqual(
+            snapshot["config"]["display_columns"],
+            ["iptm", "interface_ddg"],
+        )
+        self.assertEqual(snapshot["config"]["mapping_profile"]["name"], "x_k")
+        self.assertEqual(search_config_history("source_mode", "cs"), ["csv"])
+        self.assertEqual(
+            search_config_history("csv_path", "ranked")[0],
+            os.path.abspath(csv_path),
+        )
+        self.assertEqual(
+            search_config_history("path_column", "strct")[0], "structure"
+        )
+        self.assertEqual(
+            search_config_history("display_columns", "interddg")[0],
+            "interface_ddg",
+        )
+        self.assertEqual(
+            search_config_history("mapping_profile", "xk")[0], "x_k"
+        )
+        summary = history_summary()
+        self.assertEqual(summary["latest_source_mode"], "csv")
+        self.assertEqual(summary["latest_csv_path"], os.path.abspath(csv_path))
+
+    def test_v1_history_is_migrated_in_memory_and_rewritten_on_record(self):
+        dataset = os.path.join(self.temporary.name, "legacy dataset")
+        os.mkdir(dataset)
+        path = global_history_path()
+        os.makedirs(os.path.dirname(path))
+        legacy = {
+            "schema": HISTORY_SCHEMA_V1,
+            "updated_at_utc": "2026-07-24T00:00:00+00:00",
+            "snapshots": [
+                {
+                    "dataset_dir": dataset,
+                    "recorded_at_utc": "2026-07-24T00:00:00+00:00",
+                    "count": 1,
+                    "config": self._config(),
+                }
+            ],
+            "fields": {
+                "dataset_dir": [
+                    {
+                        "value": dataset,
+                        "count": 1,
+                        "last_used_utc": "2026-07-24T00:00:00+00:00",
+                    }
+                ],
+                "pattern": [],
+                "label_name": [],
+                "values_text": [],
+                "step_cmd": [],
+                "bucket_cmd": [],
+            },
+        }
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(legacy, handle)
+
+        migrated = read_global_history()
+
+        self.assertEqual(migrated["schema"], HISTORY_SCHEMA)
+        self.assertEqual(migrated["snapshots"][0]["source_mode"], "directory")
+        self.assertEqual(
+            migrated["snapshots"][0]["config"]["source_mode"], "directory"
+        )
+        self.assertEqual(migrated["fields"]["csv_path"], [])
+        with open(path, "r", encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["schema"], HISTORY_SCHEMA_V1)
+
+        record_config_history(dataset, self._config())
+        with open(path, "r", encoding="utf-8") as handle:
+            rewritten = json.load(handle)
+        self.assertEqual(rewritten["schema"], HISTORY_SCHEMA)
+        self.assertEqual(rewritten["snapshots"][0]["count"], 2)
 
 
 if __name__ == "__main__":

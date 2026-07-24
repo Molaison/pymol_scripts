@@ -17,12 +17,26 @@ from urllib.parse import urlparse
 try:
     from pymolplugins.worker.backends.plip import PlipBackend, PlipBackendError
     from pymolplugins.worker.backends.rosetta import RosettaBackend, RosettaBackendError
+    from pymolplugins.worker.staging import (
+        FileStagingBackend,
+        StagingError,
+        parse_stage_roots,
+        stage_identity_headers,
+        stage_identity_payload,
+    )
 except ImportError:
     _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     if _ROOT not in sys.path:
         sys.path.insert(0, _ROOT)
     from pymolplugins.worker.backends.plip import PlipBackend, PlipBackendError  # type: ignore
     from pymolplugins.worker.backends.rosetta import RosettaBackend, RosettaBackendError  # type: ignore
+    from pymolplugins.worker.staging import (  # type: ignore
+        FileStagingBackend,
+        StagingError,
+        parse_stage_roots,
+        stage_identity_headers,
+        stage_identity_payload,
+    )
 
 
 WORKER_SCHEMA = "pymolplugins.worker/1.0"
@@ -48,6 +62,9 @@ class WorkerApp:
         token: str = "",
         max_body_bytes: int = 10 * 1024 * 1024,
         socket_timeout: float = 15.0,
+        stage_roots: Optional[Mapping[str, str]] = None,
+        max_stage_file_bytes: int = 256 * 1024 * 1024,
+        stage_timeout: float = 60.0,
     ):
         self.token = token
         self.max_body_bytes = int(max_body_bytes)
@@ -58,6 +75,11 @@ class WorkerApp:
             raise ValueError("socket_timeout must be positive")
         self.rosetta = RosettaBackend()
         self.plip = PlipBackend()
+        self.staging = FileStagingBackend(
+            stage_roots,
+            max_file_bytes=max_stage_file_bytes,
+            max_stream_seconds=stage_timeout,
+        )
 
     def health(self) -> Dict[str, object]:
         return {
@@ -67,6 +89,7 @@ class WorkerApp:
             "platform": platform.platform(),
             "pid": os.getpid(),
             "auth_required": bool(self.token),
+            "staging": self.staging.capabilities(),
             "backends": {
                 "rosetta": self.rosetta.health(),
                 "plip": self.plip.health(),
@@ -83,12 +106,17 @@ class WorkerApp:
             },
             "rosetta": self.rosetta.capabilities(),
             "plip": self.plip.health(),
+            "staging": self.staging.capabilities(),
             "endpoints": [
                 "GET /v1/health",
                 "GET /v1/capabilities",
                 "POST /v1/analyze",
                 "POST /v1/interactions/plip",
-            ],
+            ] + (
+                ["POST /v1/stage/file", "POST /v1/stage/stat"]
+                if self.staging.enabled
+                else []
+            ),
         }
 
     def authorized(self, header: Optional[str]) -> bool:
@@ -137,6 +165,11 @@ def make_handler(app: WorkerApp):
             return False
 
         def _read_json(self):
+            value = self._read_json_object()
+            _reject_forbidden_fields(value)
+            return value
+
+        def _read_json_object(self):
             content_type = self.headers.get("Content-Type", "")
             media_type = content_type.split(";", 1)[0].strip().lower()
             if media_type != "application/json":
@@ -166,8 +199,46 @@ def make_handler(app: WorkerApp):
                 raise ValueError("schema_version is required")
             if value.get("schema_version") != 1:
                 raise ValueError("unsupported schema_version")
-            _reject_forbidden_fields(value)
             return value
+
+        def _read_stage_request(self):
+            value = self._read_json_object()
+            allowed = {"schema_version", "root_alias", "relative_path"}
+            extras = sorted(set(value).difference(allowed))
+            if extras:
+                raise ValueError("unsupported staging field: %s" % extras[0])
+            if "root_alias" not in value or "relative_path" not in value:
+                raise ValueError("root_alias and relative_path are required")
+            return value
+
+        def _send_stage_file(self, request: Mapping[str, object]):
+            with app.staging.open_file(
+                request.get("root_alias"), request.get("relative_path")
+            ) as opened:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(opened.identity.size))
+                self.send_header("Cache-Control", "no-store")
+                for name, value in stage_identity_headers(opened).items():
+                    self.send_header(name, value)
+                self.end_headers()
+                try:
+                    for chunk in app.staging.iter_bytes(opened):
+                        self.wfile.write(chunk)
+                except (OSError, StagingError):
+                    # Headers have already committed the binary response. Closing the
+                    # connection makes a short transfer fail client-side; a JSON error
+                    # cannot safely be appended to binary structure bytes.
+                    self.close_connection = True
+                except Exception:
+                    traceback.print_exc()
+                    self.close_connection = True
+
+        def _send_stage_stat(self, request: Mapping[str, object]):
+            with app.staging.open_file(
+                request.get("root_alias"), request.get("relative_path")
+            ) as opened:
+                self._send(200, stage_identity_payload(opened))
 
         def do_GET(self):
             if not self._check_auth():
@@ -184,6 +255,30 @@ def make_handler(app: WorkerApp):
             if not self._check_auth():
                 return
             path = urlparse(self.path).path
+            if path in {"/v1/stage/file", "/v1/stage/stat"}:
+                if not app.staging.enabled:
+                    self._error(404, "staging_disabled", "file staging is not enabled")
+                    return
+                try:
+                    request = self._read_stage_request()
+                    if path == "/v1/stage/file":
+                        self._send_stage_file(request)
+                    else:
+                        self._send_stage_stat(request)
+                except OverflowError as exc:
+                    self._error(413, "request_too_large", str(exc))
+                except TypeError as exc:
+                    self._error(415, "unsupported_media_type", str(exc))
+                except socket.timeout:
+                    self._error(408, "request_timeout", "request body read timed out")
+                except (ValueError, json.JSONDecodeError) as exc:
+                    self._error(400, "invalid_request", str(exc))
+                except StagingError as exc:
+                    self._error(exc.http_status, exc.code, str(exc))
+                except Exception:
+                    traceback.print_exc()
+                    self._error(500, "internal_error", "internal staging error")
+                return
             if path not in {"/v1/analyze", "/v1/interactions/plip"}:
                 self._error(404, "not_found", "unknown endpoint")
                 return
@@ -276,6 +371,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-body-mb", type=float, default=10.0)
     parser.add_argument("--socket-timeout", type=float, default=15.0)
     parser.add_argument(
+        "--stage-root",
+        action="append",
+        default=[],
+        metavar="ALIAS=PATH",
+        help="allow staging below PATH using ALIAS (repeatable; absent disables staging)",
+    )
+    parser.add_argument("--max-stage-mb", type=float, default=256.0)
+    parser.add_argument("--stage-timeout", type=float, default=60.0)
+    parser.add_argument(
         "--allow-non-loopback",
         action="store_true",
         help="explicitly permit a non-loopback bind; a Bearer token is also required",
@@ -291,6 +395,14 @@ def main(argv=None) -> int:
         raise SystemExit("--max-body-mb must be positive")
     if args.socket_timeout <= 0:
         raise SystemExit("--socket-timeout must be positive")
+    if args.max_stage_mb <= 0:
+        raise SystemExit("--max-stage-mb must be positive")
+    if args.stage_timeout <= 0:
+        raise SystemExit("--stage-timeout must be positive")
+    try:
+        stage_roots = parse_stage_roots(args.stage_root)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     try:
         token = (
             args.token
@@ -324,12 +436,15 @@ def main(argv=None) -> int:
         token=token,
         max_body_bytes=int(args.max_body_mb * 1024 * 1024),
         socket_timeout=args.socket_timeout,
+        stage_roots=stage_roots,
+        max_stage_file_bytes=int(args.max_stage_mb * 1024 * 1024),
+        stage_timeout=args.stage_timeout,
     )
     server_class = _server_class_for_host(args.host)
     server = server_class((args.host, args.port), make_handler(app))
     print(
         f"PymolPlugins worker listening on http://{args.host}:{args.port} "
-        f"(auth_required={bool(token)})",
+        f"(auth_required={bool(token)}, staging_enabled={bool(stage_roots)})",
         flush=True,
     )
     try:

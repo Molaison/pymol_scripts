@@ -1,6 +1,6 @@
 # Implementation Status
 
-Snapshot date: 2026-07-24 (Asia/Shanghai)
+Snapshot date: 2026-07-25 (Asia/Shanghai)
 Specification: [development_specification.md](development_specification.md)
 
 This file separates code existence, WSL evidence, automated Windows Host
@@ -8,9 +8,13 @@ evidence, interactive Host evidence, and optional licensed-backend evidence.
 
 Current evidence anchors:
 
-- WSL: 212 standard-library unit/fake-command tests pass.
+- WSL: 333 standard-library unit/fake-command tests pass.
 - Windows Host: the automated PyMOL 3.1.3.1 record is
-  [automatic pass / manual pending](validation/windows_host_smoke_2026-07-24.md).
+  [automatic pass / manual pending](validation/windows_host_smoke_2026-07-25.md).
+- Structure Annotator: `HOST-ANNOTATION-CSV-01` and the real PyQt5 smoke pass;
+  real Windows `K:` FUSE mapping/cache passes, and the PyMOL-independent
+  allowlisted WSL staging client/cache/materializer chain passes a real worker
+  cold/warm E2E.
 - WSL worker: a real loopback run on Python 3.12.13 returned `status=ok` with
   PLIP 3.0.0 available; Windows Host PyMOL reached that worker through localhost
   forwarding and verified all 63 canonical commands.
@@ -50,9 +54,20 @@ context/offset, pin clearing, and explicit session replacement are also tested.
 
 | IDs | Status | Evidence and remaining boundary |
 | --- | --- | --- |
-| ANNO-01, ANNO-02 | Host smoke verified (3.1.3.1) + WSL verified | Dataset-local `.pymolplugins/structure_annotator.json` is schema-checked, size-bounded, and atomically replaced. Tests cover first-load creation, independent configs for two datasets, On-step/bucket/preload restoration, relative-file cursor recovery, missing-file fallback, corrupt JSON repair, and exclusion of undo/object/cache state. Host restored `b.pdb`, the complete config, and commands from a quoted path containing spaces; the Windows hidden attribute was set. |
-| ANNO-03 | Host Qt/storage/search + WSL verified | Global history snapshots and six field histories are bounded, de-duplicated, atomically written, corrupt-file quarantined, and fuzzy-ranked by textual relevance plus frequency/recency. Headless PyMOL wrote the global schema through a temporary profile path and resolved `cartn` to the complete command. A separate visible Host PyQt5 smoke created the full panel, observed both popups, accepted On-step by mouse and bucket command by keyboard, and verified 5 fixed plus 2 dynamic completers. A latest snapshot reopens its dataset by default; a fresh-process visual check of the opt-out remains manual. |
+| ANNO-01, ANNO-02 | Host smoke verified (3.1.3.1) + WSL verified | Version-2 dataset-local state is schema-checked, size-bounded, and atomically replaced. Tests cover directory/CSV isolation, version-1 directory migration, On-step/bucket/preload/cache restoration, relative-file or stable-entry cursor recovery, missing-entry fallback, corrupt JSON repair, and exclusion of undo/object/materialized-cache state. Host restored `b.pdb`, the complete config, and commands from a quoted path containing spaces; the Windows hidden attribute was set. |
+| ANNO-03 | Host Qt/storage/search + WSL verified | Global history snapshots and 12 field histories are bounded, de-duplicated, atomically written, corrupt-file quarantined, and fuzzy-ranked by textual relevance plus frequency/recency. Headless PyMOL wrote the global schema through a temporary profile path and resolved `cartn` to the complete command. A separate real Host PyQt5 smoke created the three-tab panel, observed both popups, accepted On-step by mouse and bucket command by keyboard, and verified fixed/dynamic completers plus preview-source isolation. A latest snapshot reopens its source by default; a fresh-process visual check of the opt-out remains manual. |
 | ANNO-04 | Host smoke verified (3.1.3.1) | `HOST-ANNOTATION-STATE-01` is registered and passed. It uses a quoted directory containing spaces and a temporary global history path, and asserts Windows hidden state, schema/config/cursor restoration, and fuzzy command lookup without polluting the real user profile. Removing `cmd.sync()` from the parser callback eliminated the observed self-wait `wait_queue` timeout on rerun. |
+
+### Structure Annotator CSV, mapping, and cache
+
+| IDs | Status | Evidence and remaining boundary |
+| --- | --- | --- |
+| ANNO-CSV-01 | WSL verified | CSV/TSV parsing covers BOM, auto/explicit delimiters, exact headers, quoted newlines/physical row numbers, ragged rows, empty/duplicate IDs, duplicate structure paths, portable basename-namespaced entry IDs, numeric typing, and immutable row metadata. |
+| ANNO-CSV-02, ANNO-CSV-03 | WSL verified + Host transaction success | Preview does not write scene/session/state/history/mapping data and performs staging `stat` when configured; preview rows cannot navigate an old source. Directory/CSV/filter switches preflight the new entry, park old managed objects, and either commit or restore the complete prior scene. Tri-state source settings restore per-CSV values, while a newly selected CSV inherits no parser/ID/display/base/staging values from the old CSV. Host `HOST-ANNOTATION-CSV-01` exercises the successful quoted-path transaction. A deliberately injected real Host load failure remains a manual gate; all rollback branches are fake-PyMOL tested. |
+| ANNO-CSV-04 | Host smoke verified (3.1.3.1) + WSL verified | Append-only row/label JSONL supports fsync, torn-tail recovery, bounded validation and undo. Source CSV/PDB bytes remain unchanged. Export refuses source overwrite, writes `pymol_annotation_<label>` without duplicate headers, preserves ragged source values, and is re-importable. Duplicate source paths remain independently annotated. |
+| ANNO-CSV-05 | Real Windows `K:` FUSE verified | `/xcfhome/zpzeng/mount_local`, `/xcfhome/zpzeng`, and literal `~/` resolve to `K:\`; all three aliases share one physical-target cache key (`cold=false`, then two warm hits). Direct `K:\...` is recognized as a configured remote drive and shows its own cold/warm persistent-cache pair. The 75,609-byte source SHA-256/size/mtime stayed unchanged, and cache objects were on Windows-local `C:`. |
+| ANNO-CSV-06 | Real WSL worker core verified | The PyMOL-independent Bearer-authenticated client/cache/materializer chain with root alias `structures` produced exactly `POST /v1/stage/stat`, `POST /v1/stage/file`, `POST /v1/stage/stat`. Cold materialization missed, the second stat hit a cache key containing the complete `v1-...` metadata token, and a reopened cache also hit; source bytes were unchanged. Controller tests verify a CSV load reuses its fresh resolution stat rather than issuing a redundant preflight stat. Unit tests additionally cover wrong bearer, missing, symlink/traversal/regular-file/size/deadline checks and response validation. |
+| ANNO-CSV-07 | Host smoke + real PyQt5 verified | `HOST-ANNOTATION-CSV-01` loads a Windows-local CSV/path containing spaces through real `cmd.do`, keeps duplicate path rows independent, annotates, exports, restores state/cursor, and verifies source bytes. The Qt smoke validates Source/Annotate/Scores widgets and that clicking a preview row makes zero `sa_goto` calls. Windows-PyMOL-to-WSL staging, large-CSV `QTableWidget` performance, and PyMOL 2.x are still manual gates. |
 
 ### Object/group targets
 
@@ -130,8 +145,9 @@ downloaded or added.
 | Runtime doctor and `pp_capabilities` | Host smoke verified for complete commands/API/cache/UNC and live PLIP worker state; configured ANVIL state is reported. |
 | Transactional interaction replacement | Implemented; a failed new render restores the prior exact result instead of leaving a blank group. |
 | Windows fixture/smoke automation | Implemented with versioned JSON, PowerShell gate, local Windows cwd, configurable exe/repository/output paths, and exact cleanup. |
-| WSL worker operational docs/probe/start wrapper | Implemented and live-loopback verified. |
-| Result freshness/caching | Not implemented; still a follow-up optimization. |
+| WSL worker operational docs/probe/start wrapper | Implemented and live-loopback verified, including authenticated allowlisted `stat/file` staging and cleanup. |
+| Structure source freshness/caching | Implemented: physical-path/version-token identities, atomic persistent cache, LRU limits/pins, mapped/remote-drive/gzip materialization, and WSL staging cold/warm lookup. |
+| Analysis-result freshness/caching | Not implemented; PLIP/Rosetta result caching remains a follow-up optimization. |
 | Navigation-triggered automatic analysis | Hook substrate exists; policy/caching orchestration remains follow-up work. |
 | Interaction table/copy/legend UI | Not implemented; structured JSON and PyMOL output tree are available now. |
 | Repository license | Missing; do not infer redistribution permission. |

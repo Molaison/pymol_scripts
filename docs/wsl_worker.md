@@ -1,17 +1,21 @@
 # WSL Worker Guide
 
 The optional worker lets Windows Host PyMOL submit structure text to calculation
-backends running in WSL2.  It is intentionally a small HTTP/JSON boundary:
+backends running in WSL2. It can also stage a structure from an explicitly
+allowlisted WSL root into a Windows-local cache. It is intentionally a small
+HTTP boundary:
 
 ```text
 Windows PyMOL (`pymolplugins/remote/commands.py`)
-    -> HTTP + JSON + optional Bearer token
+    -> HTTP + JSON/binary + optional Bearer token
     -> WSL (`pymolplugins/worker/app.py`)
     -> optional PLIP or separately licensed PyRosetta backend
 ```
 
-The service never needs a Windows or WSL structure path.  Requests carry PDB
-text.  There is no endpoint for shell commands, arbitrary Python, or arbitrary
+Calculation requests carry PDB text and still reject all path/file fields. File
+staging is a separate, default-off endpoint: it accepts only a configured root
+alias and a canonical relative POSIX path. There is no endpoint for shell
+commands, arbitrary Python, arbitrary absolute paths, or arbitrary
 RosettaScripts XML.
 
 ## Current scope and limitations
@@ -29,6 +33,13 @@ RosettaScripts XML.
   isolation; do not treat the current timeout as computation cancellation.
 - Default networking assumes Windows-to-WSL localhost forwarding.  A WSL IP is
   an explicit fallback, not a stable address.
+- File staging is disabled unless at least one `--stage-root ALIAS=PATH` is
+  supplied. It serves regular files only, resolves symlinks before enforcing
+  root containment, and applies file-size and transfer-time limits.
+- The staging deadline is checked before and after each synchronous file read;
+  Python cannot forcibly cancel a kernel/FUSE read that is itself stuck. The
+  Host has an independent socket/total deadline, but a persistently hung SSHFS
+  mount must still be repaired or unmounted.
 
 See [implementation status](implementation_status.md) before relying on a
 metric in production.
@@ -142,6 +153,36 @@ needed:
 scripts/start_worker.sh --python /path/to/python --port 8765 --max-body-mb 10
 ```
 
+To opt into single-file staging for a known dataset root:
+
+```bash
+scripts/start_worker.sh \
+  --stage-root structures=/home/user/structures \
+  --max-stage-mb 256 \
+  --stage-timeout 60
+```
+
+`--stage-root` is repeatable. The alias is exposed in capabilities, but the
+server path is not. CSV rows and Host clients must send `structures` plus a
+relative path such as `run_01/model.pdb`; they cannot send
+`/home/user/structures/run_01/model.pdb`. Omitting every `--stage-root` leaves
+the endpoint disabled.
+
+For Structure Annotator, the CSV may still contain the full WSL path. In its
+**Source** tab set:
+
+```text
+WSL root:  /home/user/structures
+alias:     structures
+```
+
+The controller verifies that each row is below that root, derives only the
+relative suffix, and sends `structures` plus that suffix. `stage_root` and
+`stage_alias` are saved per CSV, so opening another CSV does not inherit them.
+The Windows PyMOL process must inherit `PYMOLPLUGINS_WORKER_URL` and
+`PYMOLPLUGINS_WORKER_TOKEN`; WSL's ordinary Python cannot host the PyMOL/Qt
+controller. See the [step-by-step annotator walkthrough](structure_annotator_csv_walkthrough.md).
+
 It requires a token by default.  For an isolated loopback-only diagnostic, an
 explicit unauthenticated start is possible:
 
@@ -232,12 +273,38 @@ PyRosetta C++ call.
 | `GET /v1/capabilities` | Supported endpoints/formats/metrics. |
 | `POST /v1/analyze` | Rosetta metric request with inline PDB text. |
 | `POST /v1/interactions/plip` | Canonical interaction result from inline PDB text plus an explicit atom map. |
+| `POST /v1/stage/stat` | Conditional stat identity lookup from an allowlisted root without file content. |
+| `POST /v1/stage/file` | Conditional binary download from an allowlisted root alias plus a relative path. |
 
 Default request-body limit is 10 MiB and can be lowered with
 `--max-body-mb`.  The service accepts schema version 1.  It is not a general
 file server or job scheduler.  `/v1/capabilities` reports the effective request
-body and socket-read limits.  The Host client independently caps requests at
-10 MiB and responses at 20 MiB and refuses redirects.
+body and socket-read limits. The JSON Host client independently caps requests
+at 10 MiB and responses at 20 MiB and refuses redirects.
+
+When enabled, staging defaults to one 256 MiB file and a 60-second server-side
+deadline; use `--max-stage-mb` and `--stage-timeout` to change those bounds.
+The response is sequential `application/octet-stream` with `Content-Length`
+and path-free source stat identity headers. The Host staging client independently
+checks its response limit, schema, root alias, size, and identity headers, writes
+to an adjacent `.part`, and calls `os.replace` only after a complete transfer.
+It also refuses redirects. This endpoint is a cache transport, not a general
+file server: there is no directory listing, absolute path, write, delete, or
+shell surface.
+
+For a persistent cache, call `stat_staged_file(root_alias, relative_path)`
+first. It returns the same `StagedSourceIdentity` fields as
+`download_staged_file(...).source` without transferring structure content. Use
+that identity for the warm-cache lookup and download only on a miss. Because a
+source can change between the stat and download requests, a cache miss must be
+stored under the identity returned by the completed download, not blindly under
+the earlier stat identity. The opaque complete `v1-<64-hex>` identity token is
+the SHA-256 of device/inode/size/mtime/mode metadata, not a structure-content
+digest. It is part of the persistent cache key in addition to provider,
+canonical alias/path, size, and mtime; do not truncate or reconstruct it on the
+Host. Normal replacement/metadata changes invalidate the entry, but an in-place
+rewrite that deliberately preserves every identity field is outside this
+stat-based freshness guarantee.
 
 ## 7. Networking modes
 

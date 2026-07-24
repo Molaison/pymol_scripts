@@ -4,11 +4,12 @@ This checklist is the required integration gate for behavior that WSL pure/fake
 tests cannot prove.  `tests/host/host_smoke.py` and
 `scripts/windows/run_host_smoke.ps1` now automate the headless subset with
 generated fixtures.  Mouse object movement, callback-owned CGO, interactive Qt,
-real ANVIL, and licensed PyRosetta remain manual.  Do not extend an automated result beyond
-what its versioned JSON record actually tested.
+real ANVIL, and licensed PyRosetta remain manual except for the explicitly
+scripted Structure Annotator PyQt5 widget checks. Do not extend an automated
+result beyond what its versioned JSON record actually tested.
 
 The latest reviewed record is
-[the PyMOL 3.1.3.1 smoke summary](validation/windows_host_smoke_2026-07-24.md).
+[the PyMOL 3.1.3.1 smoke summary](validation/windows_host_smoke_2026-07-25.md).
 PyMOL 2.x remains a separate compatibility gate.
 
 ## Runtime boundary
@@ -170,6 +171,64 @@ including automatic popup visibility plus mouse/keyboard acceptance. Steps 4
 and 7 remain fresh-session gates. Only use dataset state from trusted directories: restored
 On-step and bucket templates are executable PyMOL commands.
 
+### CSV, score table, path mapping, and cache (`ANNO-CSV-*`)
+
+Use a disposable CSV with a unique ID column, several numeric/text score
+columns, two rows that deliberately reference the same structure, one missing
+path, and spaces in both the CSV and structure paths. Record the source CSV and
+PDB SHA-256 before testing.
+
+1. In **Source**, choose **CSV + scores**, select the file, enter the exact path
+   and ID headers, select display columns, then click **Preview mapping**.
+   Confirm valid/missing statuses and metadata. Click a preview row and confirm
+   PyMOL does not navigate or replace the previously active dataset.
+2. Snapshot state/history/annotation/mapping files immediately before Preview.
+   Confirm Preview created no state/history/annotation data, left an existing
+   mapping file byte-identical, and changed no managed object. Panel creation
+   itself may initialize/repair the mapping store before this baseline. Then
+   click **Load CSV** and inspect the **Scores** tab: numeric sort, substring
+   filter, active annotation column, raw/resolved path, provider, materialized
+   path, and cache hit must be visible/correct.
+3. Annotate the two duplicate-path rows with different values, undo one, and
+   annotate it again. Confirm the source CSV remains byte-identical and the
+   hidden JSONL sidecar contains row-ID-specific events.
+4. Export to a new CSV. Confirm the header contains exactly one
+   `pymol_annotation_<label>` column, source rows/scores are preserved, and the
+   exported file can be loaded as a new CSV source. Export to the source path
+   must be refused.
+5. Set a filter/sort, navigate away from row 1, save state, switch to a different
+   CSV with different parser settings, then return. Each CSV must restore only
+   its own parser/mapping/staging/view/cursor state. Explicit empty ID/base/stage
+   values must remain empty; empty display-columns means auto, while JSON `[]`
+   explicitly clears every display column.
+6. With real `K:` FUSE/SSHFS available, test all default `x_k` spellings plus
+   two independently identified duplicate direct `K:\...` rows. Enable
+   persistent cache. The first mapped alias should copy to a Windows-local
+   cache and the other aliases should hit the same key; the first direct row is
+   cold under its provider and the second direct row is warm. Revisiting one
+   identical entry only uses session memoization and is not a cache re-check.
+   Source bytes/size/mtime must not change.
+7. For a WSL-only file, start the authenticated worker with
+   `--stage-root structures=<absolute-root>`. Put that root in **WSL root** and
+   `structures` in **alias**, and use two IDs with the same staged path. Preview
+   produces its own `stat`; record it separately. From a clean observation
+   baseline, first Load should produce `stat -> file`, and navigating to the
+   duplicate row (or reloading the CSV) should add the warm `stat`. The
+   controller reuses load's fresh resolve identity for preflight, so there is no
+   duplicate preflight stat. Revisiting the same entry is memoized and produces
+   no request. A wrong token/missing row must be rejected without replacing the
+   active scene.
+8. Close/reopen the panel and then a fresh PyMOL process. Confirm source mode,
+   CSV path, scores view, annotation values and cursor restore. Disable
+   **Restore last dataset** and confirm the next fresh open does not auto-load.
+
+`HOST-ANNOTATION-CSV-01` automates the Windows-local subset of steps 1-5 and 8
+through real `cmd.do`; `annotator_qt_smoke.py` automates preview-source
+isolation in real PyQt5. The reviewed 2026-07-25 record separately captures a
+real `K:` FUSE cold/warm run and a real WSL core staging request sequence.
+Windows-PyMOL-to-WSL annotator staging, human inspection of a production-sized
+score table, and PyMOL 2.x remain open gates.
+
 ## 5. Object matrices and group follow (`FOLLOW-*`)
 
 Repeat the core test under each supported `matrix_mode` value 0, 1, and 2.  If a
@@ -314,6 +373,8 @@ Complete this table in the test record:
 | --- | --- | --- | --- |
 | Bootstrap/doctor | experience §12.1 | | |
 | Navigation | NAV-01..06 | | |
+| Structure Annotator state/history | ANNO-01..04 | | |
+| Structure Annotator CSV/path/cache | ANNO-CSV-01..07 | | |
 | Group follow | FOLLOW-01..06 | | |
 | Sequence | SEQ-01..02 | | |
 | Alignment | ALIGN-01..04 | | |

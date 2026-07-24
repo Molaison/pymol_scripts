@@ -6,6 +6,7 @@ import datetime
 import difflib
 import json
 import math
+import ntpath
 import os
 import re
 import tempfile
@@ -15,7 +16,8 @@ from pymolplugins.annotation.state_store import mark_hidden_on_windows
 from pymolplugins.core.windows_paths import windows_long_path
 
 
-HISTORY_SCHEMA = "pymolplugins.structure-annotator-history/1.0"
+HISTORY_SCHEMA_V1 = "pymolplugins.structure-annotator-history/1.0"
+HISTORY_SCHEMA = "pymolplugins.structure-annotator-history/2.0"
 HISTORY_ENVIRONMENT_VARIABLE = "PYMOLPLUGINS_ANNOTATOR_HISTORY"
 HISTORY_DIRECTORY = ".pymolplugins"
 HISTORY_FILENAME = "structure_annotator_history.json"
@@ -26,6 +28,12 @@ MAX_VALUE_LENGTH = 256 * 1024
 
 HISTORY_FIELDS = (
     "dataset_dir",
+    "csv_path",
+    "source_mode",
+    "path_column",
+    "id_column",
+    "display_columns",
+    "mapping_profile",
     "pattern",
     "label_name",
     "values_text",
@@ -46,9 +54,27 @@ _CONFIG_FIELDS = (
     "preload_ahead",
     "preload_interval_ms",
     "background_decompress_gz",
+    "cache_enabled",
     "restore_last_dataset",
     "bucket_cmds",
+    "source_mode",
+    "csv_path",
+    "path_column",
+    "id_column",
+    "display_columns",
+    "mapping_profile",
 )
+
+_TEXT_CONFIG_FIELDS = {
+    "pattern",
+    "label_name",
+    "values_text",
+    "step_cmd",
+    "csv_path",
+    "path_column",
+    "id_column",
+}
+_SOURCE_MODES = {"directory", "csv"}
 
 
 class HistoryStoreError(ValueError):
@@ -92,13 +118,76 @@ def _validate_text(value: object, context: str) -> str:
 def _validate_config(raw: object) -> Dict[str, object]:
     if not isinstance(raw, dict):
         raise HistoryStoreError("snapshot config must be a JSON object")
+    expanded = dict(raw)
+    source = expanded.get("source")
+    if source is not None:
+        if not isinstance(source, Mapping):
+            raise HistoryStoreError("config.source must be a JSON object")
+        if "source_mode" not in expanded and "mode" in source:
+            expanded["source_mode"] = source["mode"]
+        if "csv_path" not in expanded and "csv_path" in source:
+            expanded["csv_path"] = source["csv_path"]
+    csv_config = expanded.get("csv")
+    if csv_config is not None:
+        if not isinstance(csv_config, Mapping):
+            raise HistoryStoreError("config.csv must be a JSON object")
+        for name in ("path_column", "id_column", "display_columns"):
+            if name not in expanded and name in csv_config:
+                expanded[name] = csv_config[name]
+    view = expanded.get("view")
+    if view is not None:
+        if not isinstance(view, Mapping):
+            raise HistoryStoreError("config.view must be a JSON object")
+        if "display_columns" not in expanded and "display_columns" in view:
+            expanded["display_columns"] = view["display_columns"]
+
     clean: Dict[str, object] = {}
     for name in _CONFIG_FIELDS:
-        if name not in raw:
+        if name not in expanded:
             continue
-        value = raw[name]
-        if name in {"pattern", "label_name", "values_text", "step_cmd"}:
+        value = expanded[name]
+        if name in _TEXT_CONFIG_FIELDS:
             clean[name] = _validate_text(value, f"config.{name}")
+        elif name == "source_mode":
+            mode = _validate_text(value, "config.source_mode").strip().lower()
+            if mode not in _SOURCE_MODES:
+                raise HistoryStoreError(
+                    "config.source_mode must be directory or csv"
+                )
+            clean[name] = mode
+        elif name == "display_columns":
+            if isinstance(value, str):
+                columns = [value] if value else []
+            elif isinstance(value, Sequence):
+                columns = list(value)
+            else:
+                raise HistoryStoreError(
+                    "config.display_columns must be an array of strings"
+                )
+            if len(columns) > 512:
+                raise HistoryStoreError(
+                    "config.display_columns contains too many entries"
+                )
+            clean[name] = [
+                _validate_text(column, "config.display_columns entry")
+                for column in columns
+            ]
+        elif name == "mapping_profile":
+            if isinstance(value, str):
+                clean[name] = _validate_text(value, "config.mapping_profile")
+            elif isinstance(value, Mapping):
+                try:
+                    clean[name] = json.loads(
+                        json.dumps(dict(value), ensure_ascii=False)
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise HistoryStoreError(
+                        f"config.mapping_profile is not JSON serializable: {exc}"
+                    ) from exc
+            else:
+                raise HistoryStoreError(
+                    "config.mapping_profile must be a string or JSON object"
+                )
         elif name == "bucket_cmds":
             if not isinstance(value, dict):
                 raise HistoryStoreError("config.bucket_cmds must be a JSON object")
@@ -125,6 +214,7 @@ def _validate_config(raw: object) -> Dict[str, object]:
             if type(value) is not bool:
                 raise HistoryStoreError(f"config.{name} must be a boolean")
             clean[name] = value
+    clean.setdefault("source_mode", "directory")
     return clean
 
 
@@ -147,22 +237,34 @@ def _validate_snapshot(raw: object) -> Dict[str, object]:
     count = raw.get("count", 1)
     if type(count) is not int or count < 1:
         raise HistoryStoreError("snapshot.count must be a positive integer")
+    config = _validate_config(raw.get("config"))
+    source_mode = raw.get("source_mode", config.get("source_mode", "directory"))
+    if not isinstance(source_mode, str) or source_mode not in _SOURCE_MODES:
+        raise HistoryStoreError("snapshot.source_mode must be directory or csv")
+    csv_path = raw.get("csv_path", config.get("csv_path", ""))
+    clean_csv_path = _validate_text(csv_path, "snapshot.csv_path")
+    config["source_mode"] = source_mode
+    if clean_csv_path:
+        config["csv_path"] = clean_csv_path
     return {
         "dataset_dir": _validate_text(raw.get("dataset_dir", ""), "dataset_dir"),
+        "source_mode": source_mode,
+        "csv_path": clean_csv_path,
         "recorded_at_utc": _validate_text(
             raw.get("recorded_at_utc", ""), "recorded_at_utc"
         ),
         "count": count,
-        "config": _validate_config(raw.get("config")),
+        "config": config,
     }
 
 
 def _validate_history(raw: object) -> Dict[str, object]:
     if not isinstance(raw, dict):
         raise HistoryStoreError("history document must be a JSON object")
-    if raw.get("schema") != HISTORY_SCHEMA:
+    schema = raw.get("schema")
+    if schema not in {HISTORY_SCHEMA_V1, HISTORY_SCHEMA}:
         raise HistoryStoreError(
-            "unsupported history schema: {!r}".format(raw.get("schema"))
+            "unsupported history schema: {!r}".format(schema)
         )
     snapshots = raw.get("snapshots")
     fields = raw.get("fields")
@@ -295,7 +397,25 @@ def _quarantine_invalid_history() -> Optional[str]:
 def _normalized_dataset_dir(dataset_dir: str) -> str:
     if not str(dataset_dir or "").strip():
         return ""
-    return os.path.abspath(os.path.expanduser(str(dataset_dir)))
+    text = str(dataset_dir)
+    if ntpath.splitdrive(text)[0] or text.startswith(("\\\\", "\\\\?\\")):
+        return ntpath.normpath(text)
+    return os.path.abspath(os.path.expanduser(text))
+
+
+def _normalized_csv_path(csv_path: str) -> str:
+    if not str(csv_path or "").strip():
+        return ""
+    text = str(csv_path)
+    if ntpath.splitdrive(text)[0] or text.startswith(("\\\\", "\\\\?\\")):
+        return ntpath.normpath(text)
+    return os.path.abspath(os.path.expanduser(text))
+
+
+def _path_identity(path: str) -> str:
+    if ntpath.splitdrive(path)[0] or path.startswith(("\\\\", "\\\\?\\")):
+        return ntpath.normcase(ntpath.normpath(path))
+    return os.path.normcase(os.path.normpath(path))
 
 
 def _field_values(dataset_dir: str, config: Mapping[str, object]) -> Dict[str, List[str]]:
@@ -303,10 +423,41 @@ def _field_values(dataset_dir: str, config: Mapping[str, object]) -> Dict[str, L
     normalized_dir = _normalized_dataset_dir(dataset_dir)
     if normalized_dir:
         values["dataset_dir"].append(normalized_dir)
-    for field in ("pattern", "label_name", "values_text", "step_cmd"):
+    for field in (
+        "csv_path",
+        "source_mode",
+        "path_column",
+        "id_column",
+        "pattern",
+        "label_name",
+        "values_text",
+        "step_cmd",
+    ):
         value = config.get(field)
         if isinstance(value, str) and value.strip():
             values[field].append(value)
+    display_columns = config.get("display_columns", [])
+    if isinstance(display_columns, Sequence) and not isinstance(
+        display_columns, (str, bytes)
+    ):
+        seen_columns = set()
+        for column in display_columns:
+            if (
+                isinstance(column, str)
+                and column.strip()
+                and column not in seen_columns
+            ):
+                seen_columns.add(column)
+                values["display_columns"].append(column)
+    mapping_profile = config.get("mapping_profile", "")
+    if isinstance(mapping_profile, str) and mapping_profile.strip():
+        values["mapping_profile"].append(mapping_profile)
+    elif isinstance(mapping_profile, Mapping):
+        for key in ("name", "id", "profile"):
+            candidate = mapping_profile.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                values["mapping_profile"].append(candidate)
+                break
     commands = config.get("bucket_cmds", {})
     if isinstance(commands, Mapping):
         seen = set()
@@ -343,9 +494,13 @@ def _touch_snapshot(
 ) -> List[Dict[str, object]]:
     updated: List[Dict[str, object]] = []
     count = 1
+    source_mode = str(config.get("source_mode", "directory"))
+    csv_path = str(config.get("csv_path", ""))
     for snapshot in snapshots:
         if (
             snapshot.get("dataset_dir") == dataset_dir
+            and snapshot.get("source_mode", "directory") == source_mode
+            and snapshot.get("csv_path", "") == csv_path
             and snapshot.get("config") == config
         ):
             count = int(snapshot.get("count", 1)) + 1
@@ -355,6 +510,8 @@ def _touch_snapshot(
         0,
         {
             "dataset_dir": dataset_dir,
+            "source_mode": source_mode,
+            "csv_path": csv_path,
             "recorded_at_utc": timestamp,
             "count": count,
             "config": dict(config),
@@ -363,7 +520,17 @@ def _touch_snapshot(
     return updated[:MAX_SNAPSHOTS]
 
 
-def record_config_history(dataset_dir: str, config: Mapping[str, object]) -> str:
+def record_config_history(
+    dataset_dir: str,
+    config: Mapping[str, object],
+    *,
+    source_mode: Optional[str] = None,
+    csv_path: Optional[str] = None,
+    path_column: Optional[str] = None,
+    id_column: Optional[str] = None,
+    display_columns: Optional[Sequence[str]] = None,
+    mapping_profile: Optional[object] = None,
+) -> str:
     """Record a complete config snapshot and de-duplicated field histories.
 
     A malformed prior file is preserved with a ``.corrupt-*`` suffix before a
@@ -371,8 +538,65 @@ def record_config_history(dataset_dir: str, config: Mapping[str, object]) -> str
     disable future completion.
     """
 
-    clean_config = _validate_config(dict(config))
-    normalized_dir = _normalized_dataset_dir(dataset_dir)
+    raw_config = dict(config)
+    source = raw_config.get("source")
+    csv_config = raw_config.get("csv")
+    hinted_csv_path = raw_config.get("csv_path")
+    if not hinted_csv_path and isinstance(source, Mapping):
+        hinted_csv_path = source.get("csv_path")
+    if not hinted_csv_path and isinstance(csv_config, Mapping):
+        hinted_csv_path = csv_config.get("csv_path") or csv_config.get("path")
+    if hinted_csv_path and "csv_path" not in raw_config:
+        raw_config["csv_path"] = hinted_csv_path
+    if source_mode is not None:
+        raw_config["source_mode"] = source_mode
+    elif "source_mode" not in raw_config:
+        if isinstance(source, Mapping) and source.get("mode"):
+            raw_config["source_mode"] = source.get("mode")
+        else:
+            raw_config["source_mode"] = (
+                "csv" if csv_path or hinted_csv_path else "directory"
+            )
+    overrides = {
+        "csv_path": csv_path,
+        "path_column": path_column,
+        "id_column": id_column,
+        "display_columns": display_columns,
+        "mapping_profile": mapping_profile,
+    }
+    for name, value in overrides.items():
+        if value is not None:
+            raw_config[name] = value
+
+    clean_config = _validate_config(raw_config)
+    mode = str(clean_config.get("source_mode", "directory"))
+    if mode == "csv":
+        normalized_csv = _normalized_csv_path(str(clean_config.get("csv_path", "")))
+        if normalized_csv:
+            clean_config["csv_path"] = normalized_csv
+        normalized_dir = _normalized_dataset_dir(dataset_dir)
+        if (
+            normalized_csv
+            and normalized_dir
+            and _path_identity(normalized_dir) == _path_identity(normalized_csv)
+        ):
+            path_module = (
+                ntpath
+                if ntpath.splitdrive(normalized_csv)[0]
+                or normalized_csv.startswith(("\\\\", "\\\\?\\"))
+                else os.path
+            )
+            normalized_dir = path_module.dirname(normalized_csv)
+        if not normalized_dir and normalized_csv:
+            path_module = (
+                ntpath
+                if ntpath.splitdrive(normalized_csv)[0]
+                or normalized_csv.startswith(("\\\\", "\\\\?\\"))
+                else os.path
+            )
+            normalized_dir = path_module.dirname(normalized_csv)
+    else:
+        normalized_dir = _normalized_dataset_dir(dataset_dir)
     try:
         history = read_global_history()
     except HistoryStoreError:
@@ -499,6 +723,10 @@ def history_summary() -> Dict[str, object]:
     assert isinstance(snapshots, list)
     assert isinstance(fields, dict)
     latest_dataset = snapshots[0].get("dataset_dir", "") if snapshots else ""
+    latest_source_mode = (
+        snapshots[0].get("source_mode", "directory") if snapshots else ""
+    )
+    latest_csv_path = snapshots[0].get("csv_path", "") if snapshots else ""
     return {
         "schema": HISTORY_SCHEMA,
         "path": path,
@@ -508,6 +736,8 @@ def history_summary() -> Dict[str, object]:
             field: len(fields.get(field, [])) for field in HISTORY_FIELDS
         },
         "latest_dataset": latest_dataset,
+        "latest_source_mode": latest_source_mode,
+        "latest_csv_path": latest_csv_path,
         "updated_at_utc": history.get("updated_at_utc", ""),
     }
 
@@ -517,6 +747,7 @@ __all__ = [
     "HISTORY_FIELDS",
     "HISTORY_FILENAME",
     "HISTORY_SCHEMA",
+    "HISTORY_SCHEMA_V1",
     "HistoryStoreError",
     "global_history_path",
     "history_summary",
