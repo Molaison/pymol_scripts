@@ -422,22 +422,32 @@ def _stat_batch_chunk(
 
 
 def _batch_chunks(root_alias: str, relative_paths: Sequence[str]):
+    if not relative_paths:
+        return
+    dumps = json.dumps
+    empty_size = len(
+        dumps(
+            {
+                "schema_version": 1,
+                "root_alias": root_alias,
+                "relative_paths": [],
+            },
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    )
     chunk: List[str] = []
+    chunk_size = empty_size
     for relative_path in relative_paths:
-        candidate = chunk + [relative_path]
-        payload = {
-            "schema_version": 1,
-            "root_alias": root_alias,
-            "relative_paths": candidate,
-        }
-        size = len(
-            json.dumps(
-                payload, separators=(",", ":"), ensure_ascii=False
+        token_size = len(
+            dumps(
+                relative_path, separators=(",", ":"), ensure_ascii=False
             ).encode("utf-8")
         )
+        candidate_size = chunk_size + token_size + (1 if chunk else 0)
         if (
-            len(candidate) > MAX_STAGE_STAT_BATCH_ITEMS
-            or size > MAX_STAGE_STAT_BATCH_REQUEST_BYTES
+            len(chunk) >= MAX_STAGE_STAT_BATCH_ITEMS
+            or candidate_size > MAX_STAGE_STAT_BATCH_REQUEST_BYTES
         ):
             if not chunk:
                 raise WorkerRequestError(
@@ -446,26 +456,16 @@ def _batch_chunks(root_alias: str, relative_paths: Sequence[str]):
                     endpoint=STAGE_STAT_BATCH_ENDPOINT,
                 )
             yield tuple(chunk)
-            chunk = [relative_path]
-            single_size = len(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "root_alias": root_alias,
-                        "relative_paths": chunk,
-                    },
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                ).encode("utf-8")
-            )
-            if single_size > MAX_STAGE_STAT_BATCH_REQUEST_BYTES:
+            chunk = []
+            candidate_size = empty_size + token_size
+            if candidate_size > MAX_STAGE_STAT_BATCH_REQUEST_BYTES:
                 raise WorkerRequestError(
                     "staging batch path exceeds request size limit",
                     code="request_too_large",
                     endpoint=STAGE_STAT_BATCH_ENDPOINT,
                 )
-        else:
-            chunk = candidate
+        chunk.append(relative_path)
+        chunk_size = candidate_size
     if chunk:
         yield tuple(chunk)
 

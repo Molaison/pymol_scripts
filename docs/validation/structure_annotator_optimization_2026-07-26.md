@@ -154,6 +154,24 @@ completed 2026-07-26T03:57:48.977629+00:00
 sha256 8d40c2944ccb1e1397ad4f1ff206e20126a400ef4a3a46894b07ac61ee45c497
 ```
 
+## Incremental batch-request byte accounting
+
+The former Host chunk planner serialized the complete candidate request after
+each appended path. A 50,000-path fixture containing CJK, Greek characters,
+backslashes and quotes therefore spent a median 0.9596 s planning requests.
+The revised planner serializes the fixed empty-list envelope once and each JSON
+string token once, then adds the exact comma/token UTF-8 bytes incrementally.
+
+Eleven post-change runs measured a median 0.0302 s, a **31.8x speedup**. Both
+implementations produced the same 196 greedy chunks (256 paths in the first,
+80 in the last), and the largest final request was 15,169 bytes. A deterministic
+escape/Unicode regression, exact oversized-item rejection, serialization-shape
+regression, exact-limit acceptance, partial-yield error, empty-input regression,
+and 5,000 seeded randomized comparisons all matched the former full-JSON
+reference exactly. The repository-wide suite expanded to 369 tests and
+completed in 21.097 s with `OK`. The same 23 staging-client tests passed in
+7.826 s under the Windows Python 3.10.16 bundled with PyMOL 3.1.3.1.
+
 ## 50,000 x 8 Windows Qt benchmark
 
 The repeatable benchmark used the same bundled PyQt5 interpreter. It retained

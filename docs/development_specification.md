@@ -508,6 +508,14 @@ signature 后必须 reload/replay。已 fsync 的本地 append 允许增量更�
   证明 event-loop heartbeat、cancel suppression、late-result isolation 和 main-thread
   commit。专用 pool 第一阶段最多两个 worker；若两个不可协作取消的 read 同时阻塞，
   后续请求允许排队到既有 timeout，但任何被取消结果仍不得写入 UI、`STATE` 或 scene。
+- `ANNO-CSV-12` Host 的 `stage/stat-batch` chunker 必须按最终
+  `json.dumps(..., separators=(",", ":"), ensure_ascii=False).encode("utf-8")`
+  请求体的精确字节数执行 greedy 分批，继续同时满足 256 items 与 64 KiB 上限。
+  quote、backslash、control character、CJK 与非 BMP Unicode path 的分批结果必须与
+  逐候选完整序列化的 reference implementation 一致；单项超限仍返回 typed
+  `request_too_large`，顺序与去重契约不变。chunk planning 只能一次序列化固定 envelope
+  和每个 path token，再增量累计 comma/token bytes；对 `N` paths、总 encoded token
+  长度 `B`，时间必须为 `O(N+B)`，不得为每加入一个 path 重编码整个候选 chunk。
 
 ## 6. Specification：group follow 刚体变换
 

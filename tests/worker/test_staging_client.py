@@ -166,6 +166,125 @@ class StagingClientIntegrationTests(unittest.TestCase):
             all(len(call.args[1]) < 256 for call in batch_call.call_args_list)
         )
 
+    def test_batch_chunk_plan_matches_full_json_reference_for_unicode(self):
+        alias = 'struc\\tures"\u6839'
+        paths = [
+            "ascii/model.pdb",
+            'quote/\"model\".pdb',
+            "slash\\model.pdb",
+            "control/newline\nmodel.pdb",
+            "CJK/\u8bbe\u8ba1_\u86cb\u767d.pdb",
+            "non-bmp/\U0001f9ec_model.pdb",
+            "long/" + ("\u03b1\u03b2\u03b3" * 12) + ".pdb",
+        ]
+
+        def full_json_reference():
+            chunks = []
+            chunk = []
+            for relative_path in paths:
+                candidate = chunk + [relative_path]
+                encoded = json.dumps(
+                    {
+                        "schema_version": 1,
+                        "root_alias": alias,
+                        "relative_paths": candidate,
+                    },
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                if len(candidate) > 4 or len(encoded) > 180:
+                    if not chunk:
+                        self.fail("fixture contains an oversized individual path")
+                    chunks.append(tuple(chunk))
+                    chunk = [relative_path]
+                else:
+                    chunk = candidate
+            if chunk:
+                chunks.append(tuple(chunk))
+            return chunks
+
+        with mock.patch.object(
+            staging, "MAX_STAGE_STAT_BATCH_ITEMS", 4
+        ), mock.patch.object(
+            staging, "MAX_STAGE_STAT_BATCH_REQUEST_BYTES", 180
+        ):
+            actual = list(staging._batch_chunks(alias, paths))
+
+        self.assertEqual(actual, full_json_reference())
+        self.assertEqual([path for chunk in actual for path in chunk], paths)
+
+    def test_batch_chunk_plan_serializes_only_envelope_and_individual_tokens(self):
+        paths = [
+            "\u8bbe\u8ba1/\U0001f9ec_%05d.pdb" % index for index in range(1_000)
+        ]
+        original_dumps = json.dumps
+        serialized = []
+
+        def tracking_dumps(value, *args, **kwargs):
+            serialized.append(value)
+            return original_dumps(value, *args, **kwargs)
+
+        with mock.patch.object(staging.json, "dumps", side_effect=tracking_dumps):
+            chunks = list(staging._batch_chunks("structures", paths))
+
+        self.assertEqual([path for chunk in chunks for path in chunk], paths)
+        self.assertEqual(len(serialized), len(paths) + 1)
+        self.assertEqual(serialized[0]["relative_paths"], [])
+        self.assertEqual(serialized[1:], paths)
+
+    def test_batch_chunk_rejects_single_path_over_exact_byte_limit(self):
+        alias = "structures"
+        path = "\u8bbe\u8ba1/" + ("\U0001f9ec" * 20) + ".pdb"
+        encoded = json.dumps(
+            {
+                "schema_version": 1,
+                "root_alias": alias,
+                "relative_paths": [path],
+            },
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        with mock.patch.object(
+            staging, "MAX_STAGE_STAT_BATCH_REQUEST_BYTES", len(encoded) - 1
+        ):
+            with self.assertRaises(WorkerRequestError) as captured:
+                list(staging._batch_chunks(alias, [path]))
+        self.assertEqual(captured.exception.code, "request_too_large")
+
+        with mock.patch.object(
+            staging, "MAX_STAGE_STAT_BATCH_REQUEST_BYTES", len(encoded)
+        ):
+            self.assertEqual(
+                list(staging._batch_chunks(alias, [path])), [(path,)]
+            )
+
+    def test_batch_chunk_yields_prior_chunk_before_later_oversized_error(self):
+        alias = "structures"
+        first = "first.pdb"
+        oversized = "large/" + ("\U0001f9ec" * 20) + ".pdb"
+        first_size = len(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "root_alias": alias,
+                    "relative_paths": [first],
+                },
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+        generator = staging._batch_chunks(alias, [first, oversized])
+        with mock.patch.object(
+            staging, "MAX_STAGE_STAT_BATCH_REQUEST_BYTES", first_size
+        ):
+            self.assertEqual(next(generator), (first,))
+            with self.assertRaises(WorkerRequestError) as captured:
+                next(generator)
+        self.assertEqual(captured.exception.code, "request_too_large")
+
+    def test_empty_batch_does_not_serialize_unused_alias(self):
+        self.assertEqual(list(staging._batch_chunks("\ud800", [])), [])
+
     def test_batch_stat_falls_back_only_for_old_worker_not_found(self):
         identity = StagedSourceIdentity(
             token="v1-" + "a" * 64,
