@@ -1,7 +1,10 @@
+from dataclasses import asdict
 import os
 import tempfile
 import unittest
+from unittest import mock
 
+import pymolplugins.annotation.sources.csv_source as csv_source_module
 from pymolplugins.annotation.model import (
     AVAILABILITY_AVAILABLE,
     AVAILABILITY_INVALID,
@@ -9,7 +12,10 @@ from pymolplugins.annotation.model import (
     COLUMN_INTEGER,
     COLUMN_NUMBER,
     COLUMN_TEXT,
+    AnnotationDataset,
     AnnotationEntry,
+    attach_display_metadata,
+    build_column_specs,
     infer_column_kind,
 )
 from pymolplugins.annotation.sources import (
@@ -240,6 +246,92 @@ class CsvDatasetSourceTests(unittest.TestCase):
                 CsvDatasetSource(path, "path", display_columns=("missing",)).load()
             with self.assertRaisesRegex(CsvSourceError, "must be a sequence"):
                 CsvDatasetSource(path, "path", display_columns="a")
+
+    def test_csv_constructs_each_final_entry_once_after_column_inference(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "single construction.csv")
+            self._write(
+                path,
+                "uid,path,score,note\n"
+                "dup,a.pdb,1.5,first\n"
+                "dup,b.pdb,2.5,second,EXTRA\n"
+                ",,3.5,third\n",
+            )
+            constructed_ids = []
+            original_post_init = AnnotationEntry.__post_init__
+
+            def counting_post_init(entry):
+                constructed_ids.append(entry.id)
+                original_post_init(entry)
+
+            with mock.patch.object(
+                AnnotationEntry, "__post_init__", counting_post_init
+            ):
+                dataset = CsvDatasetSource(
+                    path,
+                    "path",
+                    id_column="uid",
+                    display_columns=("score", "note"),
+                ).load()
+
+            self.assertEqual(
+                constructed_ids, [entry.id for entry in dataset.entries]
+            )
+            self.assertEqual(dataset.count, 3)
+            self.assertEqual(
+                dataset.entries[0].display_metadata,
+                {"score": 1.5, "note": "first"},
+            )
+            self.assertIn("duplicate id value", dataset.entries[0].error)
+            self.assertIn("1 extra field", dataset.entries[1].error)
+            self.assertIn("structure path is empty", dataset.entries[2].error)
+            self.assertIn("id column 'uid' is empty", dataset.entries[2].error)
+
+    def test_single_construction_matches_legacy_attach_pipeline(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "legacy parity.csv")
+            self._write(
+                path,
+                "uid,path,score,note\n"
+                "dup,a.pdb,1,alpha\n"
+                ",b.pdb,,beta\n"
+                "dup,c.pdb,2.5,gamma,EXTRA\n",
+            )
+            source = CsvDatasetSource(
+                path,
+                "path",
+                id_column="uid",
+                display_columns=("score", "note"),
+            )
+            actual = source.load()
+            _header, rows = source._read_rows(path, ",")
+            legacy_entries = csv_source_module._build_entries(
+                rows,
+                dataset_namespace=csv_source_module._dataset_namespace(path),
+                path_column="path",
+                id_column="uid",
+                source_base=root,
+                column_specs=(),
+            )
+            legacy_specs = build_column_specs(
+                legacy_entries, ("score", "note")
+            )
+            legacy_entries = attach_display_metadata(legacy_entries, legacy_specs)
+            legacy = AnnotationDataset(
+                source_kind="csv",
+                source_path=os.path.abspath(path),
+                source_base=root,
+                entries=legacy_entries,
+                columns=("uid", "path", "score", "note"),
+                display_columns=("score", "note"),
+                column_specs=legacy_specs,
+                path_column="path",
+                id_column="uid",
+                delimiter=",",
+                encoding="utf-8-sig",
+            )
+
+            self.assertEqual(asdict(actual), asdict(legacy))
 
     def test_empty_duplicate_headers_and_malformed_csv_fail_atomically(self):
         with tempfile.TemporaryDirectory() as root:

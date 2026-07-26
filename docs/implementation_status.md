@@ -8,10 +8,10 @@ evidence, interactive Host evidence, and optional licensed-backend evidence.
 
 Current evidence anchors:
 
-- WSL: 369 standard-library unit/fake-command tests pass (`21.097s` on the
-  final ANNO-CSV-12 rerun).
-- Windows Host: the automated PyMOL 3.1.3.1 record is
-  [automatic pass / manual pending](validation/windows_host_smoke_2026-07-25.md).
+- WSL: 371 standard-library unit/fake-command tests pass (`17.680s` on the
+  final ANNO-CSV-13 rerun).
+- Windows Host: the latest automated PyMOL 3.1.3.1 record passed 13/13 and is
+  [automatic pass / manual pending](validation/structure_annotator_optimization_2026-07-26.md).
 - Structure Annotator: `HOST-ANNOTATION-CSV-01` and the real PyQt5 smoke pass;
   real Windows `K:` FUSE mapping/cache passes, and the PyMOL-independent
   allowlisted WSL staging client/cache/materializer chain passes a real worker
@@ -75,6 +75,7 @@ context/offset, pin clearing, and explicit session replacement are also tested.
 | ANNO-CSV-10 | WSL performance + regression verified | One resolve snapshot caches only truly repeated `(raw path, source base)` keys (with a homogeneous-base string fast path) and separately reuses canonical Windows mapped/drive/UNC candidate probes. Duplicate local rows perform one `isfile/access` pair while row IDs/metadata remain independent; heterogeneous bases cannot leak resolutions, and the cache is rebuilt on reload. A 50,000-row audit retained duplicate-path speedups without the all-unique regression caused by populating a full resolution dictionary. |
 | ANNO-CSV-11 | Real Windows PyQt5 + Host transaction + WSL verified | Console preview/load remain synchronous. Qt Preview/Load use immutable worker preparation and queued main-thread completion; live `STATE`, widgets and `cmd.*` stay out of the worker. Cancel/close/latest-epoch/source+config fingerprints/dataset+annotation generations suppress late results without rollback, worker-side CSV fingerprints reject mid-prepare changes, and commit takes its rollback snapshot at completion time. The queued slot performs no K:/UNC/WSL filesystem probe. The real PyQt5 gate observed 10 heartbeats while a worker was blocked, 0.20 ms cancel, late-result/config-change/annotation-change isolation, and both preview completion and load commit on the application thread. Restore-last recovers config/intent without probing the source before panel construction. Cancel is result suppression rather than thread termination: two non-cooperative blocked reads can occupy the dedicated two-thread pool until their timeouts, so a later request waits without mutating UI, `STATE`, or scene. |
 | ANNO-CSV-12 | Windows bundled Python + WSL verified | Batch request planning serializes the fixed JSON envelope once and each path token once, then uses exact UTF-8 token/comma accounting while preserving the greedy 256-item/64-KiB chunks. Reference tests and 5,000 randomized cases cover quotes, backslashes, control characters, CJK and non-BMP Unicode, exact-limit acceptance/rejection, empty input, and partial-yield errors. A 50,000-path benchmark retained the same 196 chunks and reduced median planning time from 0.9596 s to 0.0302 s (31.8x); all 23 staging-client tests also passed under PyMOL 3.1.3.1's bundled Windows Python 3.10.16. |
+| ANNO-CSV-13 | Host smoke + Windows bundled Python + WSL verified | CSV column specs are inferred from raw-row metadata before each final immutable `AnnotationEntry` is constructed exactly once. Constructor-count and full `asdict` legacy-pipeline parity cover IDs, errors, raw/typed metadata and ordering; directory/model helpers remain compatible. On a 50,000 x 8 CSV, median load fell from 0.5746 s to 0.4082 s (29.0%) and tracemalloc peak from 118.7 MiB to 96.4 MiB (18.8%) while retained dataset memory stayed unchanged. Real Host `HOST-ANNOTATION-CSV-01` and 21 bundled-Windows-Python dataset tests pass. |
 
 ### Object/group targets
 

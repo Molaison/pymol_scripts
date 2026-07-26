@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
 import math
 import re
-from typing import Dict, Iterable, Optional, Sequence, Tuple
+from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 
 AVAILABILITY_UNCHECKED = "unchecked"
@@ -338,14 +338,14 @@ class DatasetSource(ABC):
         """Read the source and return a new snapshot."""
 
 
-def build_column_specs(
-    entries: Sequence[AnnotationEntry], display_columns: Sequence[str]
+def build_column_specs_from_metadata(
+    metadata_rows: Sequence[Mapping[str, str]], display_columns: Sequence[str]
 ) -> Tuple[ColumnSpec, ...]:
-    """Infer display specs from raw entry metadata in column order."""
+    """Infer display specs directly from ordered raw metadata mappings."""
 
     specs = []
     for name in display_columns:
-        values = [entry.metadata.get(name, "") for entry in entries]
+        values = [metadata.get(name, "") for metadata in metadata_rows]
         kind = infer_column_kind(values)
         missing = sum(not value.strip() for value in values)
         numeric = 0
@@ -362,6 +362,27 @@ def build_column_specs(
     return tuple(specs)
 
 
+def build_column_specs(
+    entries: Sequence[AnnotationEntry], display_columns: Sequence[str]
+) -> Tuple[ColumnSpec, ...]:
+    """Infer display specs from raw entry metadata in column order."""
+
+    return build_column_specs_from_metadata(
+        tuple(entry.metadata for entry in entries), display_columns
+    )
+
+
+def build_display_metadata(
+    metadata: Mapping[str, str], specs: Sequence[ColumnSpec]
+) -> Dict[str, object]:
+    """Build one ordered, typed display mapping without mutating raw values."""
+
+    return {
+        spec.name: display_value(metadata.get(spec.name, ""), spec.kind)
+        for spec in specs
+    }
+
+
 def attach_display_metadata(
     entries: Sequence[AnnotationEntry], specs: Sequence[ColumnSpec]
 ) -> Tuple[AnnotationEntry, ...]:
@@ -369,12 +390,12 @@ def attach_display_metadata(
 
     result = []
     for entry in entries:
-        values: Dict[str, object] = {}
-        for spec in specs:
-            values[spec.name] = display_value(
-                entry.metadata.get(spec.name, ""), spec.kind
+        result.append(
+            replace(
+                entry,
+                display_metadata=build_display_metadata(entry.metadata, specs),
             )
-        result.append(replace(entry, display_metadata=values))
+        )
     return tuple(result)
 
 
@@ -396,6 +417,8 @@ __all__ = [
     "DatasetSourceError",
     "attach_display_metadata",
     "build_column_specs",
+    "build_column_specs_from_metadata",
+    "build_display_metadata",
     "display_value",
     "infer_column_kind",
 ]

@@ -172,6 +172,39 @@ reference exactly. The repository-wide suite expanded to 369 tests and
 completed in 21.097 s with `OK`. The same 23 staging-client tests passed in
 7.826 s under the Windows Python 3.10.16 bundled with PyMOL 3.1.3.1.
 
+## Single-construction CSV entries
+
+The former parser built a complete immutable `AnnotationEntry` for every raw
+row, inferred column types from those entries, and then rebuilt every entry with
+`dataclasses.replace` to attach typed display metadata. The revised parser
+infers `ColumnSpec` directly from the current raw-row snapshot and constructs
+each final entry once. A constructor-count regression observes `__post_init__`
+itself, so a reintroduced `replace` would fail as `2N`; a separate full
+`dataclasses.asdict` comparison matches the legacy two-pass output across
+duplicate/empty IDs, ragged rows, numeric/text values, IDs and error fields.
+
+The benchmark loaded a 50,000-row, 8-column UTF-8 CSV with seven display
+columns. Five baseline runs had a median 0.5746 s; seven revised runs had a
+median 0.4082 s, a **29.0% reduction**. Tracemalloc peak fell from 124,424,140
+bytes (118.7 MiB) to 101,054,125 bytes (96.4 MiB), an **18.8% reduction**.
+Retained snapshot memory remained effectively unchanged (77,048,258 versus
+77,038,658 bytes), confirming that the reduction removes transient duplicate
+entries rather than deferring data outside the immutable dataset.
+
+The final WSL suite passed 371/371 in 17.680 s. All 21 dataset/model tests also
+passed in 0.043 s under PyMOL 3.1.3.1's bundled Windows Python 3.10.16. The real
+Windows PyMOL 3.1.3.1 Host gate passed all 13 checks, including the CSV
+load/annotate/export/restore transaction:
+
+```text
+C:\Users\ADMIN\AppData\Local\Temp\PymolPlugins-host-smoke-20260726-anno13.json
+started   2026-07-26T04:28:32.658424+00:00
+completed 2026-07-26T04:28:33.192741+00:00
+sha256 6fb8b38f4cb044bbfb4f82dc4f974757a3db767c7f5ebbab3444f7b4fc17840a
+automatic_status pass
+overall_status   automatic_pass_manual_pending
+```
+
 ## 50,000 x 8 Windows Qt benchmark
 
 The repeatable benchmark used the same bundled PyQt5 interpreter. It retained

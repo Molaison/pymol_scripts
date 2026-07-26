@@ -16,10 +16,11 @@ from pymolplugins.annotation.model import (
     AVAILABILITY_UNCHECKED,
     AnnotationDataset,
     AnnotationEntry,
+    ColumnSpec,
     DatasetSource,
     DatasetSourceError,
-    attach_display_metadata,
-    build_column_specs,
+    build_column_specs_from_metadata,
+    build_display_metadata,
 )
 
 
@@ -280,6 +281,7 @@ def _entry_from_row(
     id_column: str,
     source_base: str,
     validation_errors: Tuple[str, ...],
+    column_specs: Sequence[ColumnSpec],
 ) -> AnnotationEntry:
     return AnnotationEntry(
         id=entry_id,
@@ -295,6 +297,7 @@ def _entry_from_row(
         row_number=row.row_number,
         metadata=row.metadata,
         raw_values=row.raw_values,
+        display_metadata=build_display_metadata(row.metadata, column_specs),
         availability=(
             AVAILABILITY_UNCHECKED if raw_path.strip() else AVAILABILITY_INVALID
         ),
@@ -309,6 +312,7 @@ def _build_entries(
     path_column: str,
     id_column: str,
     source_base: str,
+    column_specs: Sequence[ColumnSpec],
 ) -> Tuple[AnnotationEntry, ...]:
     id_counts = _nonempty_id_counts(rows, id_column)
     id_occurrences: Dict[str, int] = {}
@@ -339,6 +343,7 @@ def _build_entries(
                 id_column=id_column,
                 source_base=source_base,
                 validation_errors=errors,
+                column_specs=column_specs,
             )
         )
     return tuple(entries)
@@ -439,15 +444,17 @@ class CsvDatasetSource(DatasetSource):
             display_columns=self.config.display_columns,
         )
         source_base = self.config.source_base or os.path.dirname(source_path)
+        specs = build_column_specs_from_metadata(
+            tuple(row.metadata for row in rows), display_columns
+        )
         entries = _build_entries(
             rows,
             dataset_namespace=_dataset_namespace(source_path),
             path_column=self.config.path_column,
             id_column=self.config.id_column,
             source_base=source_base,
+            column_specs=specs,
         )
-        specs = build_column_specs(entries, display_columns)
-        entries = attach_display_metadata(entries, specs)
         return AnnotationDataset(
             source_kind="csv",
             source_path=source_path,

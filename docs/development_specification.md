@@ -516,6 +516,16 @@ signature 后必须 reload/replay。已 fsync 的本地 append 允许增量更�
   `request_too_large`，顺序与去重契约不变。chunk planning 只能一次序列化固定 envelope
   和每个 path token，再增量累计 comma/token bytes；对 `N` paths、总 encoded token
   长度 `B`，时间必须为 `O(N+B)`，不得为每加入一个 path 重编码整个候选 chunk。
+- `ANNO-CSV-13` CSV parse phase 必须先从当前 raw-row snapshot metadata 推断
+  `ColumnSpec`，再为每一行只构造一次最终 `AnnotationEntry`；不得先构造无 typed
+  display values 的完整 entry，再对全部 entries 执行 `dataclasses.replace`。优化前后
+  entry ID/ordinal/display name/source path/base/row number/raw metadata/raw values、row
+  validation error、availability、display column order/type/value 与 `AnnotationDataset`
+  schema 必须逐字段一致；directory source 与通用 model helper 的既有契约不变。
+  constructor-count regression 必须证明 `N` CSV rows 在 path resolution 前恰好创建
+  `N` 个 entries。50,000 x 8 synthetic CSV 的 parse/load wall time 与 tracemalloc peak
+  必须相对同机旧实现均下降，且不能通过延迟生成会逃出 immutable snapshot 的 iterator
+  来换取表面内存下降。
 
 ## 6. Specification：group follow 刚体变换
 
