@@ -205,6 +205,53 @@ automatic_status pass
 overall_status   automatic_pass_manual_pending
 ```
 
+## Cancel and panel-close registry lifetime
+
+Cancel now removes its job metadata from the module registry before setting the
+worker-owned cancellation event. The `QThreadPool` still owns queued/running
+runnables; the bundled PyQt5 ownership probe changed from `ispyowned=True` to
+`False` immediately after `start()`. A queued completion or later worker emit
+therefore finds no registry entry and returns without resolving the panel
+weakref. This also removes two panel bookkeeping fields which were written but
+never read.
+
+The real Windows PyQt5 smoke kept the existing 10 heartbeat ticks and 0.19 ms
+Cancel return, asserted immediate registry cleanup, then started a separate
+panel with a blocked worker and closed it. The registry was empty immediately;
+after releasing the worker, completion did not reach the closed panel or change
+its table or the dataset generation. An independent ownership stress filled the
+pool with two running and 500 queued jobs, cancelled and unregistered all of
+them, then forced repeated GC: no runnable was released early, every queued job
+observed its cancel event after the pool opened, no panel callback ran, and all
+wrappers were reclaimed afterward. Live-job module reload also retained exactly
+one completion for an uncancelled job while cancelled late emit remained a
+no-op. Record:
+
+```text
+C:\Users\ADMIN\AppData\Local\Temp\PymolPlugins-annotator-qt-20260726-anno14.json
+completed 2026-07-26T04:41:15.077984+00:00
+sha256 a9c0ebb6e9ee103c2574c949bb37e064958ab65087ad9b0ab2155cc7fd5140b9
+async_cancel_registry_released true
+async_close_registry_released  true
+async_close_late_suppressed    true
+```
+
+The final WSL suite passed 372/372 in 22.267 s. The Windows PyMOL 3.1.3.1 Host
+gate again passed 13/13, including the real CSV transaction:
+
+```text
+C:\Users\ADMIN\AppData\Local\Temp\PymolPlugins-host-smoke-20260726-anno14.json
+started   2026-07-26T04:43:45.228533+00:00
+completed 2026-07-26T04:43:46.040162+00:00
+sha256 21bea7aab5f02e4cf3671907123ace5e0f092333fd1843ee3413259c1ba7fed5
+automatic_status pass
+overall_status   automatic_pass_manual_pending
+```
+
+This remains cooperative cancellation: two non-cooperative reads can still
+hold both dedicated pool slots until timeout, and `QThreadPool.tryTake` remains
+deferred because of its Qt-version and auto-delete ownership constraints.
+
 ## 50,000 x 8 Windows Qt benchmark
 
 The repeatable benchmark used the same bundled PyQt5 interpreter. It retained

@@ -633,6 +633,7 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
             self.assertEqual(plan.dataset.count, 1)
             self.assertEqual(self._session_signature(), session_before)
             self.assertEqual(self._pymol_scene_signature(), scene_before)
+
             cancelled = threading.Event()
             cancelled.set()
             with mock.patch.object(
@@ -663,6 +664,27 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
                     )
             self.assertEqual(self._session_signature(), session_before)
             self.assertEqual(self._pymol_scene_signature(), scene_before)
+
+    def test_csv_async_cancel_unregisters_before_late_completion(self):
+        cancel_event = threading.Event()
+        completed = []
+        panel = types.SimpleNamespace(
+            _complete_csv_task=lambda *args: completed.append(args)
+        )
+        job_id = "cancel-registry"
+        self.module._CSV_ASYNC_JOBS[job_id] = {
+            "panel": lambda: panel,
+            "cancel_event": cancel_event,
+        }
+
+        self.assertTrue(self.module._cancel_csv_async_job(job_id))
+        self.assertTrue(cancel_event.is_set())
+        self.assertNotIn(job_id, self.module._CSV_ASYNC_JOBS)
+        self.assertFalse(self.module._cancel_csv_async_job(job_id))
+
+        self.module._complete_csv_async_job(job_id, object(), None)
+        self.assertEqual(completed, [])
+        self.assertNotIn(job_id, self.module._CSV_ASYNC_JOBS)
 
     def test_csv_prepare_rejects_source_changed_during_resolution(self):
         with tempfile.TemporaryDirectory() as root:

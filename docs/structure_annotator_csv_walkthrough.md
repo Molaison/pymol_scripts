@@ -91,7 +91,9 @@ writes mapping/state/history/session data.
 The panel runs CSV parsing, path probes and WSL requests in a background
 prepare task. While it is running the same button becomes **Cancel preview**;
 the panel and PyMOL navigation must remain responsive. Cancel immediately
-suppresses the result, although an already-blocked FUSE/HTTP read may continue
+unregisters the panel job and suppresses the result. Closing the panel follows
+the same path, so a late completion cannot call back into the closed widget.
+An already-blocked FUSE/HTTP read may still occupy one of the two worker slots
 until its timeout. The console `sa_csv_preview` command intentionally remains
 synchronous for script compatibility.
 

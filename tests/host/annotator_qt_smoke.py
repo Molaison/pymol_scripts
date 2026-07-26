@@ -228,11 +228,16 @@ def run_qt_smoke(repository: str) -> Dict[str, Any]:
             )
             state_generation_before_cancel = annotation.STATE.dataset_generation
             table_rows_before_cancel = panel._dataset_model.rowCount()
+            slow_job_id = panel._csv_task_id
             cancel_started = time.perf_counter()
             panel._preview_csv()
             cancel_seconds = time.perf_counter() - cancel_started
             _require(cancel_seconds < 0.10, "preview cancel did not return promptly")
             _require(not panel._csv_task_id, "cancel left the task active in the panel")
+            _require(
+                slow_job_id not in annotation._CSV_ASYNC_JOBS,
+                "cancel retained the job in the module registry",
+            )
             _require(
                 panel._dataset_model.rowCount() == table_rows_before_cancel
                 and annotation.STATE.dataset_generation
@@ -268,6 +273,10 @@ def run_qt_smoke(repository: str) -> Dict[str, Any]:
             _require(
                 annotation.STATE.dataset_generation == state_generation_before_cancel,
                 "preview/cancel mutated the active dataset generation",
+            )
+            _require(
+                slow_job_id not in annotation._CSV_ASYNC_JOBS,
+                "late cancelled completion recreated a registry entry",
             )
             async_late_result_entry = panel._dataset_model.entry_id_at(0)
         finally:
@@ -683,6 +692,75 @@ def run_qt_smoke(repository: str) -> Dict[str, Any]:
             "keyboard completion did not replace the full bucket field",
         )
 
+        close_probe_panel = None
+        close_started = threading.Event()
+        close_release = threading.Event()
+        close_finished = threading.Event()
+        close_csv = os.path.join(history_root, "close-blocked.csv")
+        with open(close_csv, "w", encoding="utf-8", newline="") as handle:
+            handle.write("structure_path,score\nC:\\models\\close.pdb,0.7\n")
+        original_prepare_preview = annotation._prepare_csv_preview
+
+        def blocked_close_preview(csv_path, **kwargs):
+            close_started.set()
+            close_release.wait(5.0)
+            close_finished.set()
+            return synthetic_preview(csv_path, **kwargs)
+
+        try:
+            annotation._prepare_csv_preview = blocked_close_preview
+            close_probe_panel = annotation.StructureAnnotatorPanel()
+            close_probe_panel.show()
+            close_mode_index = close_probe_panel.source_mode_combo.findData("csv")
+            close_probe_panel.source_mode_combo.setCurrentIndex(close_mode_index)
+            close_probe_panel.csv_edit.setText(close_csv)
+            close_probe_panel.path_column_edit.setText("structure_path")
+            generation_before_close = annotation.STATE.dataset_generation
+            rows_before_close = close_probe_panel._dataset_model.rowCount()
+            close_probe_panel._preview_csv()
+            close_job_id = close_probe_panel._csv_task_id
+            deadline = time.monotonic() + 1.0
+            while not close_started.is_set() and time.monotonic() < deadline:
+                qt_test.QTest.qWait(10)
+            _require(close_started.is_set(), "close-probe worker did not start")
+            _require(
+                close_job_id in annotation._CSV_ASYNC_JOBS,
+                "close-probe job was not registered before close",
+            )
+            close_probe_panel.close()
+            app.processEvents()
+            _require(
+                close_probe_panel._closed,
+                "close event did not mark panel closed",
+            )
+            _require(
+                not close_probe_panel._csv_task_id
+                and close_job_id not in annotation._CSV_ASYNC_JOBS,
+                "panel close retained its cancelled async job",
+            )
+            close_release.set()
+            deadline = time.monotonic() + 2.0
+            while not close_finished.is_set() and time.monotonic() < deadline:
+                qt_test.QTest.qWait(10)
+            qt_test.QTest.qWait(50)
+            _require(close_finished.is_set(), "close-probe worker did not finish")
+            _require(
+                close_job_id not in annotation._CSV_ASYNC_JOBS
+                and close_probe_panel._last_csv_completion_on_main_thread is None
+                and close_probe_panel._dataset_model.rowCount() == rows_before_close
+                and annotation.STATE.dataset_generation == generation_before_close,
+                "late completion after close mutated state or reached the panel",
+            )
+            async_close_registry_released = True
+            async_close_late_suppressed = True
+        finally:
+            close_release.set()
+            annotation._prepare_csv_preview = original_prepare_preview
+            if close_probe_panel is not None:
+                close_probe_panel.close()
+                close_probe_panel.deleteLater()
+                app.processEvents()
+
         return {
             "status": "pass",
             "schema": SCHEMA,
@@ -695,12 +773,17 @@ def run_qt_smoke(repository: str) -> Dict[str, Any]:
             "panel_construct_seconds": panel_construct_seconds,
             "async_submit_seconds": submit_seconds,
             "async_cancel_seconds": cancel_seconds,
+            "async_cancel_registry_released": (
+                slow_job_id not in annotation._CSV_ASYNC_JOBS
+            ),
             "async_heartbeat_ticks": len(heartbeat_ticks),
             "async_completion_on_main_thread": panel._last_csv_completion_on_main_thread,
             "async_late_result_entry": async_late_result_entry,
             "async_load_commit_on_main_thread": async_load_commit_on_main_thread,
             "async_config_stale_suppressed": async_config_stale_suppressed,
             "async_annotation_stale_suppressed": async_annotation_stale_suppressed,
+            "async_close_registry_released": async_close_registry_released,
+            "async_close_late_suppressed": async_close_late_suppressed,
             "restored_dataset_path": panel.dir_edit.text(),
             "restored_label": panel.label_edit.text(),
             "restore_last_checked": bool(panel.restore_last_cb.isChecked()),

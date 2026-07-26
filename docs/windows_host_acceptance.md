@@ -228,8 +228,9 @@ PDB SHA-256 before testing.
 `HOST-ANNOTATION-CSV-01` automates the Windows-local subset of steps 1-5 and 8
 through real `cmd.do`; `annotator_qt_smoke.py` automates preview-source
 isolation plus background prepare heartbeat, cancel/late-result suppression,
-and main-thread Preview/Load completion in real PyQt5. The reviewed 2026-07-25 record separately captures a
-real `K:` FUSE cold/warm run and a real WSL core staging request sequence.
+panel-close registry cleanup, and main-thread Preview/Load completion in real
+PyQt5. The reviewed 2026-07-25 record separately captures a real `K:` FUSE
+cold/warm run and a real WSL core staging request sequence.
 The [2026-07-26 optimization record](validation/structure_annotator_optimization_2026-07-26.md)
 adds a real mixed-result batch worker run and a 50,000 x 8 Windows-Qt RSS/
 cursor benchmark. Windows-PyMOL-to-WSL annotator staging, human visual review

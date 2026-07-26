@@ -122,8 +122,8 @@ and Python imports continue to work.
   the Python/Qt bundled with Windows PyMOL; types through QtTest and accepts
   multiline/bucket fuzzy candidates by mouse and keyboard; also checks lazy
   Scores-table identity, targeted annotation cells, same-source reloads,
-  background CSV heartbeat/cancel/late-result isolation, and main-thread
-  Preview/Load completion.
+  background CSV heartbeat/cancel/late-result isolation, immediate registry
+  cleanup on Cancel/panel close, and main-thread Preview/Load completion.
 - `tests/host/annotator_qt_performance.py`: repeatable 50,000 x 8 bundled-Qt
   model/widget RSS comparison and 200-sample cursor-refresh performance gate.
 - `docs/validation/windows_host_smoke_2026-07-25.md`: latest reviewed Host/CSV/cache

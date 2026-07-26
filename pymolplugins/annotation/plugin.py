@@ -3858,7 +3858,6 @@ def _submit_csv_async_job(
         "dataset_generation": int(dataset_generation),
         "annotation_generation": int(annotation_generation),
         "cancel_event": cancel_event,
-        "cancelled": False,
         "runnable": runnable,
     }
     _csv_async_pool().start(runnable)
@@ -3866,10 +3865,9 @@ def _submit_csv_async_job(
 
 
 def _cancel_csv_async_job(job_id: str) -> bool:
-    job = _CSV_ASYNC_JOBS.get(str(job_id))
+    job = _CSV_ASYNC_JOBS.pop(str(job_id), None)
     if job is None:
         return False
-    job["cancelled"] = True
     event = job.get("cancel_event")
     if event is not None:
         event.set()
@@ -4210,8 +4208,6 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         self._csv_task_id = ""
         self._csv_task_kind = ""
         self._csv_task_epoch = 0
-        self._csv_task_arguments_fingerprint: Tuple[Tuple[str, str], ...] = ()
-        self._csv_task_dataset_generation = -1
         self._closed = False
         self._last_csv_completion_on_main_thread = None
         self._state_save_timer = QtCore.QTimer(self)
@@ -4753,8 +4749,6 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
             return
         self._csv_task_id = job_id
         self._csv_task_kind = str(kind)
-        self._csv_task_arguments_fingerprint = fingerprint
-        self._csv_task_dataset_generation = generation
         self._source_mode_changed()
         self.status_label.setText(
             f"CSV {kind} preparation is running in the background…"
@@ -4763,8 +4757,6 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
     def _clear_csv_task(self) -> None:
         self._csv_task_id = ""
         self._csv_task_kind = ""
-        self._csv_task_arguments_fingerprint = ()
-        self._csv_task_dataset_generation = -1
         if not self._closed:
             self._source_mode_changed()
 

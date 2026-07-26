@@ -526,6 +526,15 @@ signature 后必须 reload/replay。已 fsync 的本地 append 允许增量更�
   `N` 个 entries。50,000 x 8 synthetic CSV 的 parse/load wall time 与 tracemalloc peak
   必须相对同机旧实现均下降，且不能通过延迟生成会逃出 immutable snapshot 的 iterator
   来换取表面内存下降。
+- `ANNO-CSV-14` Qt Cancel/close 必须在设置 worker-owned cancel event 的同时，从
+  module job registry 原子注销该 job，立即释放 registry 对 panel weakref、runnable 与
+  stale fingerprints 的持有；queued/running runnable 自身继续持有 cancel event，并在
+  safe phase boundary 协作退出。已 queued 的 completion 或之后的 worker emit 查不到
+  job 时必须 no-op，不能回调已关闭 panel、rollback 或改写 UI/`STATE`/scene。该优化不
+  使用 Qt 5.9+ `tryTake`，不改变最多两个 non-cooperative reads 可占用 pool slot 至 timeout
+  的边界。WSL registry regression 与真实 Windows bundled-Qt smoke 都必须覆盖普通
+  Cancel 和 blocked worker 期间 close，且 worker 释放后的 late completion 不留 registry
+  entry、不触发 commit/navigation/annotation mutation。
 
 ## 6. Specification：group follow 刚体变换
 
