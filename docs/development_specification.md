@@ -1,7 +1,7 @@
 # PyMOL Plugins 统一体验改造 Specification
 
 状态：核心 implementation、CSV Structure Annotator 与真实 PLIP 链路已完成；真实 ANVIL、合法 PyRosetta、PyMOL 2.x 与剩余手工交互验收仍开放
-日期：2026-07-25
+日期：2026-07-26
 目标运行面：Windows Host PyMOL 2.x（Qt）
 开发与外部计算面：WSL2
 
@@ -432,6 +432,27 @@ metadata 变化，但不能识别刻意保留全部这些字段的原位内容�
 独立临时目录，验证 schema/root/size/identity、拒绝 redirect，并以 adjacent
 `.part + fsync + os.replace` 发布；worker 不提供 list/write/delete/shell surface。
 
+大 CSV 不得为每个 WSL row 建立一条 HTTP 往返。worker 额外提供：
+
+```text
+POST /v1/stage/stat-batch
+request:  {schema_version, root_alias, relative_paths[]}
+response: {schema, root_alias, results[]}
+```
+
+单个 request 最多包含 256 个非空、唯一、canonical relative paths；更大的
+unique-path 集合由 Host 分成多个有界 batch。response 与 request 顺序/数量严格
+一致，每项只能是 `{relative_path,source}` 或 `{relative_path,error}`，逐项保留
+missing/unreadable/invalid/too-large 等确定性 path 分类，且不得暴露 server
+absolute path。timeout 或总 deadline 超限是整批 `stage_batch_timeout`/504，不能
+伪装成某一 row 的确定性错误。batch 仍受 Bearer、body size 和总 staging
+deadline 约束。Structure Annotator 在同一 CSV 有至少两个 stage path
+时优先 batch；duplicate row 先按 relative path 去重再复用结果。仅当旧 worker
+明确返回 endpoint `not_found` 时回退单文件 `/v1/stage/stat`；auth、schema、
+transport 或 malformed response 不得被兼容回退掩盖。
+v1 per-item error code/status 必须是 worker 定义的精确配对；request-level code
+出现在 item 内或 status 不匹配时，Host 必须按 malformed response 整批拒绝。
+
 CSV annotation 是按 `(entry_id, label)` 的 append-only JSONL sidecar：
 
 ```text
@@ -443,6 +464,9 @@ CSV annotation 是按 `(entry_id, label)` 的 append-only JSONL sidecar：
 必须报错。`sa_undo` 追加 undo event，不重写 source CSV。`sa_export_csv` 拒绝覆盖
 source，原样保留 source rows，并写 collision-safe `pymol_annotation_<label>` 列；
 export 必须可再次 import，且重复 path 的 annotation 仍保持独立。
+同一 store 的未变化 read 只检查 file signature，不重复读取 JSONL；外部实例改变
+signature 后必须 reload/replay。已 fsync 的本地 append 允许增量更新内存 replay
+状态，不得每次重读全历史；progress rescan 对一个 label 只取一次 snapshot。
 
 - `ANNO-CSV-01` UTF-8 BOM、auto/explicit delimiter、ragged/duplicate/empty row、typed score、quoted newline 与 duplicate path 行语义确定。
 - `ANNO-CSV-02` Preview 不写、不换 scene；load/filter/sort 的成功切换与所有失败路径均事务回滚。
@@ -451,6 +475,15 @@ export 必须可再次 import，且重复 path 的 annotation 仍保持独立。
 - `ANNO-CSV-05` 默认 `x_k` 三个 alias 与 direct `K:` 在真实 Windows FUSE drive 上 resolve；mapped aliases 共享 cold/warm Windows-local cache。
 - `ANNO-CSV-06` 真实 WSL worker 的独立 client/cache/materializer E2E 只出现 `stat -> file -> stat`，第二次以完整 metadata token 命中重开的 persistent cache；controller load 复用刚完成的 resolve stat，错误 Bearer、missing 和 containment failure 被拒绝。
 - `ANNO-CSV-07` Windows PyMOL `cmd.do` 含空格路径完成 load/annotate/undo/export/restore；visible Qt smoke 验证 Source/Annotate/Scores 与 Preview source isolation。
+- `ANNO-CSV-08` 600 个 unique WSL paths 最多产生 3 个 batch HTTP calls，重复 row 不增加 path count；逐项错误保持 row status，旧 worker `not_found` 才逐条兼容回退。
+- `ANNO-CSV-09` Scores 主表使用 lazy `QAbstractTableModel + QTableView`，不得为
+  每个 cell 分配 `QTableWidgetItem`；metadata 小表继续使用 `QTableWidget`。active
+  dataset 以单调 generation 标识，`entry_id -> table row` 与
+  `entry_id -> navigation index` 均为 O(1)，同一路径 CSV 原地修改后 reload
+  必须刷新 metadata/status，annotation/undo 只触发对应 annotation cell 的
+  `dataChanged`。Windows bundled Qt 在 50,000 x 8 synthetic table 上相对旧
+  `QTableWidget` 的额外 RSS 至少下降 70%；200 次 cursor refresh 的 p95 < 16 ms、
+  max < 50 ms。
 
 ## 6. Specification：group follow 刚体变换
 

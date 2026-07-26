@@ -274,6 +274,7 @@ PyRosetta C++ call.
 | `POST /v1/analyze` | Rosetta metric request with inline PDB text. |
 | `POST /v1/interactions/plip` | Canonical interaction result from inline PDB text plus an explicit atom map. |
 | `POST /v1/stage/stat` | Conditional stat identity lookup from an allowlisted root without file content. |
+| `POST /v1/stage/stat-batch` | Ordered stat identities/errors for up to 256 unique allowlisted relative paths. |
 | `POST /v1/stage/file` | Conditional binary download from an allowlisted root alias plus a relative path. |
 
 Default request-body limit is 10 MiB and can be lowered with
@@ -305,6 +306,23 @@ canonical alias/path, size, and mtime; do not truncate or reconstruct it on the
 Host. Normal replacement/metadata changes invalidate the entry, but an in-place
 rewrite that deliberately preserves every identity field is outside this
 stat-based freshness guarantee.
+
+For a CSV with at least two unique WSL paths, Structure Annotator uses
+`stat_staged_files(root_alias, relative_paths)`. The Host deduplicates while
+preserving first occurrence order, then chunks at both 256 items and 64 KiB;
+each response is capped at 2 MiB and must preserve exact path order and
+cardinality. A valid batch envelope returns HTTP 200 even when individual
+paths are missing, unreadable, invalid, or too large; each such item carries a
+bounded typed error. Version 1 accepts only the worker's exact per-item
+code/status pairs (`invalid_stage_path`/400, `stage_not_regular_file`/400,
+`stage_path_forbidden`/403, `stage_file_unreadable`/403,
+`stage_file_not_found`/404, and `stage_file_too_large`/413); a request-level
+code inside an item or a mismatched status is a malformed response.
+Authentication, unknown aliases, malformed envelopes,
+request limits, and the batch-wide deadline remain request-level failures.
+Only an old worker's exact HTTP 404 with `code=not_found` triggers sequential
+`stage/stat` compatibility fallback. `staging_disabled`, authentication,
+transport, schema, or malformed-response errors are never hidden by fallback.
 
 ## 7. Networking modes
 

@@ -14,11 +14,13 @@ from pathlib import PurePosixPath
 import re
 import stat
 import time
-from typing import BinaryIO, Dict, Iterator, Mapping, Optional
+from typing import BinaryIO, Dict, Iterator, Mapping, Optional, Sequence
 
 
 STAGE_RESPONSE_SCHEMA = "pymolplugins.stage-file/1.0"
 STAGE_STAT_SCHEMA = "pymolplugins.stage-stat/1.0"
+STAGE_STAT_BATCH_SCHEMA = "pymolplugins.stage-stat-batch/1.0"
+MAX_STAGE_STAT_BATCH_ITEMS = 256
 STAGE_ALIAS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
 
 
@@ -173,6 +175,7 @@ class FileStagingBackend:
             "root_aliases": sorted(self.roots),
             "max_file_bytes": self.max_file_bytes,
             "max_stream_seconds": self.max_stream_seconds,
+            "max_stat_batch_items": MAX_STAGE_STAT_BATCH_ITEMS,
         }
 
     def _root(self, alias: object) -> str:
@@ -302,6 +305,84 @@ class FileStagingBackend:
             sent += len(chunk)
             yield chunk
 
+    def stat_many(
+        self, alias: object, relative_paths: Sequence[object]
+    ) -> Dict[str, object]:
+        """Stat a bounded ordered path batch with per-item safe errors."""
+
+        if isinstance(relative_paths, (str, bytes)) or not isinstance(
+            relative_paths, Sequence
+        ):
+            raise ValueError("relative_paths must be an array")
+        if not 1 <= len(relative_paths) <= MAX_STAGE_STAT_BATCH_ITEMS:
+            raise ValueError(
+                "relative_paths must contain 1..%d items"
+                % MAX_STAGE_STAT_BATCH_ITEMS
+            )
+        if any(not isinstance(value, str) for value in relative_paths):
+            raise ValueError("relative_paths entries must be strings")
+        if len(set(relative_paths)) != len(relative_paths):
+            raise ValueError("relative_paths entries must be unique")
+
+        # Validate a shared alias before collecting any item result. Unknown or
+        # invalid roots are request-level failures rather than N repeated rows.
+        self._root(alias)
+        started = self._clock()
+        results = []
+        for relative_path in relative_paths:
+            if self._clock() - started > self.max_stream_seconds:
+                raise StagingError(
+                    "staging batch stat exceeded the total time limit",
+                    code="stage_batch_timeout",
+                    http_status=504,
+                )
+            try:
+                with self.open_file(alias, relative_path) as opened:
+                    item = {
+                        "relative_path": relative_path,
+                        "source": stage_identity_mapping(opened.identity),
+                    }
+            except StagingError as exc:
+                if exc.code == "stage_timeout":
+                    raise StagingError(
+                        "staging batch stat exceeded the total time limit",
+                        code="stage_batch_timeout",
+                        http_status=504,
+                    ) from exc
+                item = {
+                    "relative_path": relative_path,
+                    "error": {
+                        "code": exc.code,
+                        "message": str(exc),
+                        "http_status": exc.http_status,
+                    },
+                }
+            results.append(item)
+            if self._clock() - started > self.max_stream_seconds:
+                raise StagingError(
+                    "staging batch stat exceeded the total time limit",
+                    code="stage_batch_timeout",
+                    http_status=504,
+                )
+        return {
+            "schema": STAGE_STAT_BATCH_SCHEMA,
+            "root_alias": str(alias),
+            "results": results,
+        }
+
+
+def stage_identity_mapping(identity: StageFileIdentity) -> Dict[str, object]:
+    """Return the path-free JSON identity shared by stat endpoints."""
+
+    return {
+        "token": identity.token,
+        "device": identity.device,
+        "inode": identity.inode,
+        "size": identity.size,
+        "mtime_ns": identity.mtime_ns,
+        "mode": identity.mode,
+    }
+
 
 def stage_identity_headers(opened: OpenStageFile) -> Dict[str, str]:
     """Build path-free source identity headers for a binary response."""
@@ -324,12 +405,5 @@ def stage_identity_payload(opened: OpenStageFile) -> Dict[str, object]:
     return {
         "schema": STAGE_STAT_SCHEMA,
         "root_alias": opened.alias,
-        "source": {
-            "token": identity.token,
-            "device": identity.device,
-            "inode": identity.inode,
-            "size": identity.size,
-            "mtime_ns": identity.mtime_ns,
-            "mode": identity.mode,
-        },
+        "source": stage_identity_mapping(identity),
     }

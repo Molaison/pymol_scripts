@@ -307,9 +307,11 @@ WSL root: /home/admin/structures
 alias: structures
 ```
 
-Preview performs its own read-only `stage/stat`, so note it separately or clear
-the observation log before measuring load. On a cold **Load CSV**, the
-controller resolves the unique path once and reuses that fresh stat identity
+Preview performs its own read-only stat, so note it separately or clear the
+observation log before measuring load. With two or more unique WSL paths it
+uses `stage/stat-batch`; a duplicate-only fixture has one unique path and keeps
+the single `stage/stat` fast path. On a cold **Load CSV**, the controller
+resolves the unique path once and reuses that fresh stat identity
 for preflight, then downloads on the miss. Navigate to the second duplicate row
 (or reload the CSV) to force a fresh stat and persistent-cache lookup. Excluding
 the optional Preview request, the expected controller sequence is:
@@ -334,8 +336,10 @@ configuration and their server paths are not exposed by capabilities.
 
 The reviewed real three-request E2E exercised the PyMOL-independent
 staging/client/cache/materializer chain under WSL. Controller stat reuse and
-session memoization are automated in fake-PyMOL tests; the Windows-PyMOL-to-WSL
-version of this step remains a manual Host acceptance gate.
+session memoization are automated in fake-PyMOL tests. A second real foreground
+worker run exercised one mixed-result `stage/stat-batch` followed by the legacy
+single stat/file endpoints. The Windows-PyMOL-to-WSL version of this step
+remains a manual Host acceptance gate.
 
 ## 10. Diagnostics and safe cleanup
 
@@ -358,10 +362,13 @@ should be unchanged because source switches are transactional.
 
 ## 11. Current limits to record during testing
 
-- The score table uses `QTableWidget`; very large CSV responsiveness has not
-  yet been quantified.
-- WSL Preview performs one `stage/stat` per unique source path sequentially;
-  batch stat is a future optimization.
+- The Scores table is lazy (`QTableView + QAbstractTableModel`) and has a
+  repeatable 50,000 x 8 Windows-Qt performance gate. CSV parsing, path
+  resolution, and filesystem/network latency can still dominate initial load;
+  the table result does not promise that every 50,000-file mount is fast.
+- WSL paths are deduplicated and sent through `stage/stat-batch` in chunks of
+  at most 256 paths and 64 KiB. An old worker is used sequentially only after
+  the batch endpoint returns the exact compatibility signal `404/not_found`.
 - Annotation JSONL locking is process-local; do not edit the same sidecar from
   two PyMOL processes concurrently.
 - The reviewed Host build is PyMOL 3.1.3.1. PyMOL 2.x remains a separate gate.

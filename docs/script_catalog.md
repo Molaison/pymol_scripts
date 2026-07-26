@@ -46,8 +46,8 @@ and Python imports continue to work.
 | Both | `pymolplugins/interactions/controller.py` | Mutation-bounded local/PLIP controller: preset dispatch, exact-ligand filtering, canonical rendering, transactional replacement restore, export, and manifest clear. |
 | Host | `pymolplugins/remote/commands.py` | Windows PyMOL async Qt client for PLIP and Rosetta plus worker health/capabilities; worker threads perform HTTP only. |
 | WSL | `pymolplugins/remote/client.py` | Bounded typed HTTP client with no redirects and request/response/schema checks. |
-| Both | `pymolplugins/remote/staging.py` | Warm-cache stat lookup plus bounded binary staging with identity validation and atomic `.part` replacement; called by Windows PyMOL and independently testable in WSL. |
-| WSL | `pymolplugins/worker/app.py` | Loopback HTTP service: health/capabilities, inline analysis, and optional allowlisted `/v1/stage/stat` plus `/v1/stage/file`. |
+| Both | `pymolplugins/remote/staging.py` | Warm-cache single/batch stat lookup plus bounded binary staging with identity validation, 256-item/64-KiB batch chunking, exact old-worker fallback, and atomic `.part` replacement; called by Windows PyMOL and independently testable in WSL. |
+| WSL | `pymolplugins/worker/app.py` | Loopback HTTP service: health/capabilities, inline analysis, and optional allowlisted `/v1/stage/stat`, `/v1/stage/stat-batch`, and `/v1/stage/file`. |
 | WSL | `pymolplugins/worker/staging.py` | Root-alias/relative-path resolver with realpath/fd containment, regular-file, size, and deadline checks. |
 | WSL | `pymolplugins/worker/backends/plip.py` | Optional PLIP backend; active only when PLIP/OpenBabel are importable. |
 | WSL/native Python | `pymolplugins/interactions/plip_runner.py` | Versioned eight-category PLIP raw adapter used by the worker and native compatibility environments. |
@@ -72,11 +72,11 @@ and Python imports continue to work.
 
 | Status | Surface | Path | Purpose / caveat |
 | --- | --- | --- | --- |
-| Standalone | Host | `pymolplugins/annotation/plugin.py` | Three-tab directory/CSV Qt annotation UI with preview, score/filter/sort table, transactional source swaps, row-level annotation/undo/export, background materialization, persistent cache, per-source restore, and global fuzzy history. |
+| Standalone | Host | `pymolplugins/annotation/plugin.py` | Three-tab directory/CSV Qt annotation UI with preview, lazy model/view score table and O(1) row maps, transactional source swaps, row-level annotation/undo/export, background materialization, persistent cache, per-source restore, and global fuzzy history. |
 | Standalone support | Both | `pymolplugins/annotation/model.py`, `sources/` | PyMOL-independent immutable entry/dataset model and directory/CSV adapters; preserves raw rows and duplicate-path entry identity while inferring typed score columns. |
 | Standalone support | Both | `pymolplugins/annotation/path_resolver.py`, `mapping_store.py` | Direct/relative/POSIX-to-Windows path resolution plus bounded global mapping profiles; built-in `x_k` maps three remote-home spellings to `K:`. |
 | Standalone support | Both | `pymolplugins/annotation/cache.py`, `materializer.py` | Windows-local persistent source-version cache with atomic copy/decompress, LRU limits, pinning, concurrent-write deduplication, and metadata source-change checks. |
-| Standalone support | Both | `pymolplugins/annotation/annotation_store.py` | Append-only, fsynced, bounded CSV row/label JSONL annotations with torn-tail recovery, undo, snapshots, and atomic compaction. |
+| Standalone support | Both | `pymolplugins/annotation/annotation_store.py` | Append-only, fsynced, bounded CSV row/label JSONL annotations with torn-tail recovery, signature-cached reads, incremental local replay, label snapshots, undo, and atomic compaction. |
 | Standalone support | Both | `pymolplugins/annotation/state_store.py` | Version-2 atomic per-directory/per-CSV state under `.pymolplugins`, portable CSV sidecar IDs, Windows hidden-directory support, and bounded version-1 migration. |
 | Standalone support | WSL/Host Python | `pymolplugins/annotation/history_store.py` | Version-2 bounded atomic global source/config snapshots plus recency/frequency-aware fuzzy field history; `PYMOLPLUGINS_ANNOTATOR_HISTORY` provides an isolation override. |
 | Standalone | Host | `extras/navigation/load_states.py` | Loads a directory as states in one object; this is a separate movie-style use case. |
@@ -120,9 +120,14 @@ and Python imports continue to work.
   Host fixture/smoke gate; interactive mouse/callback/Qt items remain manual.
 - `tests/host/annotator_qt_smoke.py`: visible Host-PyQt completion gate using
   the Python/Qt bundled with Windows PyMOL; types through QtTest and accepts
-  multiline/bucket fuzzy candidates by mouse and keyboard.
+  multiline/bucket fuzzy candidates by mouse and keyboard; also checks lazy
+  Scores-table identity, targeted annotation cells, and same-source reloads.
+- `tests/host/annotator_qt_performance.py`: repeatable 50,000 x 8 bundled-Qt
+  model/widget RSS comparison and 200-sample cursor-refresh performance gate.
 - `docs/validation/windows_host_smoke_2026-07-25.md`: latest reviewed Host/CSV/cache
   smoke evidence summary.
+- `docs/validation/structure_annotator_optimization_2026-07-26.md`: batch-stat,
+  incremental JSONL, and large-table validation evidence.
 
 When adding a module, record its status and runtime surface here.  Do not label a
 module canonical merely because it imports successfully or passes syntax checks.

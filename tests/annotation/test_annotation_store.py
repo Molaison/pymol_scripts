@@ -98,6 +98,53 @@ class RowAnnotationStoreTests(unittest.TestCase):
             all(json.loads(record)["schema"] == ANNOTATION_SCHEMA for record in records)
         )
 
+    def test_label_snapshot_and_cached_reads_reload_only_after_external_change(self):
+        store = RowAnnotationStore(self.path)
+        store.set("row-1", "decision", "Keep")
+        store.set("row-1", "note", "reviewed")
+        store.set("row-2", "decision", "Reject")
+
+        with mock.patch.object(
+            store, "_read_events_unlocked", wraps=store._read_events_unlocked
+        ) as reader:
+            self.assertEqual(
+                store.snapshot_for_label("decision"),
+                {"row-1": "Keep", "row-2": "Reject"},
+            )
+            self.assertEqual(store.annotations_for("row-1")["note"], "reviewed")
+            first_revision = store.revision()
+            self.assertEqual(reader.call_count, 0)
+
+            other = RowAnnotationStore(self.path)
+            other.set("row-3", "decision", "Maybe")
+            self.assertEqual(
+                store.snapshot_for_label("decision"),
+                {"row-1": "Keep", "row-2": "Reject", "row-3": "Maybe"},
+            )
+            self.assertEqual(reader.call_count, 1)
+            self.assertNotEqual(store.revision(), first_revision)
+            self.assertEqual(reader.call_count, 1)
+
+    def test_local_append_and_undo_are_incremental_not_full_log_replays(self):
+        store = RowAnnotationStore(self.path)
+        with mock.patch.object(
+            store, "_read_events_unlocked", wraps=store._read_events_unlocked
+        ) as reader:
+            for index in range(1000):
+                store.set(f"row-{index:04d}", "decision", "Keep")
+            undone = store.undo(entry_id="row-0999", label="decision")
+
+            self.assertEqual(reader.call_count, 0)
+            self.assertEqual(undone["target_seq"], 1000)
+            self.assertNotIn("row-0999", store.snapshot())
+            self.assertEqual(store.get("row-0000", "decision"), "Keep")
+            self.assertEqual(len(store.history()), 1001)
+            self.assertEqual(reader.call_count, 0)
+
+        reloaded = RowAnnotationStore(self.path)
+        self.assertEqual(reloaded.snapshot(), store.snapshot())
+        self.assertTrue(reloaded.history()[-2]["undone"])
+
     def test_undo_is_durable_filterable_and_marks_target_history(self):
         store = RowAnnotationStore(self.path)
         store.set("row-1", "decision", "Keep")

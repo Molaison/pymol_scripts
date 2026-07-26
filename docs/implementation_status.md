@@ -1,6 +1,6 @@
 # Implementation Status
 
-Snapshot date: 2026-07-25 (Asia/Shanghai)
+Snapshot date: 2026-07-26 (Asia/Shanghai)
 Specification: [development_specification.md](development_specification.md)
 
 This file separates code existence, WSL evidence, automated Windows Host
@@ -8,13 +8,14 @@ evidence, interactive Host evidence, and optional licensed-backend evidence.
 
 Current evidence anchors:
 
-- WSL: 333 standard-library unit/fake-command tests pass.
+- WSL: 352 standard-library unit/fake-command tests pass.
 - Windows Host: the automated PyMOL 3.1.3.1 record is
   [automatic pass / manual pending](validation/windows_host_smoke_2026-07-25.md).
 - Structure Annotator: `HOST-ANNOTATION-CSV-01` and the real PyQt5 smoke pass;
   real Windows `K:` FUSE mapping/cache passes, and the PyMOL-independent
   allowlisted WSL staging client/cache/materializer chain passes a real worker
-  cold/warm E2E.
+  cold/warm E2E. The batch-stat and 50,000-row evidence is recorded in
+  [the 2026-07-26 optimization record](validation/structure_annotator_optimization_2026-07-26.md).
 - WSL worker: a real loopback run on Python 3.12.13 returned `status=ok` with
   PLIP 3.0.0 available; Windows Host PyMOL reached that worker through localhost
   forwarding and verified all 63 canonical commands.
@@ -64,10 +65,12 @@ context/offset, pin clearing, and explicit session replacement are also tested.
 | --- | --- | --- |
 | ANNO-CSV-01 | WSL verified | CSV/TSV parsing covers BOM, auto/explicit delimiters, exact headers, quoted newlines/physical row numbers, ragged rows, empty/duplicate IDs, duplicate structure paths, portable basename-namespaced entry IDs, numeric typing, and immutable row metadata. |
 | ANNO-CSV-02, ANNO-CSV-03 | WSL verified + Host transaction success | Preview does not write scene/session/state/history/mapping data and performs staging `stat` when configured; preview rows cannot navigate an old source. Directory/CSV/filter switches preflight the new entry, park old managed objects, and either commit or restore the complete prior scene. Tri-state source settings restore per-CSV values, while a newly selected CSV inherits no parser/ID/display/base/staging values from the old CSV. Host `HOST-ANNOTATION-CSV-01` exercises the successful quoted-path transaction. A deliberately injected real Host load failure remains a manual gate; all rollback branches are fake-PyMOL tested. |
-| ANNO-CSV-04 | Host smoke verified (3.1.3.1) + WSL verified | Append-only row/label JSONL supports fsync, torn-tail recovery, bounded validation and undo. Source CSV/PDB bytes remain unchanged. Export refuses source overwrite, writes `pymol_annotation_<label>` without duplicate headers, preserves ragged source values, and is re-importable. Duplicate source paths remain independently annotated. |
+| ANNO-CSV-04 | Host smoke verified (3.1.3.1) + WSL verified | Append-only row/label JSONL supports fsync, torn-tail recovery, bounded validation and undo. Unchanged reads use a file-signature cache, progress uses one label snapshot, and a local fsynced append updates the in-memory replay state incrementally instead of rereading the full log. Source CSV/PDB bytes remain unchanged. Export refuses source overwrite, writes `pymol_annotation_<label>` without duplicate headers, preserves ragged source values, and is re-importable. Duplicate source paths remain independently annotated. |
 | ANNO-CSV-05 | Real Windows `K:` FUSE verified | `/xcfhome/zpzeng/mount_local`, `/xcfhome/zpzeng`, and literal `~/` resolve to `K:\`; all three aliases share one physical-target cache key (`cold=false`, then two warm hits). Direct `K:\...` is recognized as a configured remote drive and shows its own cold/warm persistent-cache pair. The 75,609-byte source SHA-256/size/mtime stayed unchanged, and cache objects were on Windows-local `C:`. |
 | ANNO-CSV-06 | Real WSL worker core verified | The PyMOL-independent Bearer-authenticated client/cache/materializer chain with root alias `structures` produced exactly `POST /v1/stage/stat`, `POST /v1/stage/file`, `POST /v1/stage/stat`. Cold materialization missed, the second stat hit a cache key containing the complete `v1-...` metadata token, and a reopened cache also hit; source bytes were unchanged. Controller tests verify a CSV load reuses its fresh resolution stat rather than issuing a redundant preflight stat. Unit tests additionally cover wrong bearer, missing, symlink/traversal/regular-file/size/deadline checks and response validation. |
-| ANNO-CSV-07 | Host smoke + real PyQt5 verified | `HOST-ANNOTATION-CSV-01` loads a Windows-local CSV/path containing spaces through real `cmd.do`, keeps duplicate path rows independent, annotates, exports, restores state/cursor, and verifies source bytes. The Qt smoke validates Source/Annotate/Scores widgets and that clicking a preview row makes zero `sa_goto` calls. Windows-PyMOL-to-WSL staging, large-CSV `QTableWidget` performance, and PyMOL 2.x are still manual gates. |
+| ANNO-CSV-07 | Host smoke + real PyQt5 verified | `HOST-ANNOTATION-CSV-01` loads a Windows-local CSV/path containing spaces through real `cmd.do`, keeps duplicate path rows independent, annotates, exports, restores state/cursor, and verifies source bytes. The Qt smoke validates Source/Annotate/Scores widgets and that clicking a preview row makes zero `sa_goto` calls. Windows-PyMOL-to-WSL controller staging and PyMOL 2.x are still manual gates. |
+| ANNO-CSV-08 | Real WSL worker + WSL verified | The allowlisted worker exposes bounded `POST /v1/stage/stat-batch` with at most 256 unique canonical paths, ordered per-item source/error results, one request deadline, strict envelope validation, and no server paths. The Host client additionally chunks at 64 KiB, bounds responses at 2 MiB, and falls back only for an old worker's exact `404/not_found`. A real foreground worker returned one available and one missing result in one batch request; the old single stat/file endpoints then returned matching identity and 62,712 bytes. |
+| ANNO-CSV-09 | Real Windows PyQt5 performance gate | Scores uses `QTableView + QAbstractTableModel`; the small metadata table remains `QTableWidget`. Dataset/navigation generations and entry-ID maps remove full-row signature scans, stale clicks refresh without navigating, same-source reload refreshed `0.0 -> 9.9` and `available -> missing`, and annotation emitted only cell `(0,3)`. On Windows bundled PyQt5, 50,000 x 8 used 12.3 MiB additional RSS versus 199.8 MiB for the legacy widget (93.85% reduction); 200 cursor refreshes had p95 0.258 ms and max 0.615 ms. |
 
 ### Object/group targets
 

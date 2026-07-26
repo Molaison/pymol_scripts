@@ -10,7 +10,7 @@ import re
 import socket
 import tempfile
 import time
-from typing import Dict, Mapping
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener
 
@@ -19,10 +19,24 @@ from .client import WorkerRequestError, _NoRedirect, _base_url, worker_request
 
 STAGE_ENDPOINT = "/v1/stage/file"
 STAGE_STAT_ENDPOINT = "/v1/stage/stat"
+STAGE_STAT_BATCH_ENDPOINT = "/v1/stage/stat-batch"
 STAGE_RESPONSE_SCHEMA = "pymolplugins.stage-file/1.0"
 STAGE_STAT_SCHEMA = "pymolplugins.stage-stat/1.0"
+STAGE_STAT_BATCH_SCHEMA = "pymolplugins.stage-stat-batch/1.0"
 DEFAULT_MAX_STAGE_BYTES = 256 * 1024 * 1024
+MAX_STAGE_STAT_BATCH_ITEMS = 256
+MAX_STAGE_STAT_BATCH_REQUEST_BYTES = 64 * 1024
+MAX_STAGE_STAT_BATCH_RESPONSE_BYTES = 2 * 1024 * 1024
 _IDENTITY_RE = re.compile(r"^v1-[0-9a-f]{64}$")
+_ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_BATCH_ITEM_ERROR_STATUS = {
+    "invalid_stage_path": 400,
+    "stage_not_regular_file": 400,
+    "stage_path_forbidden": 403,
+    "stage_file_unreadable": 403,
+    "stage_file_not_found": 404,
+    "stage_file_too_large": 413,
+}
 
 
 @dataclass(frozen=True)
@@ -35,6 +49,23 @@ class StagedSourceIdentity:
     size: int
     mtime_ns: int
     mode: int
+
+
+@dataclass(frozen=True)
+class StagedStatResult:
+    """One ordered batch-stat result with exactly one source or error."""
+
+    relative_path: str
+    source: Optional[StagedSourceIdentity] = None
+    error: Optional[WorkerRequestError] = None
+
+    def __post_init__(self) -> None:
+        if bool(self.source is not None) == bool(self.error is not None):
+            raise ValueError("batch stat result requires exactly one source or error")
+
+    @property
+    def ok(self) -> bool:
+        return self.source is not None
 
 
 @dataclass(frozen=True)
@@ -153,45 +184,66 @@ def _response_identity(headers, alias: str, limit: int) -> StagedSourceIdentity:
     )
 
 
-def _mapping_integer(source: Mapping[str, object], name: str, *, signed=False) -> int:
+def _mapping_integer(
+    source: Mapping[str, object],
+    name: str,
+    *,
+    signed: bool = False,
+    endpoint: str = STAGE_STAT_ENDPOINT,
+) -> int:
     value = source.get(name)
     if type(value) is not int or (value < 0 and not signed):
         raise WorkerRequestError(
             "worker returned invalid staging identity metadata",
             code="invalid_response",
-            endpoint=STAGE_STAT_ENDPOINT,
+            endpoint=endpoint,
         )
     return value
 
 
-def _mapping_identity(value: object, limit: int) -> StagedSourceIdentity:
+def _mapping_identity(
+    value: object,
+    limit: int,
+    *,
+    endpoint: str = STAGE_STAT_ENDPOINT,
+    strict_fields: bool = False,
+) -> StagedSourceIdentity:
     if not isinstance(value, Mapping):
         raise WorkerRequestError(
             "worker returned missing staging identity metadata",
             code="invalid_response",
-            endpoint=STAGE_STAT_ENDPOINT,
+            endpoint=endpoint,
+        )
+    expected_fields = {"token", "device", "inode", "size", "mtime_ns", "mode"}
+    if strict_fields and set(value) != expected_fields:
+        raise WorkerRequestError(
+            "worker returned invalid staging identity fields",
+            code="invalid_response",
+            endpoint=endpoint,
         )
     token = value.get("token")
     if not isinstance(token, str) or not _IDENTITY_RE.fullmatch(token):
         raise WorkerRequestError(
             "worker returned an invalid staging identity token",
             code="invalid_response",
-            endpoint=STAGE_STAT_ENDPOINT,
+            endpoint=endpoint,
         )
-    size = _mapping_integer(value, "size")
+    size = _mapping_integer(value, "size", endpoint=endpoint)
     if size > limit:
         raise WorkerRequestError(
             "worker staged file exceeds %d byte limit" % limit,
             code="response_too_large",
-            endpoint=STAGE_STAT_ENDPOINT,
+            endpoint=endpoint,
         )
     return StagedSourceIdentity(
         token=token,
-        device=_mapping_integer(value, "device"),
-        inode=_mapping_integer(value, "inode"),
+        device=_mapping_integer(value, "device", endpoint=endpoint),
+        inode=_mapping_integer(value, "inode", endpoint=endpoint),
         size=size,
-        mtime_ns=_mapping_integer(value, "mtime_ns", signed=True),
-        mode=_mapping_integer(value, "mode"),
+        mtime_ns=_mapping_integer(
+            value, "mtime_ns", signed=True, endpoint=endpoint
+        ),
+        mode=_mapping_integer(value, "mode", endpoint=endpoint),
     )
 
 
@@ -233,6 +285,282 @@ def stat_staged_file(
             endpoint=STAGE_STAT_ENDPOINT,
         )
     return _mapping_identity(result.get("source"), limit)
+
+
+def _batch_error(value: object, relative_path: str) -> WorkerRequestError:
+    if not isinstance(value, Mapping) or set(value) != {
+        "code",
+        "message",
+        "http_status",
+    }:
+        raise WorkerRequestError(
+            "worker returned invalid staging batch error metadata",
+            code="invalid_response",
+            endpoint=STAGE_STAT_BATCH_ENDPOINT,
+        )
+    code = value.get("code")
+    message = value.get("message")
+    http_status = value.get("http_status")
+    if not isinstance(code, str) or not _ERROR_CODE_RE.fullmatch(code):
+        raise WorkerRequestError(
+            "worker returned invalid staging batch error code",
+            code="invalid_response",
+            endpoint=STAGE_STAT_BATCH_ENDPOINT,
+        )
+    expected_status = _BATCH_ITEM_ERROR_STATUS.get(code)
+    if expected_status is None:
+        raise WorkerRequestError(
+            "worker returned an unsupported staging batch item error",
+            code="invalid_response",
+            endpoint=STAGE_STAT_BATCH_ENDPOINT,
+        )
+    if (
+        not isinstance(message, str)
+        or not message
+        or len(message) > 4096
+        or any(character in message for character in "\x00\r\n")
+    ):
+        raise WorkerRequestError(
+            "worker returned invalid staging batch error message",
+            code="invalid_response",
+            endpoint=STAGE_STAT_BATCH_ENDPOINT,
+        )
+    if type(http_status) is not int or http_status != expected_status:
+        raise WorkerRequestError(
+            "worker returned mismatched staging batch error status",
+            code="invalid_response",
+            endpoint=STAGE_STAT_BATCH_ENDPOINT,
+        )
+    return WorkerRequestError(
+        message,
+        code=code,
+        endpoint=STAGE_STAT_BATCH_ENDPOINT,
+        http_status=http_status,
+        retriable=http_status >= 500,
+        detail={"relative_path": relative_path},
+    )
+
+
+def _stat_batch_chunk(
+    root_alias: str,
+    relative_paths: Sequence[str],
+    *,
+    url: str,
+    timeout: float,
+    token: str,
+    max_file_bytes: int,
+) -> Tuple[StagedStatResult, ...]:
+    result = worker_request(
+        STAGE_STAT_BATCH_ENDPOINT,
+        {
+            "schema_version": 1,
+            "root_alias": root_alias,
+            "relative_paths": list(relative_paths),
+        },
+        url=url,
+        timeout=timeout,
+        token=token,
+        max_request_bytes=MAX_STAGE_STAT_BATCH_REQUEST_BYTES,
+        max_response_bytes=MAX_STAGE_STAT_BATCH_RESPONSE_BYTES,
+        expected_schema=STAGE_STAT_BATCH_SCHEMA,
+    )
+    if set(result) != {"schema", "root_alias", "results"}:
+        raise WorkerRequestError(
+            "worker returned invalid staging batch fields",
+            code="invalid_response",
+            endpoint=STAGE_STAT_BATCH_ENDPOINT,
+        )
+    if result.get("root_alias") != root_alias:
+        raise WorkerRequestError(
+            "worker returned a mismatched staging root alias",
+            code="invalid_response",
+            endpoint=STAGE_STAT_BATCH_ENDPOINT,
+        )
+    raw_results = result.get("results")
+    if not isinstance(raw_results, list) or len(raw_results) != len(relative_paths):
+        raise WorkerRequestError(
+            "worker returned mismatched staging batch cardinality",
+            code="invalid_response",
+            endpoint=STAGE_STAT_BATCH_ENDPOINT,
+        )
+
+    parsed: List[StagedStatResult] = []
+    for expected_path, raw in zip(relative_paths, raw_results):
+        if not isinstance(raw, Mapping) or raw.get("relative_path") != expected_path:
+            raise WorkerRequestError(
+                "worker returned a mismatched staging batch path",
+                code="invalid_response",
+                endpoint=STAGE_STAT_BATCH_ENDPOINT,
+            )
+        fields = set(raw)
+        if fields == {"relative_path", "source"}:
+            parsed.append(
+                StagedStatResult(
+                    relative_path=expected_path,
+                    source=_mapping_identity(
+                        raw.get("source"),
+                        max_file_bytes,
+                        endpoint=STAGE_STAT_BATCH_ENDPOINT,
+                        strict_fields=True,
+                    ),
+                )
+            )
+        elif fields == {"relative_path", "error"}:
+            parsed.append(
+                StagedStatResult(
+                    relative_path=expected_path,
+                    error=_batch_error(raw.get("error"), expected_path),
+                )
+            )
+        else:
+            raise WorkerRequestError(
+                "worker staging batch item must contain source or error",
+                code="invalid_response",
+                endpoint=STAGE_STAT_BATCH_ENDPOINT,
+            )
+    return tuple(parsed)
+
+
+def _batch_chunks(root_alias: str, relative_paths: Sequence[str]):
+    chunk: List[str] = []
+    for relative_path in relative_paths:
+        candidate = chunk + [relative_path]
+        payload = {
+            "schema_version": 1,
+            "root_alias": root_alias,
+            "relative_paths": candidate,
+        }
+        size = len(
+            json.dumps(
+                payload, separators=(",", ":"), ensure_ascii=False
+            ).encode("utf-8")
+        )
+        if (
+            len(candidate) > MAX_STAGE_STAT_BATCH_ITEMS
+            or size > MAX_STAGE_STAT_BATCH_REQUEST_BYTES
+        ):
+            if not chunk:
+                raise WorkerRequestError(
+                    "staging batch path exceeds request size limit",
+                    code="request_too_large",
+                    endpoint=STAGE_STAT_BATCH_ENDPOINT,
+                )
+            yield tuple(chunk)
+            chunk = [relative_path]
+            single_size = len(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "root_alias": root_alias,
+                        "relative_paths": chunk,
+                    },
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            )
+            if single_size > MAX_STAGE_STAT_BATCH_REQUEST_BYTES:
+                raise WorkerRequestError(
+                    "staging batch path exceeds request size limit",
+                    code="request_too_large",
+                    endpoint=STAGE_STAT_BATCH_ENDPOINT,
+                )
+        else:
+            chunk = candidate
+    if chunk:
+        yield tuple(chunk)
+
+
+def _single_stat_results(
+    root_alias: str,
+    relative_paths: Sequence[str],
+    *,
+    url: str,
+    timeout: float,
+    token: str,
+    max_file_bytes: int,
+) -> Tuple[StagedStatResult, ...]:
+    results = []
+    for relative_path in relative_paths:
+        try:
+            source = stat_staged_file(
+                root_alias,
+                relative_path,
+                url=url,
+                timeout=timeout,
+                token=token,
+                max_file_bytes=max_file_bytes,
+            )
+            results.append(StagedStatResult(relative_path, source=source))
+        except WorkerRequestError as exc:
+            results.append(StagedStatResult(relative_path, error=exc))
+    return tuple(results)
+
+
+def stat_staged_files(
+    root_alias: str,
+    relative_paths: Sequence[str],
+    *,
+    url: str = "",
+    timeout: float = 60.0,
+    token: str = "",
+    max_file_bytes: int = DEFAULT_MAX_STAGE_BYTES,
+    fallback_single: bool = True,
+) -> Tuple[StagedStatResult, ...]:
+    """Batch-stat unique paths, chunking requests and supporting old workers."""
+
+    limit = int(max_file_bytes)
+    seconds = float(timeout)
+    if limit < 1 or seconds <= 0:
+        raise ValueError("staging file and timeout limits must be positive")
+    if not isinstance(root_alias, str) or not root_alias:
+        raise ValueError("root_alias must be a non-empty string")
+    if isinstance(relative_paths, (str, bytes)) or not isinstance(
+        relative_paths, Sequence
+    ):
+        raise ValueError("relative_paths must be a sequence of strings")
+
+    unique = []
+    seen = set()
+    for value in relative_paths:
+        if not isinstance(value, str) or not value:
+            raise ValueError("relative_paths entries must be non-empty strings")
+        if value not in seen:
+            seen.add(value)
+            unique.append(value)
+    if not unique:
+        return ()
+
+    parsed: List[StagedStatResult] = []
+    for chunk_index, chunk in enumerate(_batch_chunks(root_alias, unique)):
+        try:
+            parsed.extend(
+                _stat_batch_chunk(
+                    root_alias,
+                    chunk,
+                    url=url,
+                    timeout=seconds,
+                    token=token,
+                    max_file_bytes=limit,
+                )
+            )
+        except WorkerRequestError as exc:
+            old_worker = (
+                fallback_single
+                and chunk_index == 0
+                and exc.http_status == 404
+                and exc.code == "not_found"
+            )
+            if old_worker:
+                return _single_stat_results(
+                    root_alias,
+                    unique,
+                    url=url,
+                    timeout=seconds,
+                    token=token,
+                    max_file_bytes=limit,
+                )
+            raise
+    return tuple(parsed)
 
 
 def _http_error(exc: HTTPError) -> WorkerRequestError:
@@ -418,10 +746,14 @@ __all__ = [
     "DEFAULT_MAX_STAGE_BYTES",
     "STAGE_ENDPOINT",
     "STAGE_RESPONSE_SCHEMA",
+    "STAGE_STAT_BATCH_ENDPOINT",
+    "STAGE_STAT_BATCH_SCHEMA",
     "STAGE_STAT_ENDPOINT",
     "STAGE_STAT_SCHEMA",
     "StageDownloadResult",
     "StagedSourceIdentity",
+    "StagedStatResult",
     "download_staged_file",
     "stat_staged_file",
+    "stat_staged_files",
 ]

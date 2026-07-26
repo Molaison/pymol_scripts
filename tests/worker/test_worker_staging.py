@@ -84,6 +84,37 @@ class WorkerStagingTests(unittest.TestCase):
         payload = json.loads(captured.exception.read())
         return captured.exception.code, payload["error"]["code"]
 
+    def batch_request(
+        self,
+        relative_paths,
+        *,
+        alias="dataset",
+        token="secret",
+        extra=None,
+    ):
+        payload = {
+            "schema_version": 1,
+            "root_alias": alias,
+            "relative_paths": relative_paths,
+        }
+        payload.update(extra or {})
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        if token is not None:
+            headers["Authorization"] = "Bearer %s" % token
+        request = Request(
+            self.base + "/v1/stage/stat-batch",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        return urlopen(request, timeout=2)
+
+    def batch_error(self, relative_paths, **kwargs):
+        with self.assertRaises(HTTPError) as captured:
+            self.batch_request(relative_paths, **kwargs)
+        payload = json.loads(captured.exception.read())
+        return captured.exception.code, payload["error"]["code"]
+
     def test_binary_response_has_stat_identity_without_server_path(self):
         with self.request("nested/sample.pdb") as response:
             body = response.read()
@@ -125,6 +156,31 @@ class WorkerStagingTests(unittest.TestCase):
         )
         self.assertNotIn(self.root, json.dumps(payload))
 
+    def test_batch_stat_returns_ordered_mixed_results_without_server_paths(self):
+        with self.batch_request(
+            ["nested/sample.pdb", "nested/missing.pdb", "nested"]
+        ) as response:
+            self.assertEqual(response.headers.get_content_type(), "application/json")
+            payload = json.loads(response.read())
+        self.assertEqual(
+            payload["schema"], "pymolplugins.stage-stat-batch/1.0"
+        )
+        self.assertEqual(payload["root_alias"], "dataset")
+        self.assertEqual(
+            [item["relative_path"] for item in payload["results"]],
+            ["nested/sample.pdb", "nested/missing.pdb", "nested"],
+        )
+        self.assertIn("source", payload["results"][0])
+        self.assertEqual(
+            payload["results"][1]["error"]["code"],
+            "stage_file_not_found",
+        )
+        self.assertEqual(
+            payload["results"][2]["error"]["code"],
+            "stage_not_regular_file",
+        )
+        self.assertNotIn(self.root, json.dumps(payload))
+
     def test_capabilities_expose_alias_and_bounds_but_not_root_path(self):
         request = Request(
             self.base + "/v1/capabilities",
@@ -137,14 +193,25 @@ class WorkerStagingTests(unittest.TestCase):
         self.assertEqual(payload["staging"]["max_file_bytes"], 1024)
         self.assertIn("POST /v1/stage/file", payload["endpoints"])
         self.assertIn("POST /v1/stage/stat", payload["endpoints"])
+        self.assertIn("POST /v1/stage/stat-batch", payload["endpoints"])
+        self.assertEqual(payload["staging"]["max_stat_batch_items"], 256)
         self.assertNotIn(self.root, json.dumps(payload))
 
     def test_bearer_token_is_required_for_staging(self):
-        for endpoint in ("/v1/stage/file", "/v1/stage/stat"):
+        for endpoint in (
+            "/v1/stage/file",
+            "/v1/stage/stat",
+            "/v1/stage/stat-batch",
+        ):
             with self.subTest(endpoint=endpoint):
-                status, code = self.error(
-                    "nested/sample.pdb", token=None, endpoint=endpoint
-                )
+                if endpoint.endswith("stat-batch"):
+                    status, code = self.batch_error(
+                        ["nested/sample.pdb"], token=None
+                    )
+                else:
+                    status, code = self.error(
+                        "nested/sample.pdb", token=None, endpoint=endpoint
+                    )
                 self.assertEqual((status, code), (401, "unauthorized"))
 
     def test_unknown_alias_missing_file_directory_and_size_are_bounded(self):
@@ -202,6 +269,33 @@ class WorkerStagingTests(unittest.TestCase):
             self.error("nested/sample.pdb", extra={"options": {}}),
             (400, "invalid_request"),
         )
+        self.assertEqual(
+            self.batch_error(
+                ["nested/sample.pdb"], extra={"options": {}}
+            ),
+            (400, "invalid_request"),
+        )
+
+    def test_batch_envelope_rejects_empty_duplicate_non_string_and_over_limit(self):
+        self.assertEqual(self.batch_error([]), (400, "invalid_request"))
+        self.assertEqual(
+            self.batch_error(["nested/sample.pdb", "nested/sample.pdb"]),
+            (400, "invalid_request"),
+        )
+        self.assertEqual(
+            self.batch_error(["nested/sample.pdb", 3]),
+            (400, "invalid_request"),
+        )
+        self.assertEqual(
+            self.batch_error(["nested/sample.pdb"] * 257),
+            (413, "request_too_large"),
+        )
+
+    def test_batch_unknown_alias_is_a_request_level_error(self):
+        self.assertEqual(
+            self.batch_error(["nested/sample.pdb"], alias="missing"),
+            (404, "unknown_stage_root"),
+        )
 
     def test_analyze_endpoint_still_rejects_path_fields(self):
         payload = {
@@ -231,23 +325,28 @@ class DisabledAndBackendStagingTests(unittest.TestCase):
         self.assertFalse(app.staging.enabled)
         self.assertNotIn("POST /v1/stage/file", app.capabilities()["endpoints"])
         self.assertNotIn("POST /v1/stage/stat", app.capabilities()["endpoints"])
+        self.assertNotIn(
+            "POST /v1/stage/stat-batch", app.capabilities()["endpoints"]
+        )
         handler = make_handler(app)
         handler.log_message = lambda *args: None
         server = HTTPServer(("127.0.0.1", 0), handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            for endpoint in ("file", "stat"):
+            for endpoint in ("file", "stat", "stat-batch"):
+                request_payload = {
+                    "schema_version": 1,
+                    "root_alias": "root",
+                }
+                if endpoint == "stat-batch":
+                    request_payload["relative_paths"] = ["sample.pdb"]
+                else:
+                    request_payload["relative_path"] = "sample.pdb"
                 request = Request(
                     "http://127.0.0.1:%d/v1/stage/%s"
                     % (server.server_port, endpoint),
-                    data=json.dumps(
-                        {
-                            "schema_version": 1,
-                            "root_alias": "root",
-                            "relative_path": "sample.pdb",
-                        }
-                    ).encode(),
+                    data=json.dumps(request_payload).encode(),
                     headers={
                         "Authorization": "Bearer secret",
                         "Content-Type": "application/json",
@@ -294,6 +393,19 @@ class DisabledAndBackendStagingTests(unittest.TestCase):
                 with self.assertRaises(StagingError) as captured:
                     list(backend.iter_bytes(opened))
             self.assertEqual(captured.exception.code, "stage_timeout")
+
+    def test_batch_stat_enforces_one_total_deadline(self):
+        with tempfile.TemporaryDirectory() as root:
+            filename = os.path.join(root, "sample.pdb")
+            with open(filename, "wb") as handle:
+                handle.write(b"END\n")
+            ticks = iter((0.0, 0.0, 0.0, 0.0, 2.0))
+            backend = FileStagingBackend(
+                {"root": root}, max_stream_seconds=1.0, clock=lambda: next(ticks)
+            )
+            with self.assertRaises(StagingError) as captured:
+                backend.stat_many("root", ["sample.pdb"])
+            self.assertEqual(captured.exception.code, "stage_batch_timeout")
 
 
 if __name__ == "__main__":

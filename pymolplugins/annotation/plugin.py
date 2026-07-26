@@ -79,7 +79,11 @@ try:
         DEFAULT_ENCODING,
         CsvDatasetSource,
     )
-    from pymolplugins.remote.staging import download_staged_file, stat_staged_file
+    from pymolplugins.remote.staging import (
+        download_staged_file,
+        stat_staged_file,
+        stat_staged_files,
+    )
     from pymolplugins.remote.client import WorkerRequestError
     from pymolplugins.navigation.model import (
         NavigationEntry,
@@ -152,6 +156,7 @@ except ImportError:
     from pymolplugins.remote.staging import (  # type: ignore
         download_staged_file,
         stat_staged_file,
+        stat_staged_files,
     )
     from pymolplugins.remote.client import WorkerRequestError  # type: ignore
     from pymolplugins.navigation.model import (  # type: ignore
@@ -435,6 +440,7 @@ class AnnotatorState:
     stage_alias: str = ""
     pattern: str = STRUCTURE_PATTERN
     dataset: Optional[AnnotationDataset] = None
+    dataset_generation: int = 0
     all_entries: List[AnnotationEntry] = field(default_factory=list)
     entries: List[AnnotationEntry] = field(default_factory=list)
     files: List[str] = field(default_factory=list)
@@ -462,6 +468,7 @@ class AnnotatorState:
     materialized_paths: Dict[str, MaterializedStructure] = field(default_factory=dict)
     materialization_errors: Dict[str, str] = field(default_factory=dict)
     navigation_session: Optional[NavigationSession] = None
+    navigation_generation: int = -1
 
     def values(self) -> List[str]:
         return _split_values(self.values_text) or ["Good", "Bad"]
@@ -639,10 +646,12 @@ def _install_entries(
     active = _view_entries(entries)
     if not active:
         raise RuntimeError("Structure Annotator: no navigable structure rows")
+    STATE.dataset_generation = int(STATE.dataset_generation) + 1
     STATE.entries = list(active)
     STATE.files = [_entry_source_path(entry) for entry in active]
     resume = _resume_entry_index(active, resume_entry_id, index)
     STATE.navigation_session = _new_navigation_session(STATE.entries, resume)
+    STATE.navigation_generation = STATE.dataset_generation
     STATE.index = STATE.navigation_session.cursor
 
 
@@ -652,10 +661,10 @@ def _runtime_snapshot() -> Dict[str, object]:
         "display_columns", "csv_encoding", "csv_delimiter", "source_base",
         "mapping_profile", "filter_text", "sort_column", "sort_descending",
         "stage_root", "stage_alias", "pattern", "dataset", "all_entries",
-        "entries", "files", "index", "undo_history", "annotated_indices",
+        "dataset_generation", "entries", "files", "index", "undo_history", "annotated_indices",
         "annotated_entry_ids", "row_annotation_store", "materialized_paths",
         "materialization_errors", "navigation_session", "managed_objects",
-        "current_object",
+        "navigation_generation", "current_object",
     )
     snapshot: Dict[str, object] = {}
     for name in names:
@@ -1110,16 +1119,17 @@ def _new_navigation_session(
 
 def _ensure_navigation_session() -> NavigationSession:
     session = STATE.navigation_session
-    expected_ids = (
-        [entry.id for entry in STATE.entries]
-        if STATE.entries
-        else [f"file:{os.path.abspath(path)}" for path in STATE.files]
+    stale = (
+        session is None
+        or STATE.navigation_generation != STATE.dataset_generation
+        or len(session.entries) != len(STATE.files)
     )
-    if session is None or [entry.id for entry in session.entries] != expected_ids:
+    if stale:
         if not STATE.files:
             raise RuntimeError("Structure Annotator: no dataset loaded")
         session = _new_navigation_session(STATE.entries or STATE.files, STATE.index)
         STATE.navigation_session = session
+        STATE.navigation_generation = STATE.dataset_generation
     STATE.index = session.cursor
     return session
 
@@ -2078,10 +2088,20 @@ def _remove_entry_annotation(index: int, label: str) -> Dict[str, object]:
 def _rescan_annotated_indices() -> None:
     """Populate STATE.annotated_indices for progress tracking under the current label."""
     STATE.annotated_indices = set()
+    STATE.annotated_entry_ids = set()
     if not STATE.files:
         return
     label_key = normalize_label_key(STATE.label_name)
-    STATE.annotated_entry_ids = set()
+    if STATE.source_mode == "csv" and STATE.row_annotation_store is not None:
+        try:
+            values = STATE.row_annotation_store.snapshot_for_label(label_key)
+        except Exception:
+            return
+        for idx, entry in enumerate(STATE.entries):
+            if entry.id in values:
+                STATE.annotated_indices.add(idx)
+                STATE.annotated_entry_ids.add(entry.id)
+        return
     for idx, _path in enumerate(STATE.files):
         try:
             if _annotations_for_index(idx).get(label_key) is not None:
@@ -2133,13 +2153,24 @@ class _StagedPathResolution(PathResolution):
     )
 
 
-def _stage_resolution(
-    entry: AnnotationEntry,
-    stage_root: str,
-    stage_alias: str,
-    *,
-    require_exists: bool,
-) -> Optional[PathResolution]:
+@dataclass(frozen=True)
+class _StageCoordinates:
+    root: str
+    source: str
+    alias: str
+    relative: str
+
+
+@dataclass(frozen=True)
+class _StageOutcome:
+    observed: Optional[object]
+    error: Optional[BaseException]
+    method: str
+
+
+def _stage_coordinates(
+    entry: AnnotationEntry, stage_root: str, stage_alias: str
+) -> Optional[_StageCoordinates]:
     root = str(stage_root or "").strip()
     alias = str(stage_alias or "").strip()
     source = str(entry.source_path or "").strip()
@@ -2152,46 +2183,135 @@ def _stage_resolution(
         and normalized_source.startswith(normalized_root.rstrip("/") + "/")
     ):
         return None
-    provider = f"wsl-stage:{alias}"
+    return _StageCoordinates(
+        root=normalized_root,
+        source=normalized_source,
+        alias=alias,
+        relative=posixpath.relpath(normalized_source, normalized_root),
+    )
+
+
+def _stage_error_status(code: str) -> str:
+    if code == "stage_file_not_found":
+        return AVAILABILITY_MISSING
+    if code in {"stage_file_unreadable", "stage_path_forbidden"}:
+        return AVAILABILITY_UNREADABLE
+    if code in {"invalid_stage_path", "stage_not_regular_file"}:
+        return AVAILABILITY_INVALID
+    return AVAILABILITY_ERROR
+
+
+def _stage_resolution_from_outcome(
+    entry: AnnotationEntry,
+    coordinates: _StageCoordinates,
+    *,
+    require_exists: bool,
+    observed: Optional[object] = None,
+    error: Optional[BaseException] = None,
+    method: str = "wsl-stage-stat",
+) -> PathResolution:
+    provider = f"wsl-stage:{coordinates.alias}"
     if not require_exists:
         return _StagedPathResolution(
             raw_path=entry.source_path,
-            resolved_path=normalized_source,
+            resolved_path=coordinates.source,
             status=AVAILABILITY_UNCHECKED,
             provider=provider,
             method="wsl-stage-unchecked",
-            matched_rule=normalized_root,
+            matched_rule=coordinates.root,
         )
-    relative = posixpath.relpath(normalized_source, normalized_root)
-    observed = None
-    try:
-        observed = stat_staged_file(alias, relative)
+    if error is None:
         status = AVAILABILITY_AVAILABLE
         diagnostics: Tuple[str, ...] = ()
-    except WorkerRequestError as exc:
-        code = str(getattr(exc, "code", ""))
-        if code == "stage_file_not_found":
-            status = AVAILABILITY_MISSING
-        elif code in {"stage_file_unreadable", "stage_path_forbidden"}:
-            status = AVAILABILITY_UNREADABLE
-        elif code in {"invalid_stage_path", "stage_not_regular_file"}:
-            status = AVAILABILITY_INVALID
-        else:
-            status = AVAILABILITY_ERROR
-        diagnostics = (f"WSL staging {code or 'error'}: {exc}",)
-    except Exception as exc:
+    elif isinstance(error, WorkerRequestError):
+        code = str(getattr(error, "code", ""))
+        status = _stage_error_status(code)
+        diagnostics = (f"WSL staging {code or 'error'}: {error}",)
+    else:
         status = AVAILABILITY_ERROR
-        diagnostics = (f"WSL staging error: {exc}",)
+        diagnostics = (f"WSL staging error: {error}",)
     return _StagedPathResolution(
         raw_path=entry.source_path,
-        resolved_path=normalized_source,
+        resolved_path=coordinates.source,
         status=status,
         provider=provider,
-        method="wsl-stage-stat",
-        matched_rule=normalized_root,
+        method=method,
+        matched_rule=coordinates.root,
         diagnostics=diagnostics,
         staged_source_identity=observed,
     )
+
+
+def _stage_resolution(
+    entry: AnnotationEntry,
+    stage_root: str,
+    stage_alias: str,
+    *,
+    require_exists: bool,
+) -> Optional[PathResolution]:
+    coordinates = _stage_coordinates(entry, stage_root, stage_alias)
+    if coordinates is None:
+        return None
+    if not require_exists:
+        return _stage_resolution_from_outcome(
+            entry, coordinates, require_exists=False
+        )
+    observed = None
+    error = None
+    try:
+        observed = stat_staged_file(coordinates.alias, coordinates.relative)
+    except Exception as exc:
+        error = exc
+    return _stage_resolution_from_outcome(
+        entry,
+        coordinates,
+        require_exists=True,
+        observed=observed,
+        error=error,
+    )
+
+
+def _collect_stage_outcomes(
+    entries: Sequence[AnnotationEntry],
+    stage_root: str,
+    stage_alias: str,
+    *,
+    require_exists: bool,
+) -> Dict[str, _StageOutcome]:
+    if not require_exists:
+        return {}
+    coordinates_by_relative: Dict[str, _StageCoordinates] = {}
+    for entry in entries:
+        coordinates = _stage_coordinates(entry, stage_root, stage_alias)
+        if coordinates is not None:
+            coordinates_by_relative.setdefault(coordinates.relative, coordinates)
+    if not coordinates_by_relative:
+        return {}
+    relatives = list(coordinates_by_relative)
+    if len(relatives) == 1:
+        relative = relatives[0]
+        try:
+            observed = stat_staged_file(str(stage_alias).strip(), relative)
+            error = None
+        except Exception as exc:
+            observed = None
+            error = exc
+        return {
+            relative: _StageOutcome(observed, error, "wsl-stage-stat")
+        }
+    try:
+        results = stat_staged_files(str(stage_alias).strip(), relatives)
+    except Exception as exc:
+        return {
+            relative: _StageOutcome(None, exc, "wsl-stage-stat-batch")
+            for relative in relatives
+        }
+    return {
+        result.relative_path: _StageOutcome(
+            result.source, result.error, "wsl-stage-stat-batch"
+        )
+        for result in results
+    }
 
 
 def _resolve_csv_dataset(
@@ -2211,16 +2331,38 @@ def _resolve_csv_dataset(
     )
     resolved_entries = []
     stage_cache: Dict[str, PathResolution] = {}
+    stage_outcomes = _collect_stage_outcomes(
+        dataset.entries,
+        stage_root,
+        stage_alias,
+        require_exists=require_exists,
+    )
     for entry in dataset.entries:
         stage_key = str(entry.source_path)
         resolution = stage_cache.get(stage_key)
         if resolution is None:
-            resolution = _stage_resolution(
-                entry,
-                stage_root,
-                stage_alias,
-                require_exists=require_exists,
+            coordinates = _stage_coordinates(entry, stage_root, stage_alias)
+            outcome = (
+                stage_outcomes.get(coordinates.relative)
+                if coordinates is not None
+                else None
             )
+            if outcome is not None and coordinates is not None:
+                resolution = _stage_resolution_from_outcome(
+                    entry,
+                    coordinates,
+                    require_exists=require_exists,
+                    observed=outcome.observed,
+                    error=outcome.error,
+                    method=outcome.method,
+                )
+            else:
+                resolution = _stage_resolution(
+                    entry,
+                    stage_root,
+                    stage_alias,
+                    require_exists=require_exists,
+                )
             if resolution is not None:
                 stage_cache[stage_key] = resolution
         if resolution is None and os.name != "nt" and not entry.source_path.startswith("~"):
@@ -3378,6 +3520,210 @@ class _HistoryCompletionBinding:
             pass
 
 
+def _qt_enum(group: str, name: str):
+    """Return one Qt5 flat or Qt6 scoped enum value."""
+
+    value = getattr(QtCore.Qt, name, None)
+    if value is not None:
+        return value
+    return getattr(getattr(QtCore.Qt, group), name)
+
+
+def _qt_class_enum(owner, group: str, name: str):
+    """Return one Qt5 flat or Qt6 class-scoped enum value."""
+
+    value = getattr(owner, name, None)
+    if value is not None:
+        return value
+    return getattr(getattr(owner, group), name)
+
+
+class _DatasetTableModel(QtCore.QAbstractTableModel):
+    """Lazy Scores table; cells are rendered from row data on demand."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._mode = "active"
+        self._rows: List[object] = []
+        self._headers = ["Row", "Status", "Structure"]
+        self._display_columns: List[str] = []
+        self._source_mode = "directory"
+        self._annotation_values: Dict[str, str] = {}
+        self._entry_id_to_row: Dict[str, int] = {}
+
+    def rowCount(self, parent=None) -> int:
+        if parent is not None and parent.isValid():
+            return 0
+        return len(self._rows)
+
+    def columnCount(self, parent=None) -> int:
+        if parent is not None and parent.isValid():
+            return 0
+        return len(self._headers)
+
+    def _entry_id(self, row: int) -> str:
+        if not 0 <= row < len(self._rows):
+            return ""
+        value = self._rows[row]
+        if self._mode == "preview":
+            return str(dict(value).get("entry_id", ""))
+        return str(value.id)
+
+    def entry_id_at(self, row: int) -> str:
+        return self._entry_id(int(row))
+
+    def row_for_entry(self, entry_id: str) -> int:
+        return self._entry_id_to_row.get(str(entry_id), -1)
+
+    def _active_value(self, entry: AnnotationEntry, column: int) -> object:
+        if column == 0:
+            return entry.row_number if entry.row_number is not None else entry.ordinal + 1
+        if column == 1:
+            return entry.status
+        if column == 2:
+            return entry.display_name
+        offset = 3
+        if self._source_mode == "csv":
+            if column == 3:
+                return self._annotation_values.get(entry.id, "")
+            offset = 4
+        metadata_index = column - offset
+        if 0 <= metadata_index < len(self._display_columns):
+            return entry.metadata.get(self._display_columns[metadata_index], "")
+        return ""
+
+    def _preview_value(self, raw: Mapping[str, object], column: int) -> object:
+        if column == 0:
+            return raw.get("row_number", "")
+        if column == 1:
+            return raw.get("status", "")
+        if column == 2:
+            return raw.get("display_name", "")
+        metadata_index = column - 3
+        if 0 <= metadata_index < len(self._display_columns):
+            return dict(raw.get("metadata") or {}).get(
+                self._display_columns[metadata_index], ""
+            )
+        return ""
+
+    def data(self, index, role=None):
+        if index is None or not index.isValid():
+            return None
+        display_role = _qt_enum("ItemDataRole", "DisplayRole")
+        user_role = _qt_enum("ItemDataRole", "UserRole")
+        if role == user_role:
+            return self._entry_id(index.row())
+        if role != display_role:
+            return None
+        raw = self._rows[index.row()]
+        value = (
+            self._preview_value(dict(raw), index.column())
+            if self._mode == "preview"
+            else self._active_value(raw, index.column())
+        )
+        return str(value if value is not None else "")
+
+    def headerData(self, section: int, orientation, role=None):
+        if (
+            role == _qt_enum("ItemDataRole", "DisplayRole")
+            and orientation == _qt_enum("Orientation", "Horizontal")
+            and 0 <= section < len(self._headers)
+        ):
+            return self._headers[section]
+        return None
+
+    def _reset(
+        self,
+        *,
+        mode: str,
+        rows: Sequence[object],
+        headers: Sequence[str],
+        display_columns: Sequence[str],
+        source_mode: str,
+        annotation_values: Optional[Mapping[str, str]] = None,
+    ) -> None:
+        self.beginResetModel()
+        self._mode = str(mode)
+        self._rows = list(rows)
+        self._headers = [str(value) for value in headers]
+        self._display_columns = [str(value) for value in display_columns]
+        self._source_mode = str(source_mode)
+        self._annotation_values = {
+            str(key): str(value)
+            for key, value in dict(annotation_values or {}).items()
+        }
+        self._entry_id_to_row = {
+            self._entry_id(row): row for row in range(len(self._rows))
+        }
+        self.endResetModel()
+
+    def set_preview(
+        self, rows: Sequence[Mapping[str, object]], display_columns: Sequence[str]
+    ) -> None:
+        self._reset(
+            mode="preview",
+            rows=rows,
+            headers=["Row", "Status", "Structure"] + list(display_columns),
+            display_columns=display_columns,
+            source_mode="preview",
+        )
+
+    def set_active(
+        self,
+        entries: Sequence[AnnotationEntry],
+        display_columns: Sequence[str],
+        source_mode: str,
+        label_key: str,
+        annotation_values: Mapping[str, str],
+    ) -> None:
+        headers = ["Row", "Status", "Structure"]
+        if source_mode == "csv":
+            headers.append(f"Annotation ({label_key})")
+        headers.extend(display_columns)
+        self._reset(
+            mode="active",
+            rows=entries,
+            headers=headers,
+            display_columns=display_columns,
+            source_mode=source_mode,
+            annotation_values=annotation_values,
+        )
+
+    def clear_rows(self) -> None:
+        self._reset(
+            mode="active",
+            rows=(),
+            headers=("Row", "Status", "Structure"),
+            display_columns=(),
+            source_mode="directory",
+        )
+
+    def update_annotations(self, values: Mapping[str, str]) -> Tuple[str, ...]:
+        """Replace annotations and emit only cells whose display changed."""
+
+        next_values = {str(key): str(value) for key, value in dict(values).items()}
+        changed = tuple(
+            entry_id
+            for entry_id in sorted(set(self._annotation_values).union(next_values))
+            if self._annotation_values.get(entry_id, "")
+            != next_values.get(entry_id, "")
+        )
+        self._annotation_values = next_values
+        if self._mode != "active" or self._source_mode != "csv":
+            return changed
+        display_role = _qt_enum("ItemDataRole", "DisplayRole")
+        for entry_id in changed:
+            row = self._entry_id_to_row.get(entry_id)
+            if row is None:
+                continue
+            model_index = self.index(row, 3)
+            try:
+                self.dataChanged.emit(model_index, model_index, [display_role])
+            except TypeError:
+                self.dataChanged.emit(model_index, model_index)
+        return changed
+
+
 class StructureAnnotatorPanel(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3389,9 +3735,12 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         self._history_bindings: List[_HistoryCompletionBinding] = []
         self._bucket_history_bindings: List[_HistoryCompletionBinding] = []
         self._dataset_table_signature = None
+        self._table_annotation_revision = None
         self._table_mode = "active"
         self._table_source_token = ""
         self._preview_rows_by_id: Dict[str, Dict[str, object]] = {}
+        self._entry_id_to_active_index: Dict[str, int] = {}
+        self._entries_by_id: Dict[str, AnnotationEntry] = {}
         self._state_save_timer = QtCore.QTimer(self)
         self._state_save_timer.setSingleShot(True)
         self._state_save_timer.timeout.connect(self._save_ui_state)
@@ -3631,13 +3980,35 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         scores_layout.addLayout(view_row)
 
         tables_row = QtWidgets.QHBoxLayout()
-        self.dataset_table = QtWidgets.QTableWidget(0, 3)
-        self.dataset_table.setHorizontalHeaderLabels(["Row", "Status", "Structure"])
-        self.dataset_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.dataset_table.cellClicked.connect(self._dataset_row_clicked)
+        self.dataset_table = QtWidgets.QTableView()
+        self._dataset_model = _DatasetTableModel(self.dataset_table)
+        self.dataset_table.setModel(self._dataset_model)
+        self.dataset_table.setEditTriggers(
+            _qt_class_enum(
+                QtWidgets.QAbstractItemView, "EditTrigger", "NoEditTriggers"
+            )
+        )
+        try:
+            select_rows = _qt_class_enum(
+                QtWidgets.QAbstractItemView, "SelectionBehavior", "SelectRows"
+            )
+            single_selection = _qt_class_enum(
+                QtWidgets.QAbstractItemView,
+                "SelectionMode",
+                "SingleSelection",
+            )
+            self.dataset_table.setSelectionBehavior(select_rows)
+            self.dataset_table.setSelectionMode(single_selection)
+        except Exception:
+            pass
+        self.dataset_table.clicked.connect(self._dataset_index_clicked)
         self.metadata_table = QtWidgets.QTableWidget(0, 2)
         self.metadata_table.setHorizontalHeaderLabels(["Field", "Value"])
-        self.metadata_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.metadata_table.setEditTriggers(
+            _qt_class_enum(
+                QtWidgets.QAbstractItemView, "EditTrigger", "NoEditTriggers"
+            )
+        )
         self.metadata_table.horizontalHeader().setStretchLastSection(True)
         tables_row.addWidget(self.dataset_table, 3)
         tables_row.addWidget(self.metadata_table, 2)
@@ -3816,33 +4187,35 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
             return role
         return QtCore.Qt.ItemDataRole.UserRole
 
+    @staticmethod
+    def _current_table_identity() -> Tuple[str, Tuple[object, ...]]:
+        source_reference = _active_source_reference()
+        source_token = (
+            _path_identity(source_reference) if source_reference else ""
+        )
+        label_key = normalize_label_key(STATE.label_name)
+        signature: Tuple[object, ...] = (
+            source_token,
+            int(STATE.dataset_generation),
+            STATE.source_mode,
+            tuple(STATE.display_columns),
+            label_key if STATE.source_mode == "csv" else "",
+        )
+        return source_token, signature
+
     def _populate_preview_table(self, payload: Mapping[str, object]) -> None:
         rows = list(payload.get("rows") or [])
         self._table_mode = "preview"
         self._table_source_token = _path_identity(str(payload.get("csv_path") or "."))
         self._dataset_table_signature = None
+        self._table_annotation_revision = None
+        self._entry_id_to_active_index = {}
+        self._entries_by_id = {}
         self._preview_rows_by_id = {
             str(dict(row).get("entry_id", "")): dict(row) for row in rows
         }
         display_columns = list(payload.get("display_columns") or [])
-        headers = ["Row", "Status", "Structure"] + display_columns
-        self.dataset_table.clear()
-        self.dataset_table.setColumnCount(len(headers))
-        self.dataset_table.setHorizontalHeaderLabels(headers)
-        self.dataset_table.setRowCount(len(rows))
-        for row_index, raw in enumerate(rows):
-            row = dict(raw)
-            values = [
-                row.get("row_number", ""),
-                row.get("status", ""),
-                row.get("display_name", ""),
-            ]
-            metadata = dict(row.get("metadata") or {})
-            values.extend(metadata.get(column, "") for column in display_columns)
-            for column_index, value in enumerate(values):
-                item = QtWidgets.QTableWidgetItem(str(value if value is not None else ""))
-                item.setData(self._user_role(), str(row.get("entry_id", "")))
-                self.dataset_table.setItem(row_index, column_index, item)
+        self._dataset_model.set_preview(rows, display_columns)
 
     def _apply_view(self) -> None:
         sa_filter(
@@ -3852,11 +4225,14 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         )
         self._refresh_status()
 
+    def _dataset_index_clicked(self, index) -> None:
+        if index is not None and index.isValid():
+            self._dataset_row_clicked(index.row(), index.column())
+
     def _dataset_row_clicked(self, row: int, column: int) -> None:
-        item = self.dataset_table.item(row, 0)
-        if item is None:
+        entry_id = self._dataset_model.entry_id_at(row)
+        if not entry_id:
             return
-        entry_id = str(item.data(self._user_role()) or "")
         if self._table_mode == "preview":
             preview = self._preview_rows_by_id.get(entry_id, {})
             metadata = dict(preview.get("metadata") or {})
@@ -3887,33 +4263,44 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
                 "CSV preview row; load this CSV before navigating it."
             )
             return
-        active_token = (
-            _path_identity(_active_source_reference())
-            if _active_source_reference()
-            else ""
-        )
-        if self._table_source_token != active_token:
-            self.status_label.setText(
-                "Dataset table is stale; refresh or load the selected source again."
-            )
-            return
-        for index, entry in enumerate(STATE.entries):
-            if entry.id == entry_id:
-                self._sync_to_state()
-                sa_goto(index + 1)
-                self._refresh_status()
-                return
-        for entry in STATE.all_entries:
-            if entry.id == entry_id:
-                if entry.is_navigable and not entry.error:
-                    message = "excluded by the current filter; clear or change the filter"
-                else:
-                    message = entry.error or entry.status
+        active_token, active_signature = self._current_table_identity()
+        if (
+            self._table_source_token != active_token
+            or self._dataset_table_signature != active_signature
+        ):
+            if not STATE.files:
                 self.status_label.setText(
-                    f"Row {entry.row_number or entry.ordinal + 1} is not active: "
-                    f"{message}"
+                    "The dataset is no longer active; load or refresh a source."
                 )
                 return
+            try:
+                self._refresh_dataset_table()
+            except Exception as exc:
+                self.status_label.setText(
+                    f"Dataset table refresh failed: {exc}"
+                )
+                return
+            self.status_label.setText(
+                "Dataset changed after this row was drawn; the table was refreshed. "
+                "Click the intended row again."
+            )
+            return
+        index = self._entry_id_to_active_index.get(entry_id)
+        if index is not None:
+            self._sync_to_state()
+            sa_goto(index + 1)
+            self._refresh_status()
+            return
+        entry = self._entries_by_id.get(entry_id)
+        if entry is not None:
+            if entry.is_navigable and not entry.error:
+                message = "excluded by the current filter; clear or change the filter"
+            else:
+                message = entry.error or entry.status
+            self.status_label.setText(
+                f"Row {entry.row_number or entry.ordinal + 1} is not active: "
+                f"{message}"
+            )
 
     def _schedule_state_save(self, *args) -> None:
         self._state_save_timer.start(300)
@@ -4161,85 +4548,58 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         self._refresh_status()
 
     def _refresh_dataset_table(self) -> None:
-        entries = list(STATE.all_entries or STATE.entries)
+        entries = STATE.all_entries or STATE.entries
         display_columns = list(STATE.display_columns)
         label_key = normalize_label_key(STATE.label_name)
-        annotation_values: Dict[str, str] = {}
-        if STATE.source_mode == "csv" and STATE.row_annotation_store is not None:
-            annotation_values = {
-                entry_id: str(values.get(label_key, ""))
-                for entry_id, values in STATE.row_annotation_store.export_mapping().items()
-            }
-        source_token = (
-            _path_identity(_active_source_reference())
-            if _active_source_reference()
-            else ""
+        source_token, signature = self._current_table_identity()
+        store = (
+            STATE.row_annotation_store
+            if STATE.source_mode == "csv"
+            else None
         )
-        signature = (
-            source_token,
-            tuple(entry.id for entry in entries),
-            tuple(display_columns),
-            label_key,
-        )
-        if (
+        annotation_revision = store.revision() if store is not None else None
+        reset_model = not (
             self._table_mode == "active"
             and source_token == self._table_source_token
             and signature == self._dataset_table_signature
-        ):
-            current_id = STATE.current_entry_id()
-            for row in range(self.dataset_table.rowCount()):
-                item = self.dataset_table.item(row, 0)
-                row_entry_id = str(item.data(self._user_role()) or "") if item else ""
-                if STATE.source_mode == "csv":
-                    annotation_item = self.dataset_table.item(row, 3)
-                    if annotation_item is not None:
-                        annotation_item.setText(
-                            annotation_values.get(row_entry_id, "")
-                        )
-                if item is not None and row_entry_id == current_id:
-                    self.dataset_table.selectRow(row)
-                    break
-            return
-        self._table_mode = "active"
-        self._table_source_token = source_token
-        self._preview_rows_by_id = {}
-        self._dataset_table_signature = signature
-        headers = ["Row", "Status", "Structure"]
-        if STATE.source_mode == "csv":
-            headers.append(f"Annotation ({label_key})")
-        headers.extend(display_columns)
-        self.dataset_table.clear()
-        self.dataset_table.setColumnCount(len(headers))
-        self.dataset_table.setHorizontalHeaderLabels(headers)
-        self.dataset_table.setRowCount(len(entries))
-        current_id = STATE.current_entry_id()
-        current_row = -1
-        for row, entry in enumerate(entries):
-            values = [
-                entry.row_number if entry.row_number is not None else entry.ordinal + 1,
-                entry.status,
-                entry.display_name,
-            ]
-            if STATE.source_mode == "csv":
-                values.append(annotation_values.get(entry.id, ""))
-            values.extend(entry.metadata.get(column, "") for column in display_columns)
-            for column, value in enumerate(values):
-                item = QtWidgets.QTableWidgetItem(
-                    str(value if value is not None else "")
-                )
-                item.setData(self._user_role(), entry.id)
-                self.dataset_table.setItem(row, column, item)
-            if entry.id == current_id:
-                current_row = row
+        )
+        annotations_changed = annotation_revision != self._table_annotation_revision
+        annotation_values: Dict[str, str] = {}
+        if store is not None and (reset_model or annotations_changed):
+            annotation_values = store.snapshot_for_label(label_key)
+
+        if reset_model:
+            self._table_mode = "active"
+            self._table_source_token = source_token
+            self._preview_rows_by_id = {}
+            self._dataset_table_signature = signature
+            self._entry_id_to_active_index = {
+                entry.id: index for index, entry in enumerate(STATE.entries)
+            }
+            self._entries_by_id = {entry.id: entry for entry in entries}
+            self._dataset_model.set_active(
+                entries,
+                display_columns,
+                STATE.source_mode,
+                label_key,
+                annotation_values,
+            )
+            selected_sort = self.sort_column_combo.currentText()
+            self.sort_column_combo.blockSignals(True)
+            self.sort_column_combo.clear()
+            self.sort_column_combo.addItem("")
+            self.sort_column_combo.addItems(display_columns)
+            self.sort_column_combo.setCurrentText(
+                selected_sort or STATE.sort_column
+            )
+            self.sort_column_combo.blockSignals(False)
+        elif annotations_changed:
+            self._dataset_model.update_annotations(annotation_values)
+
+        self._table_annotation_revision = annotation_revision
+        current_row = self._dataset_model.row_for_entry(STATE.current_entry_id())
         if current_row >= 0:
             self.dataset_table.selectRow(current_row)
-        selected_sort = self.sort_column_combo.currentText()
-        self.sort_column_combo.blockSignals(True)
-        self.sort_column_combo.clear()
-        self.sort_column_combo.addItem("")
-        self.sort_column_combo.addItems(display_columns)
-        self.sort_column_combo.setCurrentText(selected_sort or STATE.sort_column)
-        self.sort_column_combo.blockSignals(False)
 
     def _refresh_metadata_table(self) -> None:
         entry = STATE.current_entry()
@@ -4274,12 +4634,15 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
             self.status_label.setText("No dataset loaded.")
             self.goto_spin.setRange(1, 1)
             self.undo_btn.setEnabled(False)
-            self.dataset_table.setRowCount(0)
+            self._dataset_model.clear_rows()
             self.metadata_table.setRowCount(0)
             self._dataset_table_signature = None
+            self._table_annotation_revision = None
             self._table_mode = "active"
             self._table_source_token = ""
             self._preview_rows_by_id = {}
+            self._entry_id_to_active_index = {}
+            self._entries_by_id = {}
             return
 
         _ensure_navigation_session()

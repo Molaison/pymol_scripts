@@ -108,7 +108,10 @@ def _qt_modules():
         "QWidget",
     ):
         setattr(qt_widgets, name, DummyWidget)
-    return types.SimpleNamespace(QTimer=DummyWidget), qt_widgets
+    return types.SimpleNamespace(
+        QTimer=DummyWidget,
+        QAbstractTableModel=DummyWidget,
+    ), qt_widgets
 
 
 class StructureAnnotatorCoreTests(unittest.TestCase):
@@ -217,6 +220,7 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
             "stage_root": state.stage_root,
             "stage_alias": state.stage_alias,
             "dataset": state.dataset,
+            "dataset_generation": state.dataset_generation,
             "all_entry_ids": tuple(entry.id for entry in state.all_entries),
             "entry_ids": tuple(entry.id for entry in state.entries),
             "files": tuple(state.files),
@@ -236,6 +240,7 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
             "materialized": materialized,
             "materialization_errors": tuple(sorted(state.materialization_errors.items())),
             "navigation_identity": id(navigation),
+            "navigation_generation": state.navigation_generation,
             "navigation_cursor": navigation.cursor if navigation is not None else None,
             "navigation_ids": (
                 tuple(entry.id for entry in navigation.entries)
@@ -297,6 +302,22 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
         self.assertIn("ALT-1", self.fake.key_mappings)
         self.module.sa_unbind_keys()
         self.assertEqual(self.fake.key_mappings, {"ALT-left": "previous user binding"})
+
+    def test_qt_class_enum_supports_qt5_flat_and_qt6_scoped_values(self):
+        flat = types.SimpleNamespace(NoEditTriggers=17)
+
+        class Scoped:
+            class EditTrigger:
+                NoEditTriggers = 23
+
+        self.assertEqual(
+            self.module._qt_class_enum(flat, "EditTrigger", "NoEditTriggers"),
+            17,
+        )
+        self.assertEqual(
+            self.module._qt_class_enum(Scoped, "EditTrigger", "NoEditTriggers"),
+            23,
+        )
 
     def test_loading_dataset_creates_versioned_hidden_state(self):
         with tempfile.TemporaryDirectory() as dataset:
@@ -740,6 +761,276 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
             self.assertIs(
                 materialize_call.call_args.kwargs["staged_source_identity"],
                 observed,
+            )
+
+    def test_csv_stage_batch_deduplicates_canonical_paths_and_keeps_row_errors(self):
+        with tempfile.TemporaryDirectory() as root:
+            csv_path = os.path.join(root, "batch staged.csv")
+            with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(
+                    "structure_path,case\n"
+                    "/allowed/a/model.pdb,first\n"
+                    "/allowed/a/../a/model.pdb,canonical-equivalent\n"
+                    "/allowed/a/model.pdb,duplicate\n"
+                    "/allowed/missing.pdb,missing\n"
+                )
+            observed = types.SimpleNamespace(
+                token="v1-" + "d" * 64,
+                device=1,
+                inode=2,
+                size=3,
+                mtime_ns=4,
+                mode=0o100644,
+            )
+            missing = self.module.WorkerRequestError(
+                "missing",
+                code="stage_file_not_found",
+                endpoint="/v1/stage/stat-batch",
+                http_status=404,
+            )
+
+            def batch_result(_alias, relative_paths):
+                self.assertEqual(relative_paths, ["a/model.pdb", "missing.pdb"])
+                return (
+                    types.SimpleNamespace(
+                        relative_path="a/model.pdb", source=observed, error=None
+                    ),
+                    types.SimpleNamespace(
+                        relative_path="missing.pdb", source=None, error=missing
+                    ),
+                )
+
+            source = self.module.CsvDatasetSource(
+                csv_path, "structure_path", id_column="case"
+            )
+            with mock.patch.object(
+                self.module, "stat_staged_files", side_effect=batch_result
+            ) as batch_call, mock.patch.object(
+                self.module,
+                "stat_staged_file",
+                side_effect=AssertionError("batch candidates were restatted"),
+            ):
+                dataset = self.module._resolve_csv_dataset(
+                    source.load(),
+                    "x_k",
+                    stage_root="/allowed",
+                    stage_alias="structures",
+                )
+
+            batch_call.assert_called_once()
+            self.assertEqual(
+                [entry.status for entry in dataset.entries],
+                ["available", "available", "available", "missing"],
+            )
+            self.assertEqual(
+                [entry.metadata["case"] for entry in self.module._view_entries(dataset.entries)],
+                ["first", "canonical-equivalent", "duplicate"],
+            )
+            self.assertIs(
+                dataset.entries[0].path_resolution,
+                dataset.entries[2].path_resolution,
+            )
+            self.assertIn("stage_file_not_found", dataset.entries[3].error)
+
+    def test_csv_stage_single_stat_deduplicates_canonical_equivalent_rows(self):
+        with tempfile.TemporaryDirectory() as root:
+            csv_path = os.path.join(root, "canonical single.csv")
+            with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(
+                    "structure_path,case\n"
+                    "/allowed/a/../model.pdb,noncanonical-spelling\n"
+                    "/allowed/model.pdb,canonical-spelling\n"
+                )
+            observed = types.SimpleNamespace(
+                token="v1-" + "1" * 64,
+                device=1,
+                inode=2,
+                size=3,
+                mtime_ns=4,
+                mode=0o100644,
+            )
+            source = self.module.CsvDatasetSource(
+                csv_path, "structure_path", id_column="case"
+            )
+            with mock.patch.object(
+                self.module, "stat_staged_file", return_value=observed
+            ) as single_call, mock.patch.object(
+                self.module,
+                "stat_staged_files",
+                side_effect=AssertionError("one unique path should use single stat"),
+            ):
+                dataset = self.module._resolve_csv_dataset(
+                    source.load(),
+                    "x_k",
+                    stage_root="/allowed",
+                    stage_alias="structures",
+                )
+
+            single_call.assert_called_once_with("structures", "model.pdb")
+            self.assertEqual(
+                [entry.status for entry in dataset.entries],
+                ["available", "available"],
+            )
+            self.assertEqual(
+                [entry.path_resolution.raw_path for entry in dataset.entries],
+                ["/allowed/a/../model.pdb", "/allowed/model.pdb"],
+            )
+
+    def test_csv_stage_batch_global_failure_only_marks_stage_rows(self):
+        with tempfile.TemporaryDirectory() as root:
+            local_path = os.path.join(root, "local.pdb")
+            self._write_pdb(local_path, "LOCAL")
+            csv_path = os.path.join(root, "mixed sources.csv")
+            with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(
+                    "structure_path,case\n"
+                    "/allowed/a.pdb,stage-a\n"
+                    "/allowed/b.pdb,stage-b\n"
+                    f"{local_path},local\n"
+                )
+            failure = self.module.WorkerRequestError(
+                "worker unavailable",
+                code="unreachable",
+                endpoint="/v1/stage/stat-batch",
+                retriable=True,
+            )
+            source = self.module.CsvDatasetSource(
+                csv_path, "structure_path", id_column="case"
+            )
+            with mock.patch.object(
+                self.module, "stat_staged_files", side_effect=failure
+            ) as batch_call, mock.patch.object(
+                self.module,
+                "stat_staged_file",
+                side_effect=AssertionError("global batch failure was retried per row"),
+            ):
+                dataset = self.module._resolve_csv_dataset(
+                    source.load(),
+                    "x_k",
+                    stage_root="/allowed",
+                    stage_alias="structures",
+                )
+
+            batch_call.assert_called_once()
+            self.assertEqual(
+                [entry.status for entry in dataset.entries],
+                ["error", "error", "available"],
+            )
+            self.assertEqual(
+                [entry.metadata["case"] for entry in self.module._view_entries(dataset.entries)],
+                ["local"],
+            )
+            self.assertTrue(all("unreachable" in entry.error for entry in dataset.entries[:2]))
+            self.assertEqual(dataset.entries[2].error, "")
+
+    def test_csv_annotation_progress_rescan_uses_one_label_snapshot(self):
+        with tempfile.TemporaryDirectory() as root:
+            paths = []
+            for name in ("a.pdb", "b.pdb", "c.pdb"):
+                path = os.path.join(root, name)
+                self._write_pdb(path, name)
+                paths.append(path)
+            csv_path = os.path.join(root, "progress.csv")
+            with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write("structure_path,case\n")
+                for path in paths:
+                    handle.write(f"{path},{os.path.basename(path)}\n")
+            loaded = self.module.sa_load_csv(
+                csv_path, "structure_path", "case"
+            )
+            self.assertEqual(loaded["status"], "loaded")
+            store = self.module.STATE.row_annotation_store
+            store.set(self.module.STATE.entries[0].id, "quality", "Keep")
+            store.set(self.module.STATE.entries[2].id, "quality", "Reject")
+
+            with mock.patch.object(
+                store,
+                "snapshot_for_label",
+                wraps=store.snapshot_for_label,
+            ) as snapshot_call, mock.patch.object(
+                store,
+                "annotations_for",
+                side_effect=AssertionError("rescan replayed the log per row"),
+            ):
+                self.module._rescan_annotated_indices()
+
+            snapshot_call.assert_called_once_with("quality")
+            self.assertEqual(self.module.STATE.annotated_indices, {0, 2})
+            self.assertEqual(
+                self.module.STATE.annotated_entry_ids,
+                {self.module.STATE.entries[0].id, self.module.STATE.entries[2].id},
+            )
+
+    def test_csv_load_reuses_batch_identity_for_selected_preflight(self):
+        with tempfile.TemporaryDirectory() as root:
+            cached_path = os.path.join(root, "cached.pdb")
+            self._write_pdb(cached_path, "STAGED")
+            csv_path = os.path.join(root, "batch preflight.csv")
+            with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(
+                    "structure_path,case\n"
+                    "/allowed/a.pdb,a\n"
+                    "/allowed/b.pdb,b\n"
+                )
+            size = os.path.getsize(cached_path)
+            first = types.SimpleNamespace(
+                token="v1-" + "e" * 64,
+                device=1,
+                inode=2,
+                size=size,
+                mtime_ns=3,
+                mode=0o100644,
+            )
+            second = types.SimpleNamespace(
+                token="v1-" + "f" * 64,
+                device=1,
+                inode=3,
+                size=size,
+                mtime_ns=3,
+                mode=0o100644,
+            )
+            batch_results = (
+                types.SimpleNamespace(relative_path="a.pdb", source=first, error=None),
+                types.SimpleNamespace(relative_path="b.pdb", source=second, error=None),
+            )
+            identity = self.module.SourceIdentity(
+                provider="wsl-stage:structures",
+                canonical_source="structures/a.pdb",
+                size=size,
+                mtime_ns=3,
+                version_token=first.token,
+            )
+            materialized = self.module.MaterializedStructure(
+                source_path="/allowed/a.pdb",
+                path=cached_path,
+                identity=identity,
+                mode="cache",
+                cache_key=identity.cache_key,
+                cache_hit=True,
+            )
+
+            with mock.patch.object(
+                self.module, "stat_staged_files", return_value=batch_results
+            ) as batch_call, mock.patch.object(
+                self.module,
+                "stat_staged_file",
+                side_effect=AssertionError("selected row was restatted"),
+            ) as single_call, mock.patch.object(
+                self.module, "_materialize_entry", return_value=materialized
+            ) as materialize_call:
+                loaded = self.module.sa_load_csv(
+                    csv_path,
+                    "structure_path",
+                    "case",
+                    stage_root="/allowed",
+                    stage_alias="structures",
+                )
+
+            self.assertEqual(loaded["status"], "loaded")
+            batch_call.assert_called_once_with("structures", ["a.pdb", "b.pdb"])
+            single_call.assert_not_called()
+            self.assertIs(
+                materialize_call.call_args.kwargs["staged_source_identity"], first
             )
 
     def test_wsl_materializer_uses_supplied_stat_identity_without_restating(self):

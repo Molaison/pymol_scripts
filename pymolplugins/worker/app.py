@@ -19,6 +19,7 @@ try:
     from pymolplugins.worker.backends.rosetta import RosettaBackend, RosettaBackendError
     from pymolplugins.worker.staging import (
         FileStagingBackend,
+        MAX_STAGE_STAT_BATCH_ITEMS,
         StagingError,
         parse_stage_roots,
         stage_identity_headers,
@@ -32,6 +33,7 @@ except ImportError:
     from pymolplugins.worker.backends.rosetta import RosettaBackend, RosettaBackendError  # type: ignore
     from pymolplugins.worker.staging import (  # type: ignore
         FileStagingBackend,
+        MAX_STAGE_STAT_BATCH_ITEMS,
         StagingError,
         parse_stage_roots,
         stage_identity_headers,
@@ -113,7 +115,11 @@ class WorkerApp:
                 "POST /v1/analyze",
                 "POST /v1/interactions/plip",
             ] + (
-                ["POST /v1/stage/file", "POST /v1/stage/stat"]
+                [
+                    "POST /v1/stage/file",
+                    "POST /v1/stage/stat",
+                    "POST /v1/stage/stat-batch",
+                ]
                 if self.staging.enabled
                 else []
             ),
@@ -211,6 +217,32 @@ def make_handler(app: WorkerApp):
                 raise ValueError("root_alias and relative_path are required")
             return value
 
+        def _read_stage_batch_request(self):
+            value = self._read_json_object()
+            allowed = {"schema_version", "root_alias", "relative_paths"}
+            extras = sorted(set(value).difference(allowed))
+            if extras:
+                raise ValueError(
+                    "unsupported staging batch field: %s" % extras[0]
+                )
+            if "root_alias" not in value or "relative_paths" not in value:
+                raise ValueError("root_alias and relative_paths are required")
+            relative_paths = value.get("relative_paths")
+            if not isinstance(relative_paths, list):
+                raise ValueError("relative_paths must be an array")
+            if not relative_paths:
+                raise ValueError("relative_paths must not be empty")
+            if len(relative_paths) > MAX_STAGE_STAT_BATCH_ITEMS:
+                raise OverflowError(
+                    "relative_paths exceeds %d item limit"
+                    % MAX_STAGE_STAT_BATCH_ITEMS
+                )
+            if any(not isinstance(path, str) for path in relative_paths):
+                raise ValueError("relative_paths entries must be strings")
+            if len(set(relative_paths)) != len(relative_paths):
+                raise ValueError("relative_paths entries must be unique")
+            return value
+
         def _send_stage_file(self, request: Mapping[str, object]):
             with app.staging.open_file(
                 request.get("root_alias"), request.get("relative_path")
@@ -240,6 +272,12 @@ def make_handler(app: WorkerApp):
             ) as opened:
                 self._send(200, stage_identity_payload(opened))
 
+        def _send_stage_stat_batch(self, request: Mapping[str, object]):
+            payload = app.staging.stat_many(
+                request.get("root_alias"), request.get("relative_paths")
+            )
+            self._send(200, payload)
+
         def do_GET(self):
             if not self._check_auth():
                 return
@@ -255,14 +293,24 @@ def make_handler(app: WorkerApp):
             if not self._check_auth():
                 return
             path = urlparse(self.path).path
-            if path in {"/v1/stage/file", "/v1/stage/stat"}:
+            if path in {
+                "/v1/stage/file",
+                "/v1/stage/stat",
+                "/v1/stage/stat-batch",
+            }:
                 if not app.staging.enabled:
                     self._error(404, "staging_disabled", "file staging is not enabled")
                     return
                 try:
-                    request = self._read_stage_request()
+                    request = (
+                        self._read_stage_batch_request()
+                        if path == "/v1/stage/stat-batch"
+                        else self._read_stage_request()
+                    )
                     if path == "/v1/stage/file":
                         self._send_stage_file(request)
+                    elif path == "/v1/stage/stat-batch":
+                        self._send_stage_stat_batch(request)
                     else:
                         self._send_stage_stat(request)
                 except OverflowError as exc:

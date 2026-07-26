@@ -132,9 +132,14 @@ def run_qt_smoke(repository: str) -> Dict[str, Any]:
             "restore-last opt-out was not restored from global history",
         )
         _require(
-            panel.dataset_table.columnCount() >= 3
+            panel.dataset_table.model().columnCount() >= 3
             and panel.metadata_table.columnCount() == 2,
             "CSV metadata widgets were not constructed",
+        )
+        _require(
+            isinstance(panel.dataset_table, QtWidgets.QTableView)
+            and not isinstance(panel.dataset_table, QtWidgets.QTableWidget),
+            "Scores table is not the lazy QTableView implementation",
         )
         preview_navigation_calls = []
         original_goto = annotation.sa_goto
@@ -169,6 +174,214 @@ def run_qt_smoke(repository: str) -> Dict[str, Any]:
             )
         finally:
             annotation.sa_goto = original_goto
+        active_entries = [
+            annotation.AnnotationEntry(
+                id=f"model-entry-{index}",
+                ordinal=index,
+                row_number=index + 2,
+                display_name=f"model-{index}.pdb",
+                source_path=f"C:\\models\\model-{index}.pdb",
+                source_kind="csv",
+                metadata={"score": str(index / 10)},
+                availability="available",
+            )
+            for index in range(2)
+        ]
+        panel._dataset_model.set_active(
+            active_entries,
+            ["score"],
+            "csv",
+            "review",
+            {"model-entry-0": "Keep"},
+        )
+        changed_cells = []
+        panel._dataset_model.dataChanged.connect(
+            lambda top, bottom, *roles: changed_cells.append(
+                (top.row(), top.column(), bottom.row(), bottom.column())
+            )
+        )
+        changed_ids = panel._dataset_model.update_annotations(
+            {"model-entry-0": "Reject"}
+        )
+        _require(
+            changed_ids == ("model-entry-0",)
+            and changed_cells == [(0, 3, 0, 3)],
+            f"annotation update was not cell-targeted: {changed_ids}, {changed_cells}",
+        )
+        state_before_model_refresh = annotation._runtime_snapshot()
+        try:
+            first_generation_entry = active_entries[0]
+            annotation.STATE.source_mode = "csv"
+            annotation.STATE.csv_path = os.path.join(history_root, "same.csv")
+            annotation.STATE.display_columns = ["score"]
+            annotation.STATE.all_entries = list(active_entries)
+            annotation.STATE.entries = list(active_entries)
+            annotation.STATE.files = [
+                entry.source_path for entry in active_entries
+            ]
+            annotation.STATE.dataset_generation += 1
+            annotation.STATE.navigation_session = annotation._new_navigation_session(
+                annotation.STATE.entries
+            )
+            annotation.STATE.navigation_generation = (
+                annotation.STATE.dataset_generation
+            )
+            annotation.STATE.row_annotation_store = None
+            panel._refresh_dataset_table()
+            display_role = _qt_enum(QtCore.Qt, "ItemDataRole", "DisplayRole")
+            before_score = panel._dataset_model.data(
+                panel._dataset_model.index(0, 4), display_role
+            )
+            active_click_navigation_calls = []
+            original_goto = annotation.sa_goto
+            try:
+                annotation.sa_goto = (
+                    lambda position: active_click_navigation_calls.append(position)
+                )
+                panel._dataset_row_clicked(1, 0)
+            finally:
+                annotation.sa_goto = original_goto
+            _require(
+                active_click_navigation_calls == [2],
+                "active table row did not use the entry-to-navigation map",
+            )
+
+            annotation.STATE.all_entries = list(active_entries)
+            annotation.STATE.entries = [active_entries[0]]
+            annotation.STATE.files = [active_entries[0].source_path]
+            annotation.STATE.dataset_generation += 1
+            annotation.STATE.navigation_session = annotation._new_navigation_session(
+                annotation.STATE.entries
+            )
+            annotation.STATE.navigation_generation = (
+                annotation.STATE.dataset_generation
+            )
+            panel._refresh_dataset_table()
+            filtered_click_navigation_calls = []
+            original_goto = annotation.sa_goto
+            try:
+                annotation.sa_goto = (
+                    lambda position: filtered_click_navigation_calls.append(position)
+                )
+                panel._dataset_row_clicked(1, 0)
+            finally:
+                annotation.sa_goto = original_goto
+            _require(
+                not filtered_click_navigation_calls
+                and "excluded by the current filter" in panel.status_label.text(),
+                "filtered table row navigated or lacked its inactive explanation",
+            )
+
+            missing_entry = annotation.AnnotationEntry(
+                id="model-entry-missing",
+                ordinal=1,
+                row_number=3,
+                display_name="missing.pdb",
+                source_path="C:\\models\\missing.pdb",
+                source_kind="csv",
+                metadata={"score": ""},
+                availability="missing",
+            )
+            annotation.STATE.all_entries = [active_entries[0], missing_entry]
+            annotation.STATE.entries = [active_entries[0]]
+            annotation.STATE.files = [active_entries[0].source_path]
+            annotation.STATE.dataset_generation += 1
+            annotation.STATE.navigation_session = annotation._new_navigation_session(
+                annotation.STATE.entries
+            )
+            annotation.STATE.navigation_generation = (
+                annotation.STATE.dataset_generation
+            )
+            panel._refresh_dataset_table()
+            missing_click_navigation_calls = []
+            original_goto = annotation.sa_goto
+            try:
+                annotation.sa_goto = (
+                    lambda position: missing_click_navigation_calls.append(position)
+                )
+                panel._dataset_row_clicked(1, 0)
+            finally:
+                annotation.sa_goto = original_goto
+            _require(
+                not missing_click_navigation_calls
+                and "not active: missing" in panel.status_label.text(),
+                "missing table row navigated or lacked its failure explanation",
+            )
+
+            annotation.STATE.all_entries = list(active_entries)
+            annotation.STATE.entries = list(active_entries)
+            annotation.STATE.files = [
+                entry.source_path for entry in active_entries
+            ]
+            annotation.STATE.dataset_generation += 1
+            annotation.STATE.navigation_session = annotation._new_navigation_session(
+                annotation.STATE.entries
+            )
+            annotation.STATE.navigation_generation = (
+                annotation.STATE.dataset_generation
+            )
+            panel._refresh_dataset_table()
+            stale_click_navigation_calls = []
+            annotation.STATE.all_entries = list(reversed(active_entries))
+            annotation.STATE.entries = list(reversed(active_entries))
+            annotation.STATE.files = [
+                entry.source_path for entry in annotation.STATE.entries
+            ]
+            annotation.STATE.dataset_generation += 1
+            annotation.STATE.navigation_session = annotation._new_navigation_session(
+                annotation.STATE.entries
+            )
+            annotation.STATE.navigation_generation = (
+                annotation.STATE.dataset_generation
+            )
+            original_goto = annotation.sa_goto
+            try:
+                annotation.sa_goto = (
+                    lambda position: stale_click_navigation_calls.append(position)
+                )
+                panel._dataset_row_clicked(0, 0)
+            finally:
+                annotation.sa_goto = original_goto
+            _require(
+                not stale_click_navigation_calls
+                and panel._dataset_model.entry_id_at(0) == "model-entry-1"
+                and "table was refreshed" in panel.status_label.text(),
+                "stale same-source click used an old entry-to-index map",
+            )
+            modified_entry = annotation.AnnotationEntry(
+                id=first_generation_entry.id,
+                ordinal=0,
+                row_number=2,
+                display_name=first_generation_entry.display_name,
+                source_path=first_generation_entry.source_path,
+                source_kind="csv",
+                metadata={"score": "9.9"},
+                availability="missing",
+            )
+            annotation.STATE.all_entries = [modified_entry]
+            annotation.STATE.entries = [modified_entry]
+            annotation.STATE.dataset_generation += 1
+            annotation.STATE.navigation_session = annotation._new_navigation_session(
+                annotation.STATE.entries
+            )
+            annotation.STATE.navigation_generation = (
+                annotation.STATE.dataset_generation
+            )
+            panel._refresh_dataset_table()
+            after_score = panel._dataset_model.data(
+                panel._dataset_model.index(0, 4), display_role
+            )
+            after_status = panel._dataset_model.data(
+                panel._dataset_model.index(0, 1), display_role
+            )
+            _require(
+                before_score == "0.0"
+                and after_score == "9.9"
+                and after_status == "missing",
+                "same-source dataset generation retained stale score/status cells",
+            )
+        finally:
+            annotation._restore_runtime_snapshot(state_before_model_refresh)
         progress("panel-contract-checked")
         panel.main_tabs.setCurrentIndex(1)
         app.processEvents()
@@ -251,6 +464,13 @@ def run_qt_smoke(repository: str) -> Dict[str, Any]:
             "bucket_suggestions": bucket_suggestions,
             "bucket_keyboard_accepted": bucket_edit.text(),
             "preview_click_navigation_calls": preview_navigation_calls,
+            "scores_table_class": type(panel.dataset_table).__name__,
+            "annotation_changed_cells": changed_cells,
+            "active_click_navigation_calls": active_click_navigation_calls,
+            "filtered_click_navigation_calls": filtered_click_navigation_calls,
+            "missing_click_navigation_calls": missing_click_navigation_calls,
+            "same_source_reload_values": [before_score, after_score, after_status],
+            "stale_click_navigation_calls": stale_click_navigation_calls,
         }
     finally:
         progress("cleanup-begin")

@@ -19,7 +19,7 @@ RosettaScripts XML.
 
 ## Status
 
-The 333 Python/fake-PyMOL tests run in WSL. An automated Windows Host smoke run
+The 352 Python/fake-PyMOL tests run in WSL. An automated Windows Host smoke run
 also passes on PyMOL 3.1.3.1 with all 63 canonical commands, including
 `matrix_mode=0/1/2`, static CGO/map/measurement followers, group navigation,
 checked object/group command failures, anchor/motif/ligand alignment,
@@ -28,8 +28,10 @@ The same Host gate now also covers Structure Annotator directory and CSV
 sources, row-level sidecar annotations, merged export, dataset/global state,
 Windows hidden-directory behavior, cursor/config restoration, and fuzzy
 history. A separate visible PyQt5 smoke verifies the real three-tab panel,
-automatic popup display, mouse/keyboard candidate acceptance, and that a CSV
-preview row cannot navigate a previously loaded dataset. Real `K:` FUSE input
+automatic popup display, mouse/keyboard candidate acceptance, targeted Scores
+cell updates, same-source reload freshness, and that a CSV preview row cannot
+navigate a previously loaded dataset. A real 50,000 x 8 Windows-Qt benchmark
+measured 93.85% less table RSS and sub-millisecond cursor refresh. Real `K:` FUSE input
 passes cold/warm Windows-local cache checks. The authenticated WSL staging
 client/cache/materializer chain separately passes a real worker cold/warm E2E;
 Windows-PyMOL-to-worker Structure Annotator staging remains a manual Host gate.
@@ -37,7 +39,8 @@ Windows PyMOL also reached the live WSL worker through
 localhost forwarding and validated PLIP export identity.  Real mouse movement, callback-owned CGO, Qt
 timeout/cancel, licensed PyRosetta, and PyMOL 2.x compatibility remain separate
 gates.  See [implementation status](docs/implementation_status.md), the
-[Host record](docs/validation/windows_host_smoke_2026-07-25.md), and the
+[Host record](docs/validation/windows_host_smoke_2026-07-25.md), the
+[annotator optimization record](docs/validation/structure_annotator_optimization_2026-07-26.md), and the
 [Windows Host acceptance checklist](docs/windows_host_acceptance.md).
 
 The following older modules are not canonical entry points:
@@ -190,12 +193,13 @@ with Windows PyMOL, not WSL Python. The latest exact command and result are in
 Choose **CSV + scores** in the Structure Annotator **Source** tab. Select the
 CSV, give the exact structure-path header, optionally give a unique ID header
 and semicolon-separated score columns, then use **Preview mapping** before
-**Load CSV**. Preview parses and checks paths (including WSL staging `stat`)
+**Load CSV**. Preview parses and checks paths (including WSL staging single or
+batch stat)
 without changing the active PyMOL scene, state, history, annotations, or path
 mapping store.
 
 Each CSV row remains an independent entry, even when two rows reference the
-same structure. The **Scores** tab displays source metadata, the active label's
+same structure. The lazy **Scores** table displays source metadata, the active label's
 annotation, path/provider/cache diagnostics, substring filtering, and typed
 numeric sorting. The source CSV is read-only. Annotations are append-only JSONL
 events beside it:
@@ -216,7 +220,9 @@ Windows-local persistent cache; direct `K:\...` is treated as remote by
 default. Other drives can be listed in `PYMOLPLUGINS_REMOTE_DRIVES`.
 For structures available only inside WSL, start the worker with an explicit
 `--stage-root ALIAS=PATH`, then enter the same PATH and ALIAS in the Source tab.
-The Host performs `stat -> cache lookup -> download on miss`, and the worker
+The Host deduplicates multiple paths into bounded `stat-batch` requests, then
+performs `stat identity -> cache lookup -> download on miss`; a one-unique-path
+dataset keeps the single-stat fast path. The worker
 never exposes arbitrary absolute-path, listing, write, delete, or shell APIs.
 
 Useful diagnostics are:

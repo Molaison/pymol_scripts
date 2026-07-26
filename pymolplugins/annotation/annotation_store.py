@@ -240,15 +240,36 @@ class RowAnnotationStore:
         self._lock = _shared_lock(self.path)
         self._events: List[Dict[str, object]] = []
         self._history: List[Dict[str, object]] = []
+        self._history_by_seq: Dict[int, Dict[str, object]] = {}
         self._state: Dict[Tuple[str, str], str] = {}
+        self._by_entry: Dict[str, Dict[str, str]] = {}
         self._reversible: Dict[int, Tuple[Tuple[str, str], object]] = {}
         self._reversible_order: List[int] = []
         self._undone = set()
         self._complete_size = 0
         self._actual_size = 0
         self._last_seq = 0
+        self._loaded_signature: Optional[Tuple[int, int, int, int]] = None
         with self._lock:
             self._load_unlocked()
+
+    def _file_signature_unlocked(self) -> Optional[Tuple[int, int, int, int]]:
+        """Return a cheap identity for detecting append/replace changes."""
+
+        try:
+            metadata = os.stat(windows_long_path(self.path))
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise AnnotationStoreError(
+                f"cannot inspect annotation log: {exc}"
+            ) from exc
+        return (
+            int(metadata.st_dev),
+            int(metadata.st_ino),
+            int(metadata.st_size),
+            int(metadata.st_mtime_ns),
+        )
 
     def _read_events_unlocked(self) -> Tuple[List[Dict[str, object]], int, int]:
         resolved = windows_long_path(self.path)
@@ -408,7 +429,12 @@ class RowAnnotationStore:
 
         self._events = [dict(event) for event in events]
         self._history = history
+        self._history_by_seq = history_by_seq
         self._state = state
+        by_entry: Dict[str, Dict[str, str]] = {}
+        for (entry_id, label), value in state.items():
+            by_entry.setdefault(entry_id, {})[label] = value
+        self._by_entry = by_entry
         self._reversible = reversible
         self._reversible_order = reversible_order
         self._undone = undone
@@ -419,6 +445,20 @@ class RowAnnotationStore:
         self._replay_unlocked(events)
         self._complete_size = complete_size
         self._actual_size = actual_size
+        signature = self._file_signature_unlocked()
+        # A different in-process instance may have appended between the read
+        # and stat.  Retry once instead of marking unseen bytes as current.
+        if signature is not None and signature[2] != actual_size:
+            events, complete_size, actual_size = self._read_events_unlocked()
+            self._replay_unlocked(events)
+            self._complete_size = complete_size
+            self._actual_size = actual_size
+            signature = self._file_signature_unlocked()
+        self._loaded_signature = signature
+
+    def _refresh_if_changed_unlocked(self) -> None:
+        if self._file_signature_unlocked() != self._loaded_signature:
+            self._load_unlocked()
 
     def _ensure_parent_unlocked(self) -> str:
         directory = os.path.dirname(self.path)
@@ -486,13 +526,98 @@ class RowAnnotationStore:
             raise AnnotationStoreError(
                 f"cannot append annotation event: {exc}"
             ) from exc
-        self._load_unlocked()
-        for item in reversed(self._history):
-            if item["seq"] == event["seq"]:
-                result = dict(item)
-                result["appended"] = True
-                return result
-        raise AnnotationStoreError("appended annotation event could not be reloaded")
+        expected_size = self._complete_size + len(encoded)
+        signature = self._file_signature_unlocked()
+        if signature is None or signature[2] != expected_size:
+            # Cross-process mutation is unsupported but can still be detected.
+            # Reloading here makes any sequence collision fail closed.
+            self._load_unlocked()
+            for item in reversed(self._history):
+                if item["seq"] == event["seq"]:
+                    result = dict(item)
+                    result["appended"] = True
+                    return result
+            raise AnnotationStoreError("appended annotation event could not be reloaded")
+        try:
+            result = self._apply_appended_event_unlocked(event)
+        except Exception:
+            self._load_unlocked()
+            raise
+        self._complete_size = expected_size
+        self._actual_size = expected_size
+        self._loaded_signature = signature
+        result["appended"] = True
+        return result
+
+    def _set_state_unlocked(self, key: Tuple[str, str], value: str) -> None:
+        self._state[key] = value
+        self._by_entry.setdefault(key[0], {})[key[1]] = value
+
+    def _remove_state_unlocked(self, key: Tuple[str, str]) -> None:
+        self._state.pop(key, None)
+        labels = self._by_entry.get(key[0])
+        if labels is None:
+            return
+        labels.pop(key[1], None)
+        if not labels:
+            self._by_entry.pop(key[0], None)
+
+    def _apply_appended_event_unlocked(
+        self, event: Mapping[str, object]
+    ) -> Dict[str, object]:
+        """Apply one already-fsynced local event without replaying the log."""
+
+        clean = dict(event)
+        sequence = int(clean["seq"])
+        operation = str(clean["op"])
+        key = (str(clean["entry_id"]), str(clean["label"]))
+        before = self._state.get(key, _MISSING)
+        enriched = dict(clean)
+        enriched["had_previous"] = before is not _MISSING
+        enriched["previous"] = None if before is _MISSING else before
+        enriched["baseline"] = False
+        enriched["undone"] = False
+
+        if operation == "set":
+            value = str(clean["value"])
+            self._set_state_unlocked(key, value)
+            enriched["current"] = value
+            self._reversible[sequence] = (key, before)
+            self._reversible_order.append(sequence)
+        elif operation == "remove":
+            self._remove_state_unlocked(key)
+            enriched["current"] = None
+            self._reversible[sequence] = (key, before)
+            self._reversible_order.append(sequence)
+        elif operation == "undo":
+            target_sequence = int(clean["target_seq"])
+            target = self._reversible.get(target_sequence)
+            if target is None or target_sequence in self._undone:
+                raise AnnotationStoreError("appended undo target is no longer active")
+            target_key, restored = target
+            if target_key != key:
+                raise AnnotationStoreError("appended undo key does not match target")
+            if restored is _MISSING:
+                self._remove_state_unlocked(key)
+                enriched["current"] = None
+            else:
+                restored_value = str(restored)
+                self._set_state_unlocked(key, restored_value)
+                enriched["current"] = restored_value
+            self._undone.add(target_sequence)
+            target_history = self._history_by_seq.get(target_sequence)
+            if target_history is not None:
+                target_history["undone"] = True
+        else:
+            raise AnnotationStoreError(
+                f"cannot incrementally append operation: {operation}"
+            )
+
+        self._events.append(clean)
+        self._history.append(enriched)
+        self._history_by_seq[sequence] = enriched
+        self._last_seq = sequence
+        return dict(enriched)
 
     def _new_event(self, operation: str, **fields: object) -> Dict[str, object]:
         event: Dict[str, object] = {
@@ -513,7 +638,7 @@ class RowAnnotationStore:
         clean_label = _validate_identifier(label, "label", MAX_LABEL_LENGTH)
         clean_value = _validate_value(value)
         with self._lock:
-            self._load_unlocked()
+            self._refresh_if_changed_unlocked()
             event = self._new_event(
                 "set", entry_id=clean_entry, label=clean_label, value=clean_value
             )
@@ -531,7 +656,7 @@ class RowAnnotationStore:
         )
         clean_label = _validate_identifier(label, "label", MAX_LABEL_LENGTH)
         with self._lock:
-            self._load_unlocked()
+            self._refresh_if_changed_unlocked()
             event = self._new_event(
                 "remove", entry_id=clean_entry, label=clean_label
             )
@@ -555,7 +680,7 @@ class RowAnnotationStore:
         if label is not None:
             clean_label = _validate_identifier(label, "label", MAX_LABEL_LENGTH)
         with self._lock:
-            self._load_unlocked()
+            self._refresh_if_changed_unlocked()
             target_seq = None
             target_key = None
             for candidate in reversed(self._reversible_order):
@@ -596,7 +721,7 @@ class RowAnnotationStore:
         )
         clean_label = _validate_identifier(label, "label", MAX_LABEL_LENGTH)
         with self._lock:
-            self._load_unlocked()
+            self._refresh_if_changed_unlocked()
             return self._state.get((clean_entry, clean_label), default)
 
     def annotations_for(self, entry_id: str) -> Dict[str, str]:
@@ -606,25 +731,40 @@ class RowAnnotationStore:
             entry_id, "entry_id", MAX_ENTRY_ID_LENGTH
         )
         with self._lock:
-            self._load_unlocked()
-            return {
-                label: value
-                for (candidate, label), value in sorted(self._state.items())
-                if candidate == clean_entry
-            }
+            self._refresh_if_changed_unlocked()
+            return dict(sorted(self._by_entry.get(clean_entry, {}).items()))
 
     def _snapshot_unlocked(self) -> Dict[str, Dict[str, str]]:
-        result: Dict[str, Dict[str, str]] = {}
-        for (entry_id, label), value in sorted(self._state.items()):
-            result.setdefault(entry_id, {})[label] = value
-        return result
+        return {
+            entry_id: dict(sorted(values.items()))
+            for entry_id, values in sorted(self._by_entry.items())
+        }
 
     def snapshot(self) -> Dict[str, Dict[str, str]]:
         """Return ``{entry_id: {label: value}}`` for UI and export use."""
 
         with self._lock:
-            self._load_unlocked()
+            self._refresh_if_changed_unlocked()
             return self._snapshot_unlocked()
+
+    def snapshot_for_label(self, label: str) -> Dict[str, str]:
+        """Return ``{entry_id: value}`` for one label with one log refresh."""
+
+        clean_label = _validate_identifier(label, "label", MAX_LABEL_LENGTH)
+        with self._lock:
+            self._refresh_if_changed_unlocked()
+            return {
+                entry_id: value
+                for (entry_id, candidate), value in sorted(self._state.items())
+                if candidate == clean_label
+            }
+
+    def revision(self) -> Tuple[Optional[Tuple[int, int, int, int]], int]:
+        """Return a cheap comparable revision after observing external writes."""
+
+        with self._lock:
+            self._refresh_if_changed_unlocked()
+            return self._loaded_signature, self._last_seq
 
     def export_mapping(self) -> Dict[str, Dict[str, str]]:
         """Return the current row-level mapping for a CSV export adapter."""
@@ -660,7 +800,7 @@ class RowAnnotationStore:
         if type(include_baseline) is not bool:
             raise AnnotationStoreError("include_baseline must be a boolean")
         with self._lock:
-            self._load_unlocked()
+            self._refresh_if_changed_unlocked()
             matches = []
             for event in self._history:
                 if not include_baseline and event["op"] == "snapshot_set":

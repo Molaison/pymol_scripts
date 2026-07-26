@@ -210,8 +210,11 @@ PDB SHA-256 before testing.
    Source bytes/size/mtime must not change.
 7. For a WSL-only file, start the authenticated worker with
    `--stage-root structures=<absolute-root>`. Put that root in **WSL root** and
-   `structures` in **alias**, and use two IDs with the same staged path. Preview
-   produces its own `stat`; record it separately. From a clean observation
+   `structures` in **alias**. First use at least two unique staged paths plus a
+   duplicate row: Preview/Load should issue bounded `stat-batch` requests,
+   preserve per-row missing/error status, and count the duplicate path once.
+   Then use two IDs with the same staged path. Preview produces its own single
+   `stat`; record it separately. From a clean observation
    baseline, first Load should produce `stat -> file`, and navigating to the
    duplicate row (or reloading the CSV) should add the warm `stat`. The
    controller reuses load's fresh resolve identity for preflight, so there is no
@@ -226,8 +229,10 @@ PDB SHA-256 before testing.
 through real `cmd.do`; `annotator_qt_smoke.py` automates preview-source
 isolation in real PyQt5. The reviewed 2026-07-25 record separately captures a
 real `K:` FUSE cold/warm run and a real WSL core staging request sequence.
-Windows-PyMOL-to-WSL annotator staging, human inspection of a production-sized
-score table, and PyMOL 2.x remain open gates.
+The [2026-07-26 optimization record](validation/structure_annotator_optimization_2026-07-26.md)
+adds a real mixed-result batch worker run and a 50,000 x 8 Windows-Qt RSS/
+cursor benchmark. Windows-PyMOL-to-WSL annotator staging, human visual review
+with a production dataset, and PyMOL 2.x remain open gates.
 
 ## 5. Object matrices and group follow (`FOLLOW-*`)
 
@@ -374,7 +379,7 @@ Complete this table in the test record:
 | Bootstrap/doctor | experience §12.1 | | |
 | Navigation | NAV-01..06 | | |
 | Structure Annotator state/history | ANNO-01..04 | | |
-| Structure Annotator CSV/path/cache | ANNO-CSV-01..07 | | |
+| Structure Annotator CSV/path/cache | ANNO-CSV-01..09 | | |
 | Group follow | FOLLOW-01..06 | | |
 | Sequence | SEQ-01..02 | | |
 | Alignment | ALIGN-01..04 | | |
