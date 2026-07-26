@@ -1,9 +1,11 @@
 import csv
+import concurrent.futures
 import importlib
 import json
 import os
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from unittest import mock
@@ -489,6 +491,47 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
             self.assertEqual(os.path.basename(self.module.STATE.current_file()), "b.pdb")
             self.assertRegex(self.fake.commands[-1], r"^show cartoon, sa_00002_b_")
 
+    def test_deferred_history_restore_recovers_intent_without_source_probe(self):
+        remote_csv = r"K:\remote dataset\scores.csv"
+        config = self.module._persisted_config()
+        config.update(
+            {
+                "source_mode": "csv",
+                "csv_path": remote_csv,
+                "path_column": "structure_path",
+                "id_column": "case",
+                "display_columns": ["score"],
+                "mapping_profile": "x_k",
+                "restore_last_dataset": True,
+            }
+        )
+        self.module.record_config_history(
+            r"K:\remote dataset",
+            config,
+            source_mode="csv",
+            csv_path=remote_csv,
+            path_column="structure_path",
+            id_column="case",
+            display_columns=["score"],
+            mapping_profile="x_k",
+        )
+        self.module.STATE.files = []
+        self.module.STATE.navigation_session = None
+
+        with mock.patch.object(
+            self.module,
+            "_long_path",
+            side_effect=AssertionError("deferred restore probed the remote source"),
+        ):
+            pending = self.module._restore_latest_config_from_history(
+                defer_dataset=True
+            )
+
+        self.assertTrue(pending)
+        self.assertEqual(self.module.STATE.source_mode, "csv")
+        self.assertEqual(self.module.STATE.csv_path, remote_csv)
+        self.assertEqual(self.module.STATE.display_columns, ["score"])
+
     def test_csv_preview_does_not_change_existing_session_or_pymol_scene(self):
         with tempfile.TemporaryDirectory() as root:
             dataset = os.path.join(root, "directory dataset")
@@ -554,6 +597,160 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
             )
             self.assertFalse(os.path.exists(mapping_path))
 
+    def test_csv_prepare_is_pure_and_honors_pre_cancel(self):
+        with tempfile.TemporaryDirectory() as root:
+            structure = os.path.join(root, "prepared.pdb")
+            self._write_pdb(structure, "PREPARED")
+            csv_path = os.path.join(root, "prepared.csv")
+            with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(
+                    "structure_path,case,score\n"
+                    f"{structure},prepared,0.91\n"
+                )
+            runtime = self.module._capture_csv_runtime_context()
+            session_before = self._session_signature()
+            scene_before = self._pymol_scene_signature()
+
+            with mock.patch.object(
+                self.fake,
+                "load",
+                side_effect=AssertionError("prepare called cmd.load"),
+            ):
+                plan = self.module._prepare_csv_load(
+                    csv_path,
+                    "structure_path",
+                    "case",
+                    "score",
+                    "utf-8-sig",
+                    "auto",
+                    "x_k",
+                    "",
+                    "",
+                    "",
+                    runtime,
+                )
+
+            self.assertEqual(plan.dataset.count, 1)
+            self.assertEqual(self._session_signature(), session_before)
+            self.assertEqual(self._pymol_scene_signature(), scene_before)
+            cancelled = threading.Event()
+            cancelled.set()
+            with mock.patch.object(
+                self.module,
+                "_csv_file_fingerprint",
+                side_effect=AssertionError("pre-cancel still probed the CSV"),
+            ):
+                with self.assertRaises(self.module._CsvPreparationCancelled):
+                    self.module._prepare_csv_preview(
+                        csv_path,
+                        "structure_path",
+                        cancel_event=cancelled,
+                    )
+                with self.assertRaises(self.module._CsvPreparationCancelled):
+                    self.module._prepare_csv_load(
+                        csv_path,
+                        "structure_path",
+                        "",
+                        "",
+                        "utf-8-sig",
+                        "auto",
+                        "x_k",
+                        "",
+                        "",
+                        "",
+                        runtime,
+                        cancel_event=cancelled,
+                    )
+            self.assertEqual(self._session_signature(), session_before)
+            self.assertEqual(self._pymol_scene_signature(), scene_before)
+
+    def test_csv_prepare_rejects_source_changed_during_resolution(self):
+        with tempfile.TemporaryDirectory() as root:
+            structure = os.path.join(root, "model.pdb")
+            self._write_pdb(structure, "MODEL")
+            csv_path = os.path.join(root, "changing.csv")
+            with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(f"structure_path,score\n{structure},0.1\n")
+            original_resolve = self.module._resolve_csv_dataset
+
+            def resolve_then_change(*args, **kwargs):
+                dataset = original_resolve(*args, **kwargs)
+                with open(csv_path, "a", encoding="utf-8", newline="") as handle:
+                    handle.write("\n")
+                return dataset
+
+            with mock.patch.object(
+                self.module,
+                "_resolve_csv_dataset",
+                side_effect=resolve_then_change,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "CSV changed"):
+                    self.module._prepare_csv_preview(
+                        csv_path,
+                        "structure_path",
+                    )
+
+    def test_load_prepare_reads_annotations_after_materialization(self):
+        with tempfile.TemporaryDirectory() as root:
+            structure = os.path.join(root, "model.pdb")
+            self._write_pdb(structure, "MODEL")
+            csv_path = os.path.join(root, "annotation timing.csv")
+            with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(f"structure_path,case\n{structure},model\n")
+            original_materialize = self.module._materialize_entry
+
+            def materialize_then_annotate(entry, context, **kwargs):
+                materialized = original_materialize(
+                    entry, context, **kwargs
+                )
+                store = self.module.RowAnnotationStore(
+                    self.module.annotation_sidecar_path(csv_path)
+                )
+                store.set(entry.id, "quality", "Keep")
+                return materialized
+
+            with mock.patch.object(
+                self.module,
+                "_materialize_entry",
+                side_effect=materialize_then_annotate,
+            ):
+                plan = self.module._prepare_csv_load(
+                    csv_path,
+                    "structure_path",
+                    "case",
+                    "",
+                    "utf-8-sig",
+                    "auto",
+                    "x_k",
+                    "",
+                    "",
+                    "",
+                    self.module._capture_csv_runtime_context(),
+                )
+
+            self.assertEqual(
+                plan.annotated_entry_ids,
+                (plan.selected_entry.id,),
+            )
+
+    def test_annotation_generation_is_monotonic_for_set_and_undo(self):
+        with tempfile.TemporaryDirectory() as root:
+            structure = os.path.join(root, "model.pdb")
+            self._write_pdb(structure, "MODEL")
+            csv_path = os.path.join(root, "generation.csv")
+            with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(f"structure_path\n{structure}\n")
+            self.module.sa_load_csv(csv_path, "structure_path")
+            before = self.module.STATE.annotation_generation
+
+            self.module.sa_annotate("Keep")
+            after_set = self.module.STATE.annotation_generation
+            self.module.sa_undo()
+            after_undo = self.module.STATE.annotation_generation
+
+            self.assertEqual(after_set, before + 1)
+            self.assertEqual(after_undo, before + 2)
+
     def test_invalid_filter_and_failed_swap_preserve_keep_previous_scene(self):
         with tempfile.TemporaryDirectory() as root:
             first_dir = os.path.join(root, "first")
@@ -613,6 +810,40 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
                 self.module.STATE.materialized_paths[entry.id], materialized
             )
             self.assertNotIn(key, self.module._materialization_futures)
+
+    def test_structure_cache_singleton_initialization_is_thread_safe(self):
+        previous_cache = self.module._structure_cache
+        previous_copy = self.module._copy_materializer
+        sentinel = object()
+        construct_calls = []
+
+        def construct_cache():
+            construct_calls.append(threading.get_ident())
+            threading.Event().wait(0.01)
+            return sentinel
+
+        try:
+            self.module._structure_cache = None
+            self.module._copy_materializer = None
+            with mock.patch.object(
+                self.module,
+                "PersistentStructureCache",
+                side_effect=construct_cache,
+            ):
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=8
+                ) as executor:
+                    results = list(
+                        executor.map(
+                            lambda _index: self.module._get_structure_cache(),
+                            range(16),
+                        )
+                    )
+            self.assertEqual(len(construct_calls), 1)
+            self.assertTrue(all(result is sentinel for result in results))
+        finally:
+            self.module._structure_cache = previous_cache
+            self.module._copy_materializer = previous_copy
 
     def test_cache_identity_uses_resolved_target_and_direct_k_is_remote(self):
         with tempfile.TemporaryDirectory() as root:
@@ -875,6 +1106,143 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
                 [entry.path_resolution.raw_path for entry in dataset.entries],
                 ["/allowed/a/../model.pdb", "/allowed/model.pdb"],
             )
+
+    def test_csv_local_duplicate_rows_probe_once_per_resolve_snapshot(self):
+        with tempfile.TemporaryDirectory() as root:
+            structure = os.path.join(root, "same.pdb")
+            self._write_pdb(structure, "SAME")
+            csv_path = os.path.join(root, "local duplicates.csv")
+            with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(
+                    "structure_path,case\n"
+                    f"{structure},first\n"
+                    f"{structure},second\n"
+                )
+            source = self.module.CsvDatasetSource(
+                csv_path, "structure_path", id_column="case"
+            )
+            original_isfile = os.path.isfile
+            original_access = os.access
+            isfile_paths = []
+            access_paths = []
+
+            def counted_isfile(path):
+                if os.path.abspath(str(path)) == os.path.abspath(structure):
+                    isfile_paths.append(str(path))
+                return original_isfile(path)
+
+            def counted_access(path, mode):
+                if os.path.abspath(str(path)) == os.path.abspath(structure):
+                    access_paths.append(str(path))
+                return original_access(path, mode)
+
+            with mock.patch.object(
+                self.module.os.path, "isfile", side_effect=counted_isfile
+            ), mock.patch.object(
+                self.module.os, "access", side_effect=counted_access
+            ):
+                dataset = self.module._resolve_csv_dataset(
+                    source.load(), "x_k"
+                )
+
+            self.assertEqual(
+                [entry.status for entry in dataset.entries],
+                ["available", "available"],
+            )
+            self.assertEqual(len(isfile_paths), 1)
+            self.assertEqual(len(access_paths), 1)
+
+    def test_duplicate_relative_paths_with_different_bases_are_not_reused(self):
+        with tempfile.TemporaryDirectory() as root:
+            first_base = os.path.join(root, "first")
+            second_base = os.path.join(root, "second")
+            os.mkdir(first_base)
+            os.mkdir(second_base)
+            first_path = os.path.join(first_base, "same.pdb")
+            self._write_pdb(first_path, "FIRST")
+            entries = tuple(
+                self.module.AnnotationEntry(
+                    id=f"heterogeneous-{index}",
+                    ordinal=index,
+                    display_name=f"row-{index}",
+                    source_path="same.pdb",
+                    source_kind="csv",
+                    source_base=base,
+                    metadata={"case": f"row-{index}"},
+                )
+                for index, base in enumerate((first_base, second_base))
+            )
+            dataset = self.module.AnnotationDataset(
+                source_kind="csv",
+                source_path=os.path.join(root, "heterogeneous.csv"),
+                source_base=root,
+                entries=entries,
+                columns=("structure_path", "case"),
+                path_column="structure_path",
+            )
+
+            resolved = self.module._resolve_csv_dataset(dataset, "x_k")
+
+            self.assertEqual(
+                [entry.status for entry in resolved.entries],
+                ["available", "missing"],
+            )
+            self.assertEqual(resolved.entries[0].resolved_path, first_path)
+            self.assertNotEqual(
+                resolved.entries[0].resolved_path,
+                resolved.entries[1].resolved_path,
+            )
+
+    def test_absolute_duplicate_ignores_heterogeneous_irrelevant_bases(self):
+        with tempfile.TemporaryDirectory() as root:
+            structure = os.path.join(root, "absolute.pdb")
+            self._write_pdb(structure, "ABSOLUTE")
+            entries = tuple(
+                self.module.AnnotationEntry(
+                    id=f"absolute-{index}",
+                    ordinal=index,
+                    display_name=f"absolute-{index}",
+                    source_path=structure,
+                    source_kind="csv",
+                    source_base=os.path.join(root, f"unused-{index}"),
+                    metadata={"case": str(index)},
+                )
+                for index in range(2)
+            )
+            dataset = self.module.AnnotationDataset(
+                source_kind="csv",
+                source_path=os.path.join(root, "absolute.csv"),
+                source_base=root,
+                entries=entries,
+                columns=("structure_path", "case"),
+                path_column="structure_path",
+            )
+            original_isfile = os.path.isfile
+            original_access = os.access
+            probe_counts = {"isfile": 0, "access": 0}
+
+            def counted_isfile(path):
+                if os.path.abspath(str(path)) == structure:
+                    probe_counts["isfile"] += 1
+                return original_isfile(path)
+
+            def counted_access(path, mode):
+                if os.path.abspath(str(path)) == structure:
+                    probe_counts["access"] += 1
+                return original_access(path, mode)
+
+            with mock.patch.object(
+                self.module.os.path, "isfile", side_effect=counted_isfile
+            ), mock.patch.object(
+                self.module.os, "access", side_effect=counted_access
+            ):
+                resolved = self.module._resolve_csv_dataset(dataset, "x_k")
+
+            self.assertEqual(
+                [entry.status for entry in resolved.entries],
+                ["available", "available"],
+            )
+            self.assertEqual(probe_counts, {"isfile": 1, "access": 1})
 
     def test_csv_stage_batch_global_failure_only_marks_stage_rows(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1354,6 +1722,45 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
                     self.module.dataset_state_path(bad_csv, source_mode="csv")
                 )
             )
+
+    def test_prepared_commit_failure_restores_fresh_completion_time_cursor(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = os.path.join(root, "active")
+            os.mkdir(directory)
+            for name in ("a.pdb", "b.pdb"):
+                self._write_pdb(os.path.join(directory, name), name)
+            self.module.sa_load_dir(directory)
+
+            replacement = os.path.join(root, "replacement.pdb")
+            self._write_pdb(replacement, "REPLACEMENT")
+            csv_path = os.path.join(root, "replacement.csv")
+            with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(f"structure_path,case\n{replacement},new\n")
+            plan = self.module._prepare_csv_load(
+                csv_path,
+                "structure_path",
+                "case",
+                "",
+                "utf-8-sig",
+                "auto",
+                "x_k",
+                "",
+                "",
+                "",
+                self.module._capture_csv_runtime_context(),
+            )
+
+            self.module.sa_goto(2)
+            session_at_completion = self._session_signature()
+            scene_at_completion = self._pymol_scene_signature()
+            self.fake.fail_next_load = True
+
+            with self.assertRaisesRegex(RuntimeError, "synthetic annotator"):
+                self.module._commit_prepared_csv_load(plan)
+
+            self.assertEqual(self._session_signature(), session_at_completion)
+            self.assertEqual(self._pymol_scene_signature(), scene_at_completion)
+            self.assertEqual(os.path.basename(self.module.STATE.current_file()), "b.pdb")
 
     def test_csv_filter_uses_entry_id_cursor_and_restores_persisted_view(self):
         with tempfile.TemporaryDirectory() as root:

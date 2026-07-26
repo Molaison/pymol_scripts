@@ -15,6 +15,8 @@ import platform
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import traceback
 from typing import Any, Dict
 
@@ -113,11 +115,17 @@ def run_qt_smoke(repository: str) -> Dict[str, Any]:
         record_config_history(dataset_hint, _seed_config())
         import pymolplugins.annotation.plugin as annotation
 
+        construct_started = time.perf_counter()
         panel = annotation.StructureAnnotatorPanel()
+        panel_construct_seconds = time.perf_counter() - construct_started
         progress("panel-created")
         panel.show()
         app.processEvents()
         progress("panel-shown")
+        _require(
+            panel_construct_seconds < 0.25,
+            f"panel construction blocked for {panel_construct_seconds:.3f}s",
+        )
         _require(
             panel.dir_edit.text() == dataset_hint,
             "latest global snapshot did not restore the dataset path",
@@ -141,6 +149,238 @@ def run_qt_smoke(repository: str) -> Dict[str, Any]:
             and not isinstance(panel.dataset_table, QtWidgets.QTableWidget),
             "Scores table is not the lazy QTableView implementation",
         )
+        csv_mode_index = panel.source_mode_combo.findData("csv")
+        panel.source_mode_combo.setCurrentIndex(csv_mode_index)
+        panel.path_column_edit.setText("structure_path")
+        panel.id_column_edit.setText("")
+        panel.display_columns_edit.setText("score")
+        slow_csv = os.path.join(history_root, "slow.csv")
+        fast_csv = os.path.join(history_root, "fast.csv")
+        for synthetic_csv in (slow_csv, fast_csv):
+            with open(synthetic_csv, "w", encoding="utf-8", newline="") as handle:
+                handle.write("structure_path,score\nC:\\models\\synthetic.pdb,0.9\n")
+        slow_started = threading.Event()
+        slow_release = threading.Event()
+        slow_finished = threading.Event()
+        heartbeat_ticks = []
+        heartbeat = QtCore.QTimer()
+        heartbeat.setInterval(20)
+        heartbeat.timeout.connect(lambda: heartbeat_ticks.append(time.perf_counter()))
+        original_prepare_preview = annotation._prepare_csv_preview
+
+        def synthetic_preview(csv_path, **_kwargs):
+            basename = os.path.basename(str(csv_path))
+            if basename == "slow.csv":
+                slow_started.set()
+                slow_release.wait(5.0)
+                slow_finished.set()
+            payload = {
+                "schema": "pymolplugins.structure-annotator-csv-preview/1.0",
+                "status": "ok",
+                "csv_path": str(csv_path),
+                "path_column": "structure_path",
+                "id_column": "",
+                "delimiter": ",",
+                "encoding": "utf-8-sig",
+                "columns": ["structure_path", "score"],
+                "display_columns": ["score"],
+                "mapping_profile": "x_k",
+                "row_count": 1,
+                "status_counts": {"available": 1},
+                "rule_counts": {},
+                "rows": [
+                    {
+                        "entry_id": f"synthetic-{basename}",
+                        "row_number": 2,
+                        "display_name": basename,
+                        "raw_path": f"C:\\models\\{basename}.pdb",
+                        "resolved_path": f"C:\\models\\{basename}.pdb",
+                        "status": "available",
+                        "provider": "windows-host",
+                        "matched_rule": None,
+                        "error": None,
+                        "metadata": {"score": "0.9"},
+                    }
+                ],
+                "preview_truncated": False,
+            }
+            return annotation._PreparedCsvPreview(
+                payload=payload,
+                source_fingerprint=annotation._csv_file_fingerprint(str(csv_path)),
+            )
+
+        try:
+            annotation._prepare_csv_preview = synthetic_preview
+            panel.csv_edit.setText(slow_csv)
+            heartbeat.start()
+            submit_started = time.perf_counter()
+            panel._preview_csv()
+            submit_seconds = time.perf_counter() - submit_started
+            _require(submit_seconds < 0.10, "preview submission blocked the GUI")
+            deadline = time.monotonic() + 1.0
+            while not slow_started.is_set() and time.monotonic() < deadline:
+                qt_test.QTest.qWait(10)
+            _require(slow_started.is_set(), "blocked preview worker did not start")
+            qt_test.QTest.qWait(250)
+            _require(
+                len(heartbeat_ticks) >= 5,
+                f"Qt heartbeat stalled during prepare: {len(heartbeat_ticks)} ticks",
+            )
+            state_generation_before_cancel = annotation.STATE.dataset_generation
+            table_rows_before_cancel = panel._dataset_model.rowCount()
+            cancel_started = time.perf_counter()
+            panel._preview_csv()
+            cancel_seconds = time.perf_counter() - cancel_started
+            _require(cancel_seconds < 0.10, "preview cancel did not return promptly")
+            _require(not panel._csv_task_id, "cancel left the task active in the panel")
+            _require(
+                panel._dataset_model.rowCount() == table_rows_before_cancel
+                and annotation.STATE.dataset_generation
+                == state_generation_before_cancel,
+                "cancel mutated the table or active dataset",
+            )
+
+            panel.csv_edit.setText(fast_csv)
+            panel._preview_csv()
+            deadline = time.monotonic() + 2.0
+            while panel._csv_task_id and time.monotonic() < deadline:
+                qt_test.QTest.qWait(10)
+            _require(not panel._csv_task_id, "fast preview did not complete")
+            _require(
+                panel._table_source_token == annotation._path_identity(fast_csv)
+                and panel._dataset_model.entry_id_at(0) == "synthetic-fast.csv",
+                "newer fast preview was not the displayed result",
+            )
+            _require(
+                panel._last_csv_completion_on_main_thread is True,
+                "async completion did not run on the Qt application thread",
+            )
+            slow_release.set()
+            deadline = time.monotonic() + 2.0
+            while not slow_finished.is_set() and time.monotonic() < deadline:
+                qt_test.QTest.qWait(10)
+            qt_test.QTest.qWait(50)
+            _require(slow_finished.is_set(), "cancelled preview worker did not finish")
+            _require(
+                panel._dataset_model.entry_id_at(0) == "synthetic-fast.csv",
+                "late cancelled preview replaced the newer result",
+            )
+            _require(
+                annotation.STATE.dataset_generation == state_generation_before_cancel,
+                "preview/cancel mutated the active dataset generation",
+            )
+            async_late_result_entry = panel._dataset_model.entry_id_at(0)
+        finally:
+            heartbeat.stop()
+            slow_release.set()
+            annotation._prepare_csv_preview = original_prepare_preview
+        progress("async-preview-checked")
+
+        async_structure = os.path.join(history_root, "async-load.pdb")
+        async_csv = os.path.join(history_root, "async-load.csv")
+        with open(async_structure, "w", encoding="ascii", newline="\n") as handle:
+            handle.write(
+                "ATOM      1  CA  GLY A   1       0.000   0.000   0.000  "
+                "1.00 20.00           C\nEND\n"
+            )
+        with open(async_csv, "w", encoding="utf-8", newline="") as handle:
+            handle.write(f"structure_path,score\n{async_structure},0.8\n")
+        original_commit_csv = annotation._commit_prepared_csv_load
+        original_prepare_csv_load = annotation._prepare_csv_load
+        async_load_commit_threads = []
+
+        def configure_async_load():
+            panel.source_mode_combo.setCurrentIndex(csv_mode_index)
+            panel.csv_edit.setText(async_csv)
+            panel.path_column_edit.setText("structure_path")
+            panel.id_column_edit.setText("")
+            panel.display_columns_edit.setText("score")
+            panel.source_base_edit.setText("")
+            panel.stage_root_edit.setText("")
+            panel.stage_alias_edit.setText("")
+
+        def observe_commit(plan):
+            _require(
+                isinstance(plan, annotation._PreparedCsvLoad),
+                "async load did not deliver a prepared load plan",
+            )
+            async_load_commit_threads.append(
+                QtCore.QThread.currentThread() == app.thread()
+            )
+            return {"status": "synthetic-commit-observed"}
+
+        try:
+            annotation._commit_prepared_csv_load = observe_commit
+            configure_async_load()
+            panel._load_csv_dataset()
+            deadline = time.monotonic() + 3.0
+            while panel._csv_task_id and time.monotonic() < deadline:
+                qt_test.QTest.qWait(10)
+            _require(not panel._csv_task_id, "async load preparation did not finish")
+            _require(
+                async_load_commit_threads == [True],
+                f"async load commit thread mismatch: {async_load_commit_threads}",
+            )
+
+            configure_async_load()
+            prepared_for_stale_checks = original_prepare_csv_load(
+                **panel._csv_arguments(),
+                runtime=annotation._capture_csv_runtime_context(),
+            )
+
+            def run_blocked_stale_check(mutate, expected_status):
+                started = threading.Event()
+                release = threading.Event()
+
+                def blocked_prepare(**_kwargs):
+                    started.set()
+                    release.wait(3.0)
+                    return prepared_for_stale_checks
+
+                annotation._prepare_csv_load = blocked_prepare
+                configure_async_load()
+                commits_before = len(async_load_commit_threads)
+                panel._load_csv_dataset()
+                deadline = time.monotonic() + 1.0
+                while not started.is_set() and time.monotonic() < deadline:
+                    qt_test.QTest.qWait(10)
+                _require(started.is_set(), "blocked stale-load worker did not start")
+                mutate()
+                release.set()
+                deadline = time.monotonic() + 2.0
+                while panel._csv_task_id and time.monotonic() < deadline:
+                    qt_test.QTest.qWait(10)
+                _require(not panel._csv_task_id, "stale load did not finish")
+                _require(
+                    len(async_load_commit_threads) == commits_before,
+                    "stale load reached commit",
+                )
+                _require(
+                    expected_status in panel.status_label.text(),
+                    f"stale load explanation mismatch: {panel.status_label.text()}",
+                )
+
+            original_label = panel.label_edit.text()
+            run_blocked_stale_check(
+                lambda: panel.label_edit.setText(original_label + "_changed"),
+                "annotation configuration changed",
+            )
+            panel.label_edit.setText(original_label)
+            run_blocked_stale_check(
+                lambda: setattr(
+                    annotation.STATE,
+                    "annotation_generation",
+                    int(annotation.STATE.annotation_generation) + 1,
+                ),
+                "annotations changed",
+            )
+            async_config_stale_suppressed = True
+            async_annotation_stale_suppressed = True
+        finally:
+            annotation._prepare_csv_load = original_prepare_csv_load
+            annotation._commit_prepared_csv_load = original_commit_csv
+        async_load_commit_on_main_thread = async_load_commit_threads == [True]
+        progress("async-load-checked")
         preview_navigation_calls = []
         original_goto = annotation.sa_goto
         try:
@@ -452,6 +692,15 @@ def run_qt_smoke(repository: str) -> Dict[str, Any]:
             "platform": platform.platform(),
             "qt_binding": str(PymolQt.PYQT_NAME),
             "panel_visible": bool(panel.isVisible()),
+            "panel_construct_seconds": panel_construct_seconds,
+            "async_submit_seconds": submit_seconds,
+            "async_cancel_seconds": cancel_seconds,
+            "async_heartbeat_ticks": len(heartbeat_ticks),
+            "async_completion_on_main_thread": panel._last_csv_completion_on_main_thread,
+            "async_late_result_entry": async_late_result_entry,
+            "async_load_commit_on_main_thread": async_load_commit_on_main_thread,
+            "async_config_stale_suppressed": async_config_stale_suppressed,
+            "async_annotation_stale_suppressed": async_annotation_stale_suppressed,
             "restored_dataset_path": panel.dir_edit.text(),
             "restored_label": panel.label_edit.text(),
             "restore_last_checked": bool(panel.restore_last_cb.isChecked()),

@@ -23,6 +23,7 @@ class FakeHostFilesystem:
         self.directories = {path.lower() for path in directories}
         self.exists_calls = []
         self.readable_calls = []
+        self.is_file_calls = []
 
     def exists(self, path):
         self.exists_calls.append(path)
@@ -33,6 +34,7 @@ class FakeHostFilesystem:
         return path.lower() not in self.unreadable
 
     def is_file(self, path):
+        self.is_file_calls.append(path)
         return path.lower() in self.existing and path.lower() not in self.directories
 
 
@@ -183,6 +185,107 @@ class PathResolverTests(unittest.TestCase):
         self.assertEqual(result.resolved_path, "R:\\a.pdb")
         self.assertEqual(result.matched_rule, "right")
         self.assertEqual(len(result.candidates), 2)
+
+    def test_repeated_and_alias_candidates_share_one_snapshot_probe(self):
+        rules = (
+            PathMappingRule(
+                "/remote-a",
+                "K:\\models",
+                provider="provider-a",
+                name="alias-a",
+            ),
+            PathMappingRule(
+                "/remote-b",
+                "k:/models/.",
+                provider="provider-b",
+                name="alias-b",
+            ),
+        )
+        filesystem = FakeHostFilesystem(existing=("K:\\models\\same.pdb",))
+        resolver = PathResolver(
+            rules,
+            exists=filesystem.exists,
+            readable=filesystem.readable,
+            is_file=filesystem.is_file,
+        )
+
+        first = resolver.resolve("/remote-a/same.pdb")
+        repeated = resolver.resolve("/remote-a/same.pdb")
+        alias = resolver.resolve("/remote-b/same.pdb")
+
+        self.assertTrue(all(value.status == STATUS_AVAILABLE for value in (
+            first, repeated, alias
+        )))
+        self.assertEqual(filesystem.exists_calls, ["K:\\models\\same.pdb"])
+        self.assertEqual(filesystem.readable_calls, ["K:\\models\\same.pdb"])
+        self.assertEqual(filesystem.is_file_calls, ["K:\\models\\same.pdb"])
+        self.assertEqual(first.matched_rule, "alias-a")
+        self.assertEqual(alias.matched_rule, "alias-b")
+        self.assertEqual(first.provider, "provider-a")
+        self.assertEqual(alias.provider, "provider-b")
+        self.assertEqual(first.resolved_path, "K:\\models\\same.pdb")
+        self.assertEqual(alias.resolved_path, "k:\\models\\same.pdb")
+
+    def test_probe_cache_covers_failures_and_is_fresh_per_resolver(self):
+        missing_fs = FakeHostFilesystem()
+        missing_resolver = PathResolver(
+            (),
+            exists=missing_fs.exists,
+            readable=missing_fs.readable,
+            is_file=missing_fs.is_file,
+        )
+        self.assertEqual(missing_resolver.resolve("K:\\missing.pdb").status, STATUS_MISSING)
+        self.assertEqual(missing_resolver.resolve("K:\\missing.pdb").status, STATUS_MISSING)
+        self.assertEqual(len(missing_fs.exists_calls), 1)
+        self.assertEqual(missing_fs.is_file_calls, [])
+        self.assertEqual(missing_fs.readable_calls, [])
+
+        unreadable_fs = FakeHostFilesystem(
+            existing=("K:\\private.pdb",),
+            unreadable=("K:\\private.pdb",),
+        )
+        unreadable_resolver = PathResolver(
+            (),
+            exists=unreadable_fs.exists,
+            readable=unreadable_fs.readable,
+            is_file=unreadable_fs.is_file,
+        )
+        self.assertEqual(
+            unreadable_resolver.resolve("K:\\private.pdb").status,
+            STATUS_UNREADABLE,
+        )
+        self.assertEqual(
+            unreadable_resolver.resolve("K:\\private.pdb").status,
+            STATUS_UNREADABLE,
+        )
+        self.assertEqual(len(unreadable_fs.exists_calls), 1)
+        self.assertEqual(len(unreadable_fs.is_file_calls), 1)
+        self.assertEqual(len(unreadable_fs.readable_calls), 1)
+
+        unreadable_fs.existing.clear()
+        self.assertEqual(
+            unreadable_resolver.resolve("K:\\private.pdb").status,
+            STATUS_UNREADABLE,
+            "one resolver must remain a stable snapshot",
+        )
+        refreshed = PathResolver(
+            (),
+            exists=unreadable_fs.exists,
+            readable=unreadable_fs.readable,
+            is_file=unreadable_fs.is_file,
+        ).resolve("K:\\private.pdb")
+        self.assertEqual(refreshed.status, STATUS_MISSING)
+
+        failure_calls = []
+
+        def broken(path):
+            failure_calls.append(path)
+            raise OSError("probe failed")
+
+        failure_resolver = PathResolver((), exists=broken)
+        self.assertEqual(failure_resolver.resolve("K:\\error.pdb").status, STATUS_ERROR)
+        self.assertEqual(failure_resolver.resolve("K:\\error.pdb").status, STATUS_ERROR)
+        self.assertEqual(failure_calls, ["K:\\error.pdb"])
 
     def test_mapping_store_dictionary_shape_is_accepted(self):
         rule = {

@@ -383,45 +383,104 @@ class PathResolver:
             if is_file is None and exists is os.path.exists
             else is_file
         )
+        # One resolver represents one immutable import/preview snapshot.  Keep
+        # expensive K:/UNC/FUSE probes proportional to unique physical
+        # candidates rather than CSV rows, without carrying stale results into
+        # a later reload (which constructs a fresh resolver).
+        self._evaluation_cache: Dict[
+            str,
+            Tuple[Optional[bool], Optional[bool], Optional[bool], str],
+        ] = {}
+
+    @staticmethod
+    def _evaluation_key(path: str) -> str:
+        return ntpath.normcase(ntpath.normpath(str(path)))
+
+    @staticmethod
+    def _apply_evaluation(
+        candidate: PathCandidate,
+        outcome: Tuple[Optional[bool], Optional[bool], Optional[bool], str],
+    ) -> PathCandidate:
+        exists, regular_file, readable, diagnostic = outcome
+        return replace(
+            candidate,
+            exists=exists,
+            regular_file=regular_file,
+            readable=readable,
+            diagnostic=diagnostic,
+        )
 
     def _evaluate(self, candidate: PathCandidate) -> PathCandidate:
         if not candidate.require_exists:
             return candidate
+        key = self._evaluation_key(candidate.path)
+        cached = self._evaluation_cache.get(key)
+        if cached is not None:
+            return self._apply_evaluation(candidate, cached)
         try:
             exists = bool(self._exists(candidate.path))
         except Exception as exc:
-            return replace(candidate, diagnostic="existence check failed: %s" % exc)
+            evaluated = replace(
+                candidate, diagnostic="existence check failed: %s" % exc
+            )
+            self._evaluation_cache[key] = (
+                evaluated.exists,
+                evaluated.regular_file,
+                evaluated.readable,
+                evaluated.diagnostic,
+            )
+            return evaluated
         if not exists:
-            return replace(
+            evaluated = replace(
                 candidate, exists=False, regular_file=False, readable=False
             )
+            self._evaluation_cache[key] = (False, False, False, "")
+            return evaluated
         if self._is_file is not None:
             try:
                 regular_file = bool(self._is_file(candidate.path))
             except Exception as exc:
-                return replace(
+                evaluated = replace(
                     candidate,
                     exists=True,
                     diagnostic="regular-file check failed: %s" % exc,
                 )
+                self._evaluation_cache[key] = (
+                    evaluated.exists,
+                    evaluated.regular_file,
+                    evaluated.readable,
+                    evaluated.diagnostic,
+                )
+                return evaluated
             if not regular_file:
-                return replace(
+                evaluated = replace(
                     candidate,
                     exists=True,
                     regular_file=False,
                     readable=False,
                 )
+                self._evaluation_cache[key] = (True, False, False, "")
+                return evaluated
         try:
             readable = bool(self._readable(candidate.path))
         except Exception as exc:
-            return replace(
+            evaluated = replace(
                 candidate,
                 exists=True,
                 diagnostic="readability check failed: %s" % exc,
             )
-        return replace(
+            self._evaluation_cache[key] = (
+                evaluated.exists,
+                evaluated.regular_file,
+                evaluated.readable,
+                evaluated.diagnostic,
+            )
+            return evaluated
+        evaluated = replace(
             candidate, exists=True, regular_file=True, readable=readable
         )
+        self._evaluation_cache[key] = (True, True, readable, "")
+        return evaluated
 
     def _mapping_candidates(
         self,

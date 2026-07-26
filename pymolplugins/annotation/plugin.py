@@ -11,7 +11,9 @@ import posixpath
 import re
 import shutil
 import tempfile
+import threading
 import uuid
+import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, fields, replace
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
@@ -464,6 +466,7 @@ class AnnotatorState:
     undo_history: List[dict] = field(default_factory=list)
     annotated_indices: set = field(default_factory=set)
     annotated_entry_ids: set = field(default_factory=set)
+    annotation_generation: int = 0
     row_annotation_store: Optional[RowAnnotationStore] = None
     materialized_paths: Dict[str, MaterializedStructure] = field(default_factory=dict)
     materialization_errors: Dict[str, str] = field(default_factory=dict)
@@ -641,9 +644,17 @@ def _resume_entry_index(
 
 
 def _install_entries(
-    entries: Sequence[AnnotationEntry], *, resume_entry_id: str = "", index: int = 0
+    entries: Sequence[AnnotationEntry],
+    *,
+    resume_entry_id: str = "",
+    index: int = 0,
+    active_entries: Optional[Sequence[AnnotationEntry]] = None,
 ) -> None:
-    active = _view_entries(entries)
+    active = (
+        list(active_entries)
+        if active_entries is not None
+        else _view_entries(entries)
+    )
     if not active:
         raise RuntimeError("Structure Annotator: no navigable structure rows")
     STATE.dataset_generation = int(STATE.dataset_generation) + 1
@@ -959,8 +970,12 @@ def _record_current_config_history() -> Optional[str]:
         return None
 
 
-def _restore_latest_config_from_history() -> bool:
-    """Restore the last finalized config and, when enabled, its dataset."""
+def _restore_latest_config_from_history(*, defer_dataset: bool = False) -> bool:
+    """Restore the last config and optionally defer its dataset until UI show.
+
+    With ``defer_dataset=True`` a true return means that a restore intent was
+    recovered, not that its dataset has already been committed.
+    """
 
     if STATE.files:
         return False
@@ -987,6 +1002,8 @@ def _restore_latest_config_from_history() -> bool:
         source_reference = csv_path if source_mode == "csv" else dataset_dir
         if not STATE.restore_last_dataset or not source_reference:
             return False
+        if defer_dataset:
+            return True
         source_available = (
             os.path.isfile(_long_path(source_reference))
             if source_mode == "csv"
@@ -1279,6 +1296,9 @@ _materialization_generation = globals().get("_materialization_generation", 0)
 _structure_cache = globals().get("_structure_cache", None)
 _copy_materializer = globals().get("_copy_materializer", None)
 _direct_materializer = globals().get("_direct_materializer", None)
+_materializer_lock = globals().get("_materializer_lock", None)
+if _materializer_lock is None:
+    _materializer_lock = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -1313,21 +1333,27 @@ def _get_bg_executor() -> ThreadPoolExecutor:
 def _get_structure_cache() -> PersistentStructureCache:
     global _structure_cache
     if _structure_cache is None:
-        _structure_cache = PersistentStructureCache()
+        with _materializer_lock:
+            if _structure_cache is None:
+                _structure_cache = PersistentStructureCache()
     return _structure_cache
 
 
 def _get_copy_materializer() -> CopyMaterializer:
     global _copy_materializer
     if _copy_materializer is None:
-        _copy_materializer = CopyMaterializer(_get_structure_cache())
+        with _materializer_lock:
+            if _copy_materializer is None:
+                _copy_materializer = CopyMaterializer(_get_structure_cache())
     return _copy_materializer
 
 
 def _get_direct_materializer() -> DirectMaterializer:
     global _direct_materializer
     if _direct_materializer is None:
-        _direct_materializer = DirectMaterializer()
+        with _materializer_lock:
+            if _direct_materializer is None:
+                _direct_materializer = DirectMaterializer()
     return _direct_materializer
 
 
@@ -1462,7 +1488,9 @@ def _materialize_entry(
     )
 
 
-def _materialize_index(index: int, *, allow_background: bool) -> Optional[MaterializedStructure]:
+def _materialize_index(
+    index: int, *, allow_background: bool, trust_cached: bool = False
+) -> Optional[MaterializedStructure]:
     global _materialization_futures
     if not STATE.entries:
         return None
@@ -1471,7 +1499,7 @@ def _materialize_index(index: int, *, allow_background: bool) -> Optional[Materi
     context = _materialization_context()
     future_key = (context.generation, entry.id)
     cached = STATE.materialized_paths.get(entry.id)
-    if cached and os.path.isfile(_long_path(cached.path)):
+    if cached and (trust_cached or os.path.isfile(_long_path(cached.path))):
         return cached
     future = _materialization_futures.get(future_key)
     if future is not None:
@@ -1811,7 +1839,13 @@ def _evict_unneeded_objects() -> None:
     _update_cache_navigation_pins()
 
 
-def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> Optional[str]:
+def _ensure_loaded(
+    index: int,
+    focus: bool,
+    allow_gz_fallback: bool = True,
+    *,
+    trust_materialized: bool = False,
+) -> Optional[str]:
     if not STATE.files:
         return None
     index = index % len(STATE.files)
@@ -1822,7 +1856,9 @@ def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> O
         load_path = path
         if STATE.entries:
             materialized = _materialize_index(
-                index, allow_background=(not focus and not allow_gz_fallback)
+                index,
+                allow_background=(not focus and not allow_gz_fallback),
+                trust_cached=trust_materialized,
             )
             if materialized is None:
                 return None
@@ -2007,13 +2043,18 @@ def _process_preload_tick() -> None:
         _schedule_preload_tick()
 
 
-def _load_current_structure() -> str:
+def _load_current_structure(*, trust_materialized: bool = False) -> str:
     if not STATE.current_file():
         raise RuntimeError("Structure Annotator: no dataset loaded")
     if not STATE.keep_previous and not STATE.preload_enabled:
         _delete_managed_objects(False)
 
-    loaded = _ensure_loaded(STATE.index, focus=True, allow_gz_fallback=True)
+    loaded = _ensure_loaded(
+        STATE.index,
+        focus=True,
+        allow_gz_fallback=True,
+        trust_materialized=trust_materialized,
+    )
     if not loaded:
         raise RuntimeError(f"failed to load structure at index {STATE.index}")
     _evict_unneeded_objects()
@@ -2168,6 +2209,15 @@ class _StageOutcome:
     method: str
 
 
+class _CsvPreparationCancelled(RuntimeError):
+    """Raised at safe phase boundaries after a Qt cancellation request."""
+
+
+def _check_csv_preparation_cancelled(cancel_event: Optional[object]) -> None:
+    if cancel_event is not None and bool(cancel_event.is_set()):
+        raise _CsvPreparationCancelled("CSV preparation was cancelled")
+
+
 def _stage_coordinates(
     entry: AnnotationEntry, stage_root: str, stage_alias: str
 ) -> Optional[_StageCoordinates]:
@@ -2277,11 +2327,14 @@ def _collect_stage_outcomes(
     stage_alias: str,
     *,
     require_exists: bool,
+    cancel_event: Optional[object] = None,
 ) -> Dict[str, _StageOutcome]:
+    _check_csv_preparation_cancelled(cancel_event)
     if not require_exists:
         return {}
     coordinates_by_relative: Dict[str, _StageCoordinates] = {}
     for entry in entries:
+        _check_csv_preparation_cancelled(cancel_event)
         coordinates = _stage_coordinates(entry, stage_root, stage_alias)
         if coordinates is not None:
             coordinates_by_relative.setdefault(coordinates.relative, coordinates)
@@ -2296,16 +2349,19 @@ def _collect_stage_outcomes(
         except Exception as exc:
             observed = None
             error = exc
+        _check_csv_preparation_cancelled(cancel_event)
         return {
             relative: _StageOutcome(observed, error, "wsl-stage-stat")
         }
     try:
         results = stat_staged_files(str(stage_alias).strip(), relatives)
     except Exception as exc:
+        _check_csv_preparation_cancelled(cancel_event)
         return {
             relative: _StageOutcome(None, exc, "wsl-stage-stat-batch")
             for relative in relatives
         }
+    _check_csv_preparation_cancelled(cancel_event)
     return {
         result.relative_path: _StageOutcome(
             result.source, result.error, "wsl-stage-stat-batch"
@@ -2322,7 +2378,9 @@ def _resolve_csv_dataset(
     stage_alias: str = "",
     require_exists: bool = True,
     read_only_mappings: bool = False,
+    cancel_event: Optional[object] = None,
 ) -> AnnotationDataset:
+    _check_csv_preparation_cancelled(cancel_event)
     resolver = PathResolver(
         rules=_mapping_rules(mapping_profile, read_only=read_only_mappings),
         exists=lambda path: os.path.exists(_long_path(path)),
@@ -2330,16 +2388,59 @@ def _resolve_csv_dataset(
         is_file=lambda path: os.path.isfile(_long_path(path)),
     )
     resolved_entries = []
-    stage_cache: Dict[str, PathResolution] = {}
+    # Only allocate cached resolutions for raw keys which are actually
+    # duplicated.  Populating a 50k-entry cache for an all-unique table costs
+    # more CPU and memory than it saves.  PathResolver separately deduplicates
+    # distinct aliases which map to the same physical Windows candidate.
+    first_source_base = (
+        str(dataset.entries[0].source_base) if dataset.entries else ""
+    )
+    homogeneous_source_base = all(
+        str(entry.source_base) == first_source_base for entry in dataset.entries
+    )
+
+    def _resolution_key(entry: AnnotationEntry):
+        raw_path = str(entry.source_path)
+        base_is_irrelevant = bool(
+            raw_path.startswith(("/", "\\"))
+            or raw_path == "~"
+            or raw_path.startswith("~/")
+            or ntpath.splitdrive(raw_path)[0]
+        )
+        if homogeneous_source_base or base_is_irrelevant:
+            return raw_path
+        return (raw_path, str(entry.source_base))
+
+    seen_resolution_keys = set()
+    duplicate_resolution_keys = set()
+    for candidate_entry in dataset.entries:
+        candidate_key = _resolution_key(candidate_entry)
+        if candidate_key in seen_resolution_keys:
+            duplicate_resolution_keys.add(candidate_key)
+        else:
+            seen_resolution_keys.add(candidate_key)
+    del seen_resolution_keys
+    has_duplicate_resolutions = bool(duplicate_resolution_keys)
+    resolution_cache: Dict[object, PathResolution] = {}
     stage_outcomes = _collect_stage_outcomes(
         dataset.entries,
         stage_root,
         stage_alias,
         require_exists=require_exists,
+        cancel_event=cancel_event,
     )
     for entry in dataset.entries:
-        stage_key = str(entry.source_path)
-        resolution = stage_cache.get(stage_key)
+        _check_csv_preparation_cancelled(cancel_event)
+        resolution_key = (
+            _resolution_key(entry) if has_duplicate_resolutions else None
+        )
+        cache_resolution = (
+            has_duplicate_resolutions
+            and resolution_key in duplicate_resolution_keys
+        )
+        resolution = (
+            resolution_cache.get(resolution_key) if cache_resolution else None
+        )
         if resolution is None:
             coordinates = _stage_coordinates(entry, stage_root, stage_alias)
             outcome = (
@@ -2363,28 +2464,33 @@ def _resolve_csv_dataset(
                     stage_alias,
                     require_exists=require_exists,
                 )
-            if resolution is not None:
-                stage_cache[stage_key] = resolution
-        if resolution is None and os.name != "nt" and not entry.source_path.startswith("~"):
-            candidate = entry.source_path
-            if not os.path.isabs(candidate):
-                candidate = os.path.join(entry.source_base, candidate)
-            candidate = os.path.abspath(candidate)
-            if os.path.isfile(candidate) and os.access(candidate, os.R_OK):
-                resolution = PathResolution(
-                    raw_path=entry.source_path,
-                    resolved_path=candidate,
-                    status=AVAILABILITY_AVAILABLE,
-                    provider="local",
-                    method="local-direct",
+            if (
+                resolution is None
+                and os.name != "nt"
+                and not entry.source_path.startswith("~")
+            ):
+                candidate = entry.source_path
+                if not os.path.isabs(candidate):
+                    candidate = os.path.join(entry.source_base, candidate)
+                candidate = os.path.abspath(candidate)
+                if os.path.isfile(candidate) and os.access(candidate, os.R_OK):
+                    resolution = PathResolution(
+                        raw_path=entry.source_path,
+                        resolved_path=candidate,
+                        status=AVAILABILITY_AVAILABLE,
+                        provider="local",
+                        method="local-direct",
+                    )
+            if resolution is None:
+                resolution = resolver.resolve(
+                    entry.source_path,
+                    source_base=entry.source_base,
+                    require_exists=require_exists,
                 )
-        if resolution is None:
-            resolution = resolver.resolve(
-                entry.source_path,
-                source_base=entry.source_base,
-                require_exists=require_exists,
-            )
+            if cache_resolution:
+                resolution_cache[resolution_key] = resolution
         resolved_entries.append(entry.with_resolution(resolution))
+    _check_csv_preparation_cancelled(cancel_event)
     return replace(dataset, entries=tuple(resolved_entries))
 
 
@@ -2437,22 +2543,122 @@ def _csv_preview_payload(
     }
 
 
-def sa_csv_preview(
+@dataclass(frozen=True)
+class _CsvFileFingerprint:
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+
+
+def _csv_file_fingerprint(path: str) -> _CsvFileFingerprint:
+    try:
+        metadata = os.stat(_long_path(path))
+    except OSError as exc:
+        raise RuntimeError(f"cannot inspect CSV {path}: {exc}") from exc
+    return _CsvFileFingerprint(
+        device=int(metadata.st_dev),
+        inode=int(metadata.st_ino),
+        size=int(metadata.st_size),
+        mtime_ns=int(
+            getattr(metadata, "st_mtime_ns", int(metadata.st_mtime * 1_000_000_000))
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class _CsvRuntimeContext:
+    source_mode: str
+    csv_path: str
+    path_column: str
+    id_column: str
+    display_columns: Tuple[str, ...]
+    csv_encoding: str
+    csv_delimiter: str
+    source_base: str
+    mapping_profile: str
+    stage_root: str
+    stage_alias: str
+    filter_text: str
+    sort_column: str
+    sort_descending: bool
+    cache_enabled: bool
+    label_name: str
+    materialization_generation: int
+
+
+def _capture_csv_runtime_context() -> _CsvRuntimeContext:
+    """Capture every live value a worker may need before leaving main thread."""
+
+    return _CsvRuntimeContext(
+        source_mode=str(STATE.source_mode),
+        csv_path=str(STATE.csv_path or ""),
+        path_column=str(STATE.path_column or ""),
+        id_column=str(STATE.id_column or ""),
+        display_columns=tuple(str(value) for value in STATE.display_columns),
+        csv_encoding=str(STATE.csv_encoding or DEFAULT_ENCODING),
+        csv_delimiter=str(STATE.csv_delimiter or AUTO_DELIMITER),
+        source_base=str(STATE.source_base or ""),
+        mapping_profile=str(STATE.mapping_profile or DEFAULT_PROFILE_NAME),
+        stage_root=str(STATE.stage_root or ""),
+        stage_alias=str(STATE.stage_alias or ""),
+        filter_text=str(STATE.filter_text or ""),
+        sort_column=str(STATE.sort_column or ""),
+        sort_descending=bool(STATE.sort_descending),
+        cache_enabled=bool(STATE.cache_enabled),
+        label_name=str(STATE.label_name or "quality"),
+        materialization_generation=int(_materialization_generation),
+    )
+
+
+@dataclass(frozen=True)
+class _PreparedCsvPreview:
+    payload: Dict[str, object]
+    source_fingerprint: _CsvFileFingerprint
+
+
+@dataclass(frozen=True)
+class _PreparedCsvLoad:
+    dataset: AnnotationDataset
+    active_entries: Tuple[AnnotationEntry, ...]
+    payload: Dict[str, object]
+    persisted_config: Optional[Dict[str, object]]
+    mapping_profile: str
+    stage_root: str
+    stage_alias: str
+    filter_text: str
+    sort_column: str
+    sort_descending: bool
+    requested_index: int
+    requested_entry: str
+    selected_entry: AnnotationEntry
+    preflight_materialized: MaterializedStructure
+    row_annotation_store: RowAnnotationStore
+    annotated_entry_ids: Tuple[str, ...]
+    source_fingerprint: _CsvFileFingerprint
+
+
+def _prepare_csv_preview(
     csv_path: str,
     path_column: str,
     id_column: str = "",
-    display_columns: str = "",
+    display_columns: object = "",
     encoding: str = DEFAULT_ENCODING,
     delimiter: str = AUTO_DELIMITER,
     mapping_profile: str = DEFAULT_PROFILE_NAME,
     source_base: str = "",
     stage_root: str = "",
     stage_alias: str = "",
-) -> Dict[str, object]:
-    """Parse and resolve a CSV without changing PyMOL or dataset state."""
+    *,
+    cancel_event: Optional[object] = None,
+) -> _PreparedCsvPreview:
+    """Perform preview I/O without reading live STATE or touching PyMOL/Qt."""
 
+    canonical_csv = os.path.abspath(os.path.expanduser(str(csv_path)))
+    _check_csv_preparation_cancelled(cancel_event)
+    before = _csv_file_fingerprint(canonical_csv)
     source = CsvDatasetSource(
-        os.path.abspath(os.path.expanduser(str(csv_path))),
+        canonical_csv,
         str(path_column),
         id_column=str(id_column or ""),
         display_columns=_display_column_names(display_columns),
@@ -2460,184 +2666,237 @@ def sa_csv_preview(
         delimiter=str(delimiter or AUTO_DELIMITER),
         source_base=str(source_base or ""),
     )
+    dataset = source.load()
+    _check_csv_preparation_cancelled(cancel_event)
+    profile = str(mapping_profile or DEFAULT_PROFILE_NAME)
     dataset = _resolve_csv_dataset(
-        source.load(),
-        str(mapping_profile or DEFAULT_PROFILE_NAME),
+        dataset,
+        profile,
         stage_root=str(stage_root or ""),
         stage_alias=str(stage_alias or ""),
         require_exists=True,
         read_only_mappings=True,
+        cancel_event=cancel_event,
     )
-    payload = _csv_preview_payload(dataset, str(mapping_profile or DEFAULT_PROFILE_NAME))
-    print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False))
-    return payload
+    after = _csv_file_fingerprint(canonical_csv)
+    if after != before:
+        raise RuntimeError("CSV changed while preview was being prepared; retry")
+    return _PreparedCsvPreview(
+        payload=_csv_preview_payload(dataset, profile),
+        source_fingerprint=after,
+    )
 
 
-def sa_load_csv(
+def _prepare_csv_load(
     csv_path: str,
-    path_column: Optional[str] = None,
-    id_column: Optional[str] = None,
-    display_columns: Optional[object] = None,
-    encoding: Optional[str] = None,
-    delimiter: Optional[str] = None,
-    mapping_profile: Optional[str] = None,
-    source_base: Optional[str] = None,
-    stage_root: Optional[str] = None,
-    stage_alias: Optional[str] = None,
-) -> Optional[Dict[str, object]]:
-    """Load one independently annotatable entry per CSV row.
+    path_column: Optional[str],
+    id_column: Optional[str],
+    display_columns: Optional[object],
+    encoding: Optional[str],
+    delimiter: Optional[str],
+    mapping_profile: Optional[str],
+    source_base: Optional[str],
+    stage_root: Optional[str],
+    stage_alias: Optional[str],
+    runtime: _CsvRuntimeContext,
+    *,
+    cancel_event: Optional[object] = None,
+) -> _PreparedCsvLoad:
+    """Prepare one immutable CSV load plan without consulting live STATE."""
 
-    Optional source arguments are tri-state: ``None`` restores this CSV's
-    saved value (or the active value when reloading the same CSV), while an
-    explicit empty string clears an optional value.  A different CSV never
-    inherits delimiter, ID or display columns from the previously open source.
-    """
+    canonical_csv = os.path.abspath(os.path.expanduser(str(csv_path)))
+    _check_csv_preparation_cancelled(cancel_event)
+    before = _csv_file_fingerprint(canonical_csv)
+    same_active_csv = bool(
+        runtime.source_mode == "csv"
+        and runtime.csv_path
+        and _path_identity(runtime.csv_path) == _path_identity(canonical_csv)
+    )
+    persisted = _read_persisted_dataset_state(canonical_csv, "csv")
+    saved_csv = dict(persisted.get("csv") or {}) if persisted else {}
+    saved_view = dict(persisted.get("view") or {}) if persisted else {}
+
+    def _source_value(
+        supplied: Optional[object],
+        saved_name: str,
+        active_value: object,
+        default: object,
+    ) -> object:
+        if supplied is not None:
+            return supplied
+        if saved_name in saved_csv:
+            return saved_csv[saved_name]
+        if same_active_csv:
+            return active_value
+        return default
+
+    effective_path_column = str(
+        _source_value(path_column, "path_column", runtime.path_column, "structure_path")
+    )
+    if not effective_path_column:
+        raise ValueError("path_column is required for CSV mode")
+    effective_id_column = str(
+        _source_value(id_column, "id_column", runtime.id_column, "") or ""
+    )
+    effective_display_columns = _display_column_names(
+        _source_value(
+            display_columns,
+            "display_columns",
+            runtime.display_columns,
+            None,
+        )
+    )
+    effective_encoding = str(
+        _source_value(
+            encoding, "encoding", runtime.csv_encoding, DEFAULT_ENCODING
+        )
+        or DEFAULT_ENCODING
+    )
+    effective_delimiter = str(
+        _source_value(
+            delimiter, "delimiter", runtime.csv_delimiter, AUTO_DELIMITER
+        )
+        or AUTO_DELIMITER
+    )
+    saved_profile = persisted.get("mapping_profile") if persisted else None
+    if mapping_profile is not None:
+        effective_profile = str(mapping_profile or DEFAULT_PROFILE_NAME)
+    elif saved_profile:
+        effective_profile = str(saved_profile)
+    else:
+        effective_profile = str(runtime.mapping_profile or DEFAULT_PROFILE_NAME)
+    effective_source_base = str(
+        _source_value(source_base, "source_base", runtime.source_base, "") or ""
+    )
+    effective_stage_root = str(
+        _source_value(stage_root, "stage_root", runtime.stage_root, "") or ""
+    )
+    effective_stage_alias = str(
+        _source_value(stage_alias, "stage_alias", runtime.stage_alias, "") or ""
+    )
+    filters = saved_view.get("filters") if persisted else {}
+    sorting = saved_view.get("sort") if persisted else {}
+    next_filter = str(filters.get("text", "")) if isinstance(filters, dict) else ""
+    next_sort_column = (
+        str(sorting.get("column", "")) if isinstance(sorting, dict) else ""
+    )
+    next_sort_descending = (
+        bool(sorting.get("descending", False))
+        if isinstance(sorting, dict)
+        else False
+    )
+    if persisted is None and same_active_csv:
+        next_filter = runtime.filter_text
+        next_sort_column = runtime.sort_column
+        next_sort_descending = runtime.sort_descending
+
+    _check_csv_preparation_cancelled(cancel_event)
+    source = CsvDatasetSource(
+        canonical_csv,
+        effective_path_column,
+        id_column=effective_id_column,
+        display_columns=effective_display_columns,
+        encoding=effective_encoding,
+        delimiter=effective_delimiter,
+        source_base=effective_source_base,
+    )
+    dataset = source.load()
+    _check_csv_preparation_cancelled(cancel_event)
+    dataset = _resolve_csv_dataset(
+        dataset,
+        effective_profile,
+        stage_root=effective_stage_root,
+        stage_alias=effective_stage_alias,
+        require_exists=True,
+        read_only_mappings=True,
+        cancel_event=cancel_event,
+    )
+    position = persisted.get("position") if persisted else None
+    requested_index = int((position or {}).get("index", 0))
+    requested_entry = str((position or {}).get("entry_id", ""))
+    active_entries = _view_entries(
+        dataset.entries,
+        filter_text=next_filter,
+        sort_column=next_sort_column,
+        sort_descending=next_sort_descending,
+    )
+    if not active_entries:
+        raise RuntimeError("CSV contains no resolvable, valid structure rows")
+    selected_entry = active_entries[
+        _resume_entry_index(active_entries, requested_entry, requested_index)
+    ]
+    _check_csv_preparation_cancelled(cancel_event)
+    preflight_materialized = _materialize_entry(
+        selected_entry,
+        _MaterializationContext(
+            generation=runtime.materialization_generation,
+            cache_enabled=runtime.cache_enabled,
+            stage_root=effective_stage_root,
+            stage_alias=effective_stage_alias,
+        ),
+        staged_source_identity=getattr(
+            selected_entry.path_resolution,
+            "staged_source_identity",
+            None,
+        ),
+    )
+    _check_csv_preparation_cancelled(cancel_event)
+    # Read annotations last so a slow remote materialization does not leave the
+    # prepared progress snapshot stale for the duration of the download/copy.
+    row_annotation_store = RowAnnotationStore(
+        annotation_sidecar_path(dataset.source_path)
+    )
+    persisted_config = (
+        dict(persisted.get("config") or {}) if persisted is not None else None
+    )
+    label_name = str(
+        (persisted_config or {}).get("label_name") or runtime.label_name or "quality"
+    )
+    annotated_values = row_annotation_store.snapshot_for_label(
+        normalize_label_key(label_name)
+    )
+    annotated_entry_ids = tuple(
+        entry.id for entry in active_entries if entry.id in annotated_values
+    )
+    _check_csv_preparation_cancelled(cancel_event)
+    after = _csv_file_fingerprint(canonical_csv)
+    if after != before:
+        raise RuntimeError("CSV changed while load was being prepared; retry")
+    return _PreparedCsvLoad(
+        dataset=dataset,
+        active_entries=tuple(active_entries),
+        payload=_csv_preview_payload(
+            dataset, effective_profile, row_limit=20
+        ),
+        persisted_config=persisted_config,
+        mapping_profile=effective_profile,
+        stage_root=effective_stage_root,
+        stage_alias=effective_stage_alias,
+        filter_text=next_filter,
+        sort_column=next_sort_column,
+        sort_descending=next_sort_descending,
+        requested_index=requested_index,
+        requested_entry=requested_entry,
+        selected_entry=selected_entry,
+        preflight_materialized=preflight_materialized,
+        row_annotation_store=row_annotation_store,
+        annotated_entry_ids=annotated_entry_ids,
+        source_fingerprint=after,
+    )
+
+
+def _commit_prepared_csv_load(plan: _PreparedCsvLoad) -> Dict[str, object]:
+    """Commit a prepared plan transactionally; call only on PyMOL main thread."""
 
     previous = _runtime_snapshot()
     parked: List[_ParkedManagedObject] = []
     scene_swap_started = False
-    canonical_csv = os.path.abspath(os.path.expanduser(str(csv_path)))
     try:
-        same_active_csv = bool(
-            STATE.source_mode == "csv"
-            and STATE.csv_path
-            and _path_identity(STATE.csv_path) == _path_identity(canonical_csv)
-        )
-        persisted = _read_persisted_dataset_state(canonical_csv, "csv")
-        if persisted is not None:
-            _apply_persisted_config(persisted["config"])
-        saved_csv = dict(persisted.get("csv") or {}) if persisted else {}
-        saved_view = dict(persisted.get("view") or {}) if persisted else {}
-
-        def _source_value(
-            supplied: Optional[object],
-            saved_name: str,
-            active_value: object,
-            default: object,
-        ) -> object:
-            if supplied is not None:
-                return supplied
-            if saved_name in saved_csv:
-                return saved_csv[saved_name]
-            if same_active_csv:
-                return active_value
-            return default
-
-        effective_path_column = str(
-            _source_value(
-                path_column, "path_column", STATE.path_column, "structure_path"
-            )
-        )
-        if not effective_path_column:
-            raise ValueError("path_column is required for CSV mode")
-        effective_id_column = str(
-            _source_value(id_column, "id_column", STATE.id_column, "") or ""
-        )
-        raw_display_columns = _source_value(
-            display_columns,
-            "display_columns",
-            STATE.display_columns,
-            None,
-        )
-        effective_display_columns = _display_column_names(raw_display_columns)
-        effective_encoding = str(
-            _source_value(
-                encoding, "encoding", STATE.csv_encoding, DEFAULT_ENCODING
-            )
-            or DEFAULT_ENCODING
-        )
-        effective_delimiter = str(
-            _source_value(
-                delimiter, "delimiter", STATE.csv_delimiter, AUTO_DELIMITER
-            )
-            or AUTO_DELIMITER
-        )
-        saved_profile = (
-            persisted.get("mapping_profile") if persisted is not None else None
-        )
-        if mapping_profile is not None:
-            effective_profile = str(mapping_profile or DEFAULT_PROFILE_NAME)
-        elif saved_profile:
-            effective_profile = str(saved_profile)
-        else:
-            effective_profile = str(
-                STATE.mapping_profile or DEFAULT_PROFILE_NAME
-            )
-        effective_source_base = str(
-            _source_value(source_base, "source_base", STATE.source_base, "") or ""
-        )
-        effective_stage_root = str(
-            _source_value(stage_root, "stage_root", STATE.stage_root, "") or ""
-        )
-        effective_stage_alias = str(
-            _source_value(stage_alias, "stage_alias", STATE.stage_alias, "") or ""
-        )
-        filters = saved_view.get("filters") if persisted else {}
-        sorting = saved_view.get("sort") if persisted else {}
-        next_filter = str(filters.get("text", "")) if isinstance(filters, dict) else ""
-        next_sort_column = (
-            str(sorting.get("column", "")) if isinstance(sorting, dict) else ""
-        )
-        next_sort_descending = (
-            bool(sorting.get("descending", False)) if isinstance(sorting, dict) else False
-        )
-        if persisted is None and same_active_csv:
-            next_filter = str(STATE.filter_text or "")
-            next_sort_column = str(STATE.sort_column or "")
-            next_sort_descending = bool(STATE.sort_descending)
-
-        source = CsvDatasetSource(
-            canonical_csv,
-            effective_path_column,
-            id_column=effective_id_column,
-            display_columns=effective_display_columns,
-            encoding=effective_encoding,
-            delimiter=effective_delimiter,
-            source_base=effective_source_base,
-        )
-        dataset = _resolve_csv_dataset(
-            source.load(),
-            effective_profile,
-            stage_root=effective_stage_root,
-            stage_alias=effective_stage_alias,
-            require_exists=True,
-        )
-        position = persisted.get("position") if persisted else None
-        requested_index = int((position or {}).get("index", 0))
-        requested_entry = str((position or {}).get("entry_id", ""))
-        active_entries = _view_entries(
-            dataset.entries,
-            filter_text=next_filter,
-            sort_column=next_sort_column,
-            sort_descending=next_sort_descending,
-        )
-        if not active_entries:
-            raise RuntimeError("CSV contains no resolvable, valid structure rows")
-        resume_index = _resume_entry_index(
-            active_entries, requested_entry, requested_index
-        )
-        selected_entry = active_entries[resume_index]
-        row_annotation_store = RowAnnotationStore(
-            annotation_sidecar_path(dataset.source_path)
-        )
-        preflight_context = _MaterializationContext(
-            generation=int(_materialization_generation),
-            cache_enabled=bool(STATE.cache_enabled),
-            stage_root=effective_stage_root,
-            stage_alias=effective_stage_alias,
-        )
-        preflight_materialized = _materialize_entry(
-            selected_entry,
-            preflight_context,
-            staged_source_identity=getattr(
-                selected_entry.path_resolution,
-                "staged_source_identity",
-                None,
-            ),
-        )
-
+        if plan.persisted_config is not None:
+            _apply_persisted_config(plan.persisted_config)
         parked = _begin_scene_swap()
         scene_swap_started = True
+        dataset = plan.dataset
         STATE.source_mode = "csv"
         STATE.csv_path = dataset.source_path
         STATE.dataset_dir = _source_parent(dataset.source_path)
@@ -2647,32 +2906,41 @@ def sa_load_csv(
         STATE.csv_encoding = dataset.encoding
         STATE.csv_delimiter = dataset.delimiter
         STATE.source_base = dataset.source_base
-        STATE.mapping_profile = effective_profile
-        STATE.stage_root = effective_stage_root
-        STATE.stage_alias = effective_stage_alias
-        STATE.filter_text = next_filter
-        STATE.sort_column = next_sort_column
-        STATE.sort_descending = next_sort_descending
+        STATE.mapping_profile = plan.mapping_profile
+        STATE.stage_root = plan.stage_root
+        STATE.stage_alias = plan.stage_alias
+        STATE.filter_text = plan.filter_text
+        STATE.sort_column = plan.sort_column
+        STATE.sort_descending = plan.sort_descending
         STATE.dataset = dataset
         STATE.all_entries = list(dataset.entries)
-        STATE.row_annotation_store = row_annotation_store
+        STATE.row_annotation_store = plan.row_annotation_store
         STATE.undo_history.clear()
-        STATE.annotated_indices.clear()
-        STATE.annotated_entry_ids.clear()
         _install_entries(
             dataset.entries,
-            resume_entry_id=requested_entry,
-            index=requested_index,
+            resume_entry_id=plan.requested_entry,
+            index=plan.requested_index,
+            active_entries=plan.active_entries,
         )
-        STATE.materialized_paths[selected_entry.id] = preflight_materialized
-        _rescan_annotated_indices()
-        _load_current_structure()
+        STATE.materialized_paths[plan.selected_entry.id] = (
+            plan.preflight_materialized
+        )
+        annotated_ids = set(plan.annotated_entry_ids)
+        STATE.annotated_entry_ids = {
+            entry.id for entry in STATE.entries if entry.id in annotated_ids
+        }
+        STATE.annotated_indices = {
+            index
+            for index, entry in enumerate(STATE.entries)
+            if entry.id in annotated_ids
+        }
+        _load_current_structure(trust_materialized=True)
         _discard_parked_objects(parked)
         parked = []
         scene_swap_started = False
         state_path = _write_persisted_dataset_state(dataset.source_path)
         _record_current_config_history()
-        payload = _csv_preview_payload(dataset, effective_profile, row_limit=20)
+        payload = dict(plan.payload)
         payload.update(
             {
                 "status": "loaded",
@@ -2687,7 +2955,7 @@ def sa_load_csv(
         )
         print(f"Structure Annotator: CSV state: {state_path}")
         return payload
-    except Exception as exc:
+    except Exception:
         try:
             if scene_swap_started:
                 _rollback_scene_swap(previous, parked)
@@ -2695,6 +2963,69 @@ def sa_load_csv(
                 _restore_runtime_snapshot(previous)
         except Exception:
             traceback.print_exc()
+        raise
+
+
+def sa_csv_preview(
+    csv_path: str,
+    path_column: str,
+    id_column: str = "",
+    display_columns: object = "",
+    encoding: str = DEFAULT_ENCODING,
+    delimiter: str = AUTO_DELIMITER,
+    mapping_profile: str = DEFAULT_PROFILE_NAME,
+    source_base: str = "",
+    stage_root: str = "",
+    stage_alias: str = "",
+) -> Dict[str, object]:
+    """Synchronously preview a CSV for console/script compatibility."""
+
+    prepared = _prepare_csv_preview(
+        csv_path,
+        path_column,
+        id_column,
+        display_columns,
+        encoding,
+        delimiter,
+        mapping_profile,
+        source_base,
+        stage_root,
+        stage_alias,
+    )
+    print(json.dumps(prepared.payload, indent=2, sort_keys=True, ensure_ascii=False))
+    return prepared.payload
+
+
+def sa_load_csv(
+    csv_path: str,
+    path_column: Optional[str] = None,
+    id_column: Optional[str] = None,
+    display_columns: Optional[object] = None,
+    encoding: Optional[str] = None,
+    delimiter: Optional[str] = None,
+    mapping_profile: Optional[str] = None,
+    source_base: Optional[str] = None,
+    stage_root: Optional[str] = None,
+    stage_alias: Optional[str] = None,
+) -> Optional[Dict[str, object]]:
+    """Synchronously prepare and commit one independently annotatable CSV row."""
+
+    try:
+        plan = _prepare_csv_load(
+            csv_path,
+            path_column,
+            id_column,
+            display_columns,
+            encoding,
+            delimiter,
+            mapping_profile,
+            source_base,
+            stage_root,
+            stage_alias,
+            _capture_csv_runtime_context(),
+        )
+        return _commit_prepared_csv_load(plan)
+    except Exception as exc:
         print(f"Structure Annotator CSV load error: {exc}")
         traceback.print_exc()
         return None
@@ -2862,6 +3193,7 @@ def sa_annotate(value: str) -> None:
         entry_id = entry.id if entry is not None else ""
         prev_value = _annotations_for_index(STATE.index).get(label_key)
         change = _set_entry_annotation(STATE.index, label_key, value)
+        STATE.annotation_generation = int(STATE.annotation_generation) + 1
 
         # Record for undo (bounded stack).
         STATE.undo_history.append({
@@ -2935,6 +3267,7 @@ def sa_undo() -> None:
                 annotate_structure_file(path, label_key, prev_value)
                 restored = prev_value
 
+        STATE.annotation_generation = int(STATE.annotation_generation) + 1
         _rescan_annotated_indices()
 
         display = (
@@ -3423,6 +3756,139 @@ def sa_unbind_keys() -> Dict[str, object]:
         return {"status": "error", "error": str(exc)}
 
 
+_CSV_ASYNC_JOBS: Dict[str, Dict[str, object]] = globals().get(
+    "_CSV_ASYNC_JOBS", {}
+)
+_CSV_ASYNC_BRIDGE = globals().get("_CSV_ASYNC_BRIDGE", None)
+_CSV_ASYNC_POOL = globals().get("_CSV_ASYNC_POOL", None)
+
+
+_HAS_QT_ASYNC = all(
+    hasattr(QtCore, name)
+    for name in ("QObject", "QRunnable", "QThreadPool", "QCoreApplication", "Signal", "Slot")
+)
+
+
+if _HAS_QT_ASYNC:
+    class _CsvIoBridge(QtCore.QObject):
+        completed = QtCore.Signal(str, object, object)
+
+        def __init__(self):
+            super().__init__()
+            queued = (
+                QtCore.Qt.ConnectionType.QueuedConnection
+                if hasattr(QtCore.Qt, "ConnectionType")
+                else QtCore.Qt.QueuedConnection
+            )
+            self.completed.connect(self._dispatch, queued)
+
+        @QtCore.Slot(str, object, object)
+        def _dispatch(self, job_id, result, error):
+            _complete_csv_async_job(job_id, result, error)
+
+
+    class _CsvIoRunnable(QtCore.QRunnable):
+        """Run only an immutable prepare callable; never retain a panel/cmd."""
+
+        def __init__(self, bridge, job_id, worker, args, kwargs):
+            super().__init__()
+            self.bridge = bridge
+            self.job_id = job_id
+            self.worker = worker
+            self.args = tuple(args)
+            self.kwargs = dict(kwargs)
+
+        @QtCore.Slot()
+        def run(self):
+            try:
+                result = self.worker(*self.args, **self.kwargs)
+                self.bridge.completed.emit(self.job_id, result, None)
+            except Exception as exc:
+                self.bridge.completed.emit(self.job_id, None, exc)
+
+
+def _csv_async_bridge():
+    global _CSV_ASYNC_BRIDGE
+    if not _HAS_QT_ASYNC:
+        raise RuntimeError("PyMOL Qt asynchronous primitives are unavailable")
+    if QtCore.QCoreApplication.instance() is None:
+        raise RuntimeError("no Qt application/event loop is active")
+    if _CSV_ASYNC_BRIDGE is None:
+        _CSV_ASYNC_BRIDGE = _CsvIoBridge()
+    return _CSV_ASYNC_BRIDGE
+
+
+def _csv_async_pool():
+    global _CSV_ASYNC_POOL
+    if not _HAS_QT_ASYNC:
+        raise RuntimeError("PyMOL Qt asynchronous primitives are unavailable")
+    if _CSV_ASYNC_POOL is None:
+        _CSV_ASYNC_POOL = QtCore.QThreadPool()
+        _CSV_ASYNC_POOL.setMaxThreadCount(2)
+    return _CSV_ASYNC_POOL
+
+
+def _submit_csv_async_job(
+    panel,
+    kind: str,
+    worker,
+    args: Sequence[object],
+    kwargs: Mapping[str, object],
+    *,
+    epoch: int,
+    arguments_fingerprint: Tuple[Tuple[str, str], ...],
+    config_fingerprint: Tuple[object, ...],
+    dataset_generation: int,
+    annotation_generation: int,
+) -> str:
+    bridge = _csv_async_bridge()
+    cancel_event = threading.Event()
+    job_id = uuid.uuid4().hex[:12]
+    worker_kwargs = dict(kwargs)
+    worker_kwargs["cancel_event"] = cancel_event
+    runnable = _CsvIoRunnable(
+        bridge, job_id, worker, tuple(args), worker_kwargs
+    )
+    _CSV_ASYNC_JOBS[job_id] = {
+        "kind": str(kind),
+        "panel": weakref.ref(panel),
+        "epoch": int(epoch),
+        "arguments_fingerprint": tuple(arguments_fingerprint),
+        "config_fingerprint": tuple(config_fingerprint),
+        "dataset_generation": int(dataset_generation),
+        "annotation_generation": int(annotation_generation),
+        "cancel_event": cancel_event,
+        "cancelled": False,
+        "runnable": runnable,
+    }
+    _csv_async_pool().start(runnable)
+    return job_id
+
+
+def _cancel_csv_async_job(job_id: str) -> bool:
+    job = _CSV_ASYNC_JOBS.get(str(job_id))
+    if job is None:
+        return False
+    job["cancelled"] = True
+    event = job.get("cancel_event")
+    if event is not None:
+        event.set()
+    return True
+
+
+def _complete_csv_async_job(job_id: str, result, error) -> None:
+    """Queued Qt-main-thread dispatcher for a completed prepare job."""
+
+    job = _CSV_ASYNC_JOBS.pop(str(job_id), None)
+    if job is None or bool(job.get("cancelled")):
+        return
+    panel_ref = job.get("panel")
+    panel = panel_ref() if callable(panel_ref) else None
+    if panel is None:
+        return
+    panel._complete_csv_task(str(job_id), job, result, error)
+
+
 class _HistoryCompletionBinding:
     """Attach dynamically fuzzy-ranked global history to one Qt text widget."""
 
@@ -3741,18 +4207,31 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         self._preview_rows_by_id: Dict[str, Dict[str, object]] = {}
         self._entry_id_to_active_index: Dict[str, int] = {}
         self._entries_by_id: Dict[str, AnnotationEntry] = {}
+        self._csv_task_id = ""
+        self._csv_task_kind = ""
+        self._csv_task_epoch = 0
+        self._csv_task_arguments_fingerprint: Tuple[Tuple[str, str], ...] = ()
+        self._csv_task_dataset_generation = -1
+        self._closed = False
+        self._last_csv_completion_on_main_thread = None
         self._state_save_timer = QtCore.QTimer(self)
         self._state_save_timer.setSingleShot(True)
         self._state_save_timer.timeout.connect(self._save_ui_state)
-        _restore_latest_config_from_history()
+        deferred_restore = _restore_latest_config_from_history(
+            defer_dataset=True
+        )
         self._build_ui()
         self._install_history_completers()
         self._sync_from_state()
         self._rebuild_value_controls()
         self._refresh_status()
+        if deferred_restore:
+            QtCore.QTimer.singleShot(0, self._restore_deferred_dataset)
 
     def closeEvent(self, event) -> None:
         global _panel
+        self._closed = True
+        self._cancel_csv_task(announce=False)
         try:
             self._state_save_timer.stop()
             self._sync_to_state()
@@ -4135,16 +4614,29 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
 
     def _source_mode_changed(self, *args) -> None:
         csv_mode = self._source_mode() == "csv"
+        busy = bool(self._csv_task_id)
+        self.source_mode_combo.setEnabled(not busy)
         for widget in (
             self.csv_edit, self.csv_browse, self.path_column_edit,
             self.id_column_edit, self.display_columns_edit, self.encoding_combo,
             self.delimiter_combo, self.mapping_profile_combo, self.source_base_edit,
-            self.stage_root_edit, self.stage_alias_edit, self.csv_preview_btn,
-            self.csv_load_btn,
+            self.stage_root_edit, self.stage_alias_edit,
         ):
-            widget.setEnabled(csv_mode)
+            widget.setEnabled(csv_mode and not busy)
         for widget in (self.dir_edit, self.dir_browse, self.pattern_edit, self.load_btn):
-            widget.setEnabled(not csv_mode)
+            widget.setEnabled(not csv_mode and not busy)
+        self.csv_preview_btn.setText("Preview mapping")
+        self.csv_load_btn.setText("Load CSV")
+        self.csv_preview_btn.setEnabled(csv_mode and not busy)
+        self.csv_load_btn.setEnabled(csv_mode and not busy)
+        if busy and self._csv_task_kind == "preview":
+            self.csv_preview_btn.setText("Cancel preview")
+            self.csv_preview_btn.setEnabled(True)
+        elif busy and self._csv_task_kind == "load":
+            self.csv_load_btn.setText("Cancel load")
+            self.csv_load_btn.setEnabled(True)
+        elif busy and self._csv_task_kind == "commit":
+            self.csv_load_btn.setText("Committing…")
 
     def _csv_arguments(self) -> Dict[str, str]:
         return {
@@ -4160,25 +4652,242 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
             "stage_alias": self.stage_alias_edit.text().strip(),
         }
 
-    def _preview_csv(self) -> None:
+    @staticmethod
+    def _csv_arguments_fingerprint(
+        arguments: Mapping[str, object]
+    ) -> Tuple[Tuple[str, str], ...]:
+        return tuple(
+            sorted((str(key), str(value)) for key, value in arguments.items())
+        )
+
+    def _annotation_ui_fingerprint(self) -> Tuple[object, ...]:
+        """Capture editable config which a prepared load must not overwrite."""
+
+        return (
+            self.label_edit.text(),
+            self.values_edit.text(),
+            bool(self.auto_advance_cb.isChecked()),
+            bool(self.keep_previous_cb.isChecked()),
+            bool(self.prefer_gz_cb.isChecked()),
+            bool(self.skip_annotated_cb.isChecked()),
+            bool(self.preload_enabled_cb.isChecked()),
+            int(self.preload_ahead_spin.value()),
+            int(self.preload_interval_spin.value()),
+            bool(self.bg_decompress_cb.isChecked()),
+            bool(self.cache_enabled_cb.isChecked()),
+            bool(self.restore_last_cb.isChecked()),
+            self.step_cmd_edit.toPlainText(),
+            tuple(
+                sorted(
+                    (str(value), edit.text())
+                    for value, edit in self._bucket_inputs.items()
+                )
+            ),
+        )
+
+    def _restore_deferred_dataset(self) -> None:
+        if self._closed or STATE.files or not STATE.restore_last_dataset:
+            return
+        if self._source_mode() == "csv":
+            # Match the historical synchronous restore contract: parser fields
+            # present in global history stay explicit, while fields stored only
+            # in the per-CSV state remain tri-state None and are resolved by the
+            # worker.  Reading that sidecar on the GUI thread would reintroduce
+            # the pre-show remote-filesystem stall this path is designed to fix.
+            ui_arguments = self._csv_arguments()
+            worker_arguments: Dict[str, object] = dict(ui_arguments)
+            worker_arguments["display_columns"] = list(STATE.display_columns)
+            for name in (
+                "encoding", "delimiter", "source_base", "stage_root", "stage_alias"
+            ):
+                worker_arguments[name] = None
+            self._start_csv_task(
+                "load",
+                _prepare_csv_load,
+                ui_arguments,
+                runtime=_capture_csv_runtime_context(),
+                worker_arguments=worker_arguments,
+            )
+        else:
+            self._load_dataset()
+
+    def _start_csv_task(
+        self,
+        kind: str,
+        worker,
+        arguments: Mapping[str, str],
+        *,
+        runtime: Optional[_CsvRuntimeContext] = None,
+        worker_arguments: Optional[Mapping[str, object]] = None,
+    ) -> None:
+        if self._csv_task_id:
+            return
+        if not str(arguments.get("csv_path", "")).strip():
+            self.status_label.setText("CSV path is required.")
+            return
+        self._csv_task_epoch += 1
+        fingerprint = self._csv_arguments_fingerprint(arguments)
+        config_fingerprint = (
+            self._annotation_ui_fingerprint() if kind == "load" else ()
+        )
+        generation = int(STATE.dataset_generation)
+        kwargs: Dict[str, object] = dict(worker_arguments or arguments)
+        if runtime is not None:
+            kwargs["runtime"] = runtime
         try:
-            payload = sa_csv_preview(**self._csv_arguments())
-            self._populate_preview_table(payload)
-            counts = payload.get("status_counts", {})
-            self.status_label.setText(
-                f"CSV preview: {payload.get('row_count', 0)} rows; {counts}"
+            job_id = _submit_csv_async_job(
+                self,
+                kind,
+                worker,
+                (),
+                kwargs,
+                epoch=self._csv_task_epoch,
+                arguments_fingerprint=fingerprint,
+                config_fingerprint=config_fingerprint,
+                dataset_generation=generation,
+                annotation_generation=int(STATE.annotation_generation),
             )
         except Exception as exc:
-            self.status_label.setText(f"CSV preview failed: {exc}")
+            self.status_label.setText(f"CSV {kind} could not start: {exc}")
             traceback.print_exc()
+            return
+        self._csv_task_id = job_id
+        self._csv_task_kind = str(kind)
+        self._csv_task_arguments_fingerprint = fingerprint
+        self._csv_task_dataset_generation = generation
+        self._source_mode_changed()
+        self.status_label.setText(
+            f"CSV {kind} preparation is running in the background…"
+        )
+
+    def _clear_csv_task(self) -> None:
+        self._csv_task_id = ""
+        self._csv_task_kind = ""
+        self._csv_task_arguments_fingerprint = ()
+        self._csv_task_dataset_generation = -1
+        if not self._closed:
+            self._source_mode_changed()
+
+    def _cancel_csv_task(self, *, announce: bool = True) -> None:
+        job_id = self._csv_task_id
+        if not job_id or self._csv_task_kind == "commit":
+            return
+        _cancel_csv_async_job(job_id)
+        self._csv_task_epoch += 1
+        self._clear_csv_task()
+        if announce and not self._closed:
+            self.status_label.setText(
+                "CSV cancellation requested; any in-progress filesystem/HTTP "
+                "read may finish, but its result will be ignored."
+            )
+
+    def _complete_csv_task(self, job_id: str, job, result, error) -> None:
+        app = QtCore.QCoreApplication.instance()
+        try:
+            self._last_csv_completion_on_main_thread = bool(
+                app is not None
+                and QtCore.QThread.currentThread() == app.thread()
+            )
+        except Exception:
+            self._last_csv_completion_on_main_thread = None
+        if (
+            self._closed
+            or job_id != self._csv_task_id
+            or int(job.get("epoch", -1)) != self._csv_task_epoch
+        ):
+            return
+        kind = self._csv_task_kind
+        current_fingerprint = self._csv_arguments_fingerprint(
+            self._csv_arguments()
+        )
+        stale_reason = ""
+        if current_fingerprint != tuple(job.get("arguments_fingerprint") or ()):
+            stale_reason = "source arguments changed"
+        elif (
+            kind == "load"
+            and self._annotation_ui_fingerprint()
+            != tuple(job.get("config_fingerprint") or ())
+        ):
+            stale_reason = "annotation configuration changed"
+        elif int(STATE.dataset_generation) != int(
+            job.get("dataset_generation", -1)
+        ):
+            stale_reason = "the active dataset changed"
+        elif (
+            kind == "load"
+            and int(STATE.annotation_generation)
+            != int(job.get("annotation_generation", -1))
+        ):
+            stale_reason = "annotations changed"
+        if stale_reason:
+            self._clear_csv_task()
+            self.status_label.setText(
+                f"Discarded stale CSV {kind} result because {stale_reason}; retry."
+            )
+            return
+        if error is not None:
+            self._clear_csv_task()
+            if isinstance(error, _CsvPreparationCancelled):
+                self.status_label.setText("CSV preparation cancelled.")
+                return
+            self.status_label.setText(f"CSV {kind} failed: {error}")
+            traceback.print_exception(
+                type(error), error, getattr(error, "__traceback__", None)
+            )
+            return
+        if kind == "preview":
+            if not isinstance(result, _PreparedCsvPreview):
+                self._clear_csv_task()
+                self.status_label.setText("CSV preview returned an invalid result.")
+                return
+            self._clear_csv_task()
+            payload = result.payload
+            self._populate_preview_table(payload)
+            self.status_label.setText(
+                f"CSV preview: {payload.get('row_count', 0)} rows; "
+                f"{payload.get('status_counts', {})}"
+            )
+            return
+        if kind != "load" or not isinstance(result, _PreparedCsvLoad):
+            self._clear_csv_task()
+            self.status_label.setText("CSV load returned an invalid result.")
+            return
+        self._csv_task_kind = "commit"
+        self._source_mode_changed()
+        self.status_label.setText("CSV prepared; committing to PyMOL…")
+        try:
+            _commit_prepared_csv_load(result)
+        except Exception as exc:
+            self._clear_csv_task()
+            self.status_label.setText(f"CSV load commit failed: {exc}")
+            traceback.print_exc()
+            return
+        self._clear_csv_task()
+        self._sync_from_state()
+        self._rebuild_value_controls(sync_to_state=False)
+        self._refresh_status()
+
+    def _preview_csv(self) -> None:
+        if self._csv_task_id:
+            if self._csv_task_kind == "preview":
+                self._cancel_csv_task()
+            return
+        arguments = self._csv_arguments()
+        self._start_csv_task("preview", _prepare_csv_preview, arguments)
 
     def _load_csv_dataset(self) -> None:
+        if self._csv_task_id:
+            if self._csv_task_kind == "load":
+                self._cancel_csv_task()
+            return
         self._sync_to_state(update_directory=False, persist=False)
-        result = sa_load_csv(**self._csv_arguments())
-        if result is not None:
-            self._sync_from_state()
-            self._rebuild_value_controls(sync_to_state=False)
-        self._refresh_status()
+        arguments = self._csv_arguments()
+        self._start_csv_task(
+            "load",
+            _prepare_csv_load,
+            arguments,
+            runtime=_capture_csv_runtime_context(),
+        )
 
     @staticmethod
     def _user_role():

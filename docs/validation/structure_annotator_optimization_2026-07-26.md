@@ -1,22 +1,25 @@
 # Structure Annotator batch/large-table validation: 2026-07-26
 
-This record covers the optimization work layered on commit `ef64af7`. The
-tested worktree adds bounded WSL batch stat, incremental annotation-log state,
-and a lazy Scores table. Windows Host evidence is kept separate from WSL-only
-worker evidence.
+This record covers the optimization work layered on commits `ef64af7` and
+`4f1dfc2`. The tested worktree adds bounded WSL batch stat, incremental
+annotation-log state, a lazy Scores table, per-snapshot path-probe reuse, and
+background Qt CSV preparation. Windows Host evidence is kept separate from
+WSL-only worker evidence.
 
 ## WSL suite and real worker
 
-The repository-wide suite completed with:
+The repository-wide suite, rerun after the final path-cache and asynchronous
+prepare refinements, completed with:
 
 ```text
-Ran 352 tests in 17.538s
+Ran 364 tests in 16.220s
 OK
 ```
 
 The final count includes regressions for canonical-equivalent rows sharing one
-single stat and for rejecting request-level or mismatched code/status errors
-inside a batch item.
+single stat, request-level and per-item batch errors, heterogeneous source
+bases, immutable worker preparation, stale result suppression, and fresh
+transaction rollback snapshots.
 
 A real foreground standard-library worker bound `127.0.0.1:18765`, required a
 Bearer token, and exposed root alias `repo` without exposing its server path.
@@ -92,6 +95,63 @@ Record:
 ```text
 C:\Users\ADMIN\AppData\Local\Temp\PymolPlugins-annotator-qt-current.json
 sha256 98ab172496b16f5fcbcfa8aa08a658b1f429abc885f4467c8a106600246cfec7
+```
+
+## Async CSV prepare/commit follow-up
+
+The follow-up expanded the same final 364-test suite with regressions for:
+
+- exact duplicate local paths issuing one `isfile/access` pair per resolve;
+- distinct mapping aliases sharing one canonical physical candidate probe;
+- pure prepare making no PyMOL/scene mutation;
+- pre-cancel result suppression and CSV fingerprint change rejection;
+- a failed prepared commit restoring the cursor/scene captured at completion
+  time, after the user navigated while preparation was running;
+- deferred history restore recovering source intent without probing a remote
+  source during panel construction.
+
+After the last cache-lock and stale-result refinements, the Windows PyMOL
+3.1.3.1 automated gate again passed all 13 checks. Record:
+
+```text
+C:\Users\ADMIN\AppData\Local\Temp\PymolPlugins-host-smoke-20260726-final.json
+started   2026-07-26T04:06:11.290284+00:00
+completed 2026-07-26T04:06:11.863503+00:00
+sha256 27b6360afb0ca68a3fa031a397569d906eb3e21b7b728f8d158a8a09ac11fe8c
+```
+
+The latest bundled-PyQt5 record returned `status=pass` and measured:
+
+| Check | Observed |
+| --- | ---: |
+| Panel construction | 17.70 ms |
+| Background Preview submission | 0.33 ms |
+| Cancel return | 0.20 ms |
+| 20 ms heartbeat ticks during a 250 ms blocked worker | 10 |
+| Late cancelled A after fast B | B remained displayed |
+| Preview completion thread | Qt application thread |
+| Load commit thread | Qt application thread |
+| Annotation-config change during Load | stale plan suppressed |
+| In-process annotation change during Load | stale plan suppressed |
+
+The Load check used the real Windows worker-side CSV parse/resolve/materialize
+path and replaced only the final commit callback with an observer; the separate
+Host PyMOL gate exercised the real synchronous transaction and `cmd.load`.
+This preserves the required boundary without pretending the standalone bundled
+Python Qt smoke is a running PyMOL scene.
+
+Cancel is deliberately result suppression, not forced thread termination. The
+dedicated pool has two threads, so two non-cooperative FUSE/HTTP reads may hold
+both slots until their configured timeouts and a newer request may wait behind
+them. Their completions are still discarded and cannot mutate the panel,
+`STATE`, or scene. `QThreadPool.tryTake` is not used because it is unavailable
+before Qt 5.9 and has an upstream-documented auto-delete race; changing runnable
+ownership remains a separate PyMOL 2.x/PySide2 compatibility task.
+
+```text
+C:\Users\ADMIN\AppData\Local\Temp\PymolPlugins-annotator-qt-20260726-final.json
+completed 2026-07-26T03:57:48.977629+00:00
+sha256 8d40c2944ccb1e1397ad4f1ff206e20126a400ef4a3a46894b07ac61ee45c497
 ```
 
 ## 50,000 x 8 Windows Qt benchmark

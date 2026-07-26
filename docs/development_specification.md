@@ -484,6 +484,30 @@ signature 后必须 reload/replay。已 fsync 的本地 append 允许增量更�
   `dataChanged`。Windows bundled Qt 在 50,000 x 8 synthetic table 上相对旧
   `QTableWidget` 的额外 RSS 至少下降 70%；200 次 cursor refresh 的 p95 < 16 ms、
   max < 50 ms。
+- `ANNO-CSV-10` 一次 CSV resolve 中的普通、Windows drive、UNC 与 mapping
+  candidate 必须按 canonical Windows candidate 复用 filesystem probe；相同 raw path
+  的 local-direct resolution 也必须复用。probe cache 只属于本次 immutable
+  resolve snapshot，不得跨 reload 隐藏文件变化。对 `N` rows、`U` unique
+  Windows candidates，exists/regular/readable probe 次数必须为 `O(U)`，不能是
+  `O(N)`；lexical canonicalization 不承诺解析 symlink/junction。不同 raw rows 的
+  `entry_id`、metadata 和 annotation identity 仍保持独立。
+- `ANNO-CSV-11` console `sa_csv_preview`/`sa_load_csv` 保持同步返回契约，但 Qt
+  Preview、Load 和 CSV restore-last 必须拆成后台 pure prepare 与主线程
+  transactional commit。prepare 可以读取 persisted state、解析/resolve CSV、执行
+  WSL stat 并 materialize selected structure，但不得访问 Qt widget、调用 `cmd.*`
+  或修改 live `STATE`。completion 必须通过 queued Qt signal 回到 application
+  thread，并在任何 scene mutation 前验证 latest request epoch、cancel/close、UI
+  source/config fingerprint、submission `dataset_generation` 与进程内 annotation
+  generation；CSV 在 worker prepare 前后的 device/inode/size/mtime fingerprint
+  也必须一致。queued completion 不得重新访问 K:/UNC/WSL filesystem；外部进程
+  并发修改 sidecar 不在支持范围内。stale/cancelled completion
+  只能丢弃，不能 rollback 当前 scene；commit 开始时才获取 fresh runtime snapshot，
+  因而失败会恢复等待结束前的最新 scene/cursor。第一阶段 Cancel 定义为立即恢复
+  UI 并抑制 late result，不能声称强杀已经进入 FUSE/HTTP read 的线程。面板必须先
+  build/show，再以 zero-delay task 启动 restore；真实 Host gate 用 blocked worker
+  证明 event-loop heartbeat、cancel suppression、late-result isolation 和 main-thread
+  commit。专用 pool 第一阶段最多两个 worker；若两个不可协作取消的 read 同时阻塞，
+  后续请求允许排队到既有 timeout，但任何被取消结果仍不得写入 UI、`STATE` 或 scene。
 
 ## 6. Specification：group follow 刚体变换
 

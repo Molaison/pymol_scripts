@@ -88,11 +88,24 @@ The returned JSON includes `status_counts`, `rule_counts`, and the first 50
 rows. Preview may perform read-only file checks or WSL `stage/stat`; it never
 writes mapping/state/history/session data.
 
+The panel runs CSV parsing, path probes and WSL requests in a background
+prepare task. While it is running the same button becomes **Cancel preview**;
+the panel and PyMOL navigation must remain responsive. Cancel immediately
+suppresses the result, although an already-blocked FUSE/HTTP read may continue
+until its timeout. The console `sa_csv_preview` command intentionally remains
+synchronous for script compatibility.
+
 ## 4. Load, inspect scores, filter, and sort
 
 Click **Load CSV**. The first valid row should load only after parsing, path
 resolution, and materialization have succeeded. A failed source switch must
 leave the previous active source and managed scene unchanged.
+
+During preparation the button becomes **Cancel load**. Cancellation is allowed
+only before `Committing…`; the final scene transaction and `cmd.load` stay on
+the PyMOL main thread and cannot be interrupted halfway. If another dataset,
+filter, or source argument changes while the worker is running, its stale
+result is discarded rather than applied or rolled back over the newer scene.
 
 In **Scores**:
 
