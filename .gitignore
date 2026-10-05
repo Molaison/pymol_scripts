@@ -23,4 +23,5 @@ secrets/
 # Generated reports, scratch files, and Windows download metadata
 /output/
 /tmp/
+dist/
 *:Zone.Identifier

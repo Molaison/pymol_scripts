@@ -1,0 +1,81 @@
+name: Build installable plugin package
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Read plugin version
+        id: version
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import pathlib, re
+
+          source = pathlib.Path("pymolplugins/__init__.py").read_text(encoding="utf-8")
+          print("version=" + re.search(r'__version__\s*=\s*"([^"]+)"', source).group(1))
+          PY
+
+      - name: Check tag matches plugin version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="${{ steps.version.outputs.version }}"
+          if [ "$tag" != "$version" ]; then
+            echo "tag v$tag does not match pymolplugins/__init__.py $version" >&2
+            exit 1
+          fi
+
+      - name: Run packaging and layout tests
+        run: |
+          python3 -m unittest discover -s tests/architecture -t . \
+            -p 'test_plugin_package.py' -p 'test_package_layout.py' -v
+
+      - name: Build installable Plugin Manager ZIP
+        run: python3 scripts/package_plugin.py
+
+      - name: Write checksums
+        run: |
+          cd dist
+          sha256sum ./*.zip > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PymolPlugins-${{ steps.version.outputs.version }}
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/PymolPlugins-${{ steps.version.outputs.version }}.zip" \
+            dist/SHA256SUMS \
+            --title "PymolPlugins ${{ steps.version.outputs.version }}" \
+            --generate-notes
