@@ -1,6 +1,6 @@
 # 项目上下文
 
-更新：2026-10-02
+更新：2026-10-05
 
 ## 目标与成功标准
 新手目标：没有历史配置时，靠布局、明确控件和状态反馈完成首次打开、查看和保存，而不是阅读常驻教程。每次增加文字前先判断能否用UI表达；解释按需打开，错误、进度和未保存状态不得隐藏。连续审阅目标：显式恢复、later路线、分数解释和可交接摘要，不改变质量标签含义。
@@ -17,6 +17,7 @@
 - 不重做批处理已有 A/B 配对；reference 用明确配置的表列关联，不猜路径。
 - 不安装管理工具代替开发。当前 PATH 和既知安装位置均没有可用 Beads，以下单一执行记录暂为权威任务状态。
 - 抽样仅作显式会话审阅层，重导入回到完整筛选集合；评分百分位和导出不把样本冒充全集。批处理预填A/B列，但不自动继承审阅抽样/过滤，必须先预览确认。
+- 发布走 GitHub 私有仓库 `xcflab/pymol_scripts`（origin，main）：安装包由 `.github/workflows/package.yml` 自动构建，push main 产出 Actions artifact，推 `v<version>` 标签（须等于 `pymolplugins/__init__.py` 的 `__version__`）发布 Release，含 ZIP 与 SHA256SUMS。ZIP 一律由 `scripts/package_plugin.py` 生成，不再手工打包。
 
 ## 长期发现
 既有 Host 记录见 docs/implementation_status.md。历史已通过不等于本版本重新通过；新验收保留失败 JSON 和原生截图。
