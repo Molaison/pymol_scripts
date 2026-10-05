@@ -15,8 +15,20 @@ from typing import Dict, Mapping, Optional
 from urllib.parse import urlparse
 
 try:
-    from pymolplugins.worker.backends.plip import PlipBackend, PlipBackendError
-    from pymolplugins.worker.backends.rosetta import RosettaBackend, RosettaBackendError
+    from pymolplugins.worker.backends.plip import (
+        PlipBackend,
+        PlipBackendError,
+        PlipRequestError,
+        PlipScientificContractError,
+        PlipUnavailableError,
+    )
+    from pymolplugins.worker.backends.rosetta import (
+        RosettaBackend,
+        RosettaBackendError,
+        RosettaRequestError,
+        RosettaScientificContractError,
+        RosettaUnavailableError,
+    )
     from pymolplugins.worker.staging import (
         FileStagingBackend,
         MAX_STAGE_STAT_BATCH_ITEMS,
@@ -29,8 +41,20 @@ except ImportError:
     _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     if _ROOT not in sys.path:
         sys.path.insert(0, _ROOT)
-    from pymolplugins.worker.backends.plip import PlipBackend, PlipBackendError  # type: ignore
-    from pymolplugins.worker.backends.rosetta import RosettaBackend, RosettaBackendError  # type: ignore
+    from pymolplugins.worker.backends.plip import (  # type: ignore
+        PlipBackend,
+        PlipBackendError,
+        PlipRequestError,
+        PlipScientificContractError,
+        PlipUnavailableError,
+    )
+    from pymolplugins.worker.backends.rosetta import (  # type: ignore
+        RosettaBackend,
+        RosettaBackendError,
+        RosettaRequestError,
+        RosettaScientificContractError,
+        RosettaUnavailableError,
+    )
     from pymolplugins.worker.staging import (  # type: ignore
         FileStagingBackend,
         MAX_STAGE_STAT_BATCH_ITEMS,
@@ -56,6 +80,31 @@ FORBIDDEN_REQUEST_KEYS = {
     "shell",
     "xml",
 }
+
+
+def _reject_json_constant(value: str):
+    raise ValueError("invalid JSON constant: %s" % value)
+
+
+def _unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON field: %s" % key)
+        result[key] = value
+    return result
+
+
+def _backend_error_contract(error: Exception):
+    if isinstance(error, (RosettaRequestError, PlipRequestError)):
+        return 400, "invalid_request", str(error)
+    if isinstance(error, (RosettaUnavailableError, PlipUnavailableError)):
+        return 422, "backend_unavailable", str(error)
+    if isinstance(
+        error, (RosettaScientificContractError, PlipScientificContractError)
+    ):
+        return 500, "scientific_contract_error", str(error)
+    return 422, "backend_error", str(error)
 
 
 class WorkerApp:
@@ -147,7 +196,28 @@ def make_handler(app: WorkerApp):
             sys.stderr.write("worker: " + (fmt % args) + "\n")
 
         def _send(self, status: int, payload: Mapping[str, object]):
-            data = json.dumps(payload, sort_keys=True).encode("utf-8")
+            try:
+                data = json.dumps(
+                    payload,
+                    sort_keys=True,
+                    allow_nan=False,
+                ).encode("utf-8")
+            except (TypeError, ValueError):
+                status = 500
+                data = json.dumps(
+                    {
+                        "schema": WORKER_SCHEMA,
+                        "error": {
+                            "code": "scientific_contract_error",
+                            "message": (
+                                "worker refused a non-finite or non-serializable "
+                                "scientific response"
+                            ),
+                        },
+                    },
+                    sort_keys=True,
+                    allow_nan=False,
+                ).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
@@ -198,12 +268,17 @@ def make_handler(app: WorkerApp):
                 raise ValueError(
                     f"request body ended early: expected {length} bytes, got {len(data)}"
                 )
-            value = json.loads(data.decode("utf-8"))
+            value = json.loads(
+                data.decode("utf-8"),
+                parse_constant=_reject_json_constant,
+                object_pairs_hook=_unique_json_object,
+            )
             if not isinstance(value, dict):
                 raise ValueError("JSON request must be an object")
             if "schema_version" not in value:
                 raise ValueError("schema_version is required")
-            if value.get("schema_version") != 1:
+            schema_version = value.get("schema_version")
+            if type(schema_version) is not int or schema_version != 1:
                 raise ValueError("unsupported schema_version")
             return value
 
@@ -345,10 +420,11 @@ def make_handler(app: WorkerApp):
             except (ValueError, json.JSONDecodeError) as exc:
                 self._error(400, "invalid_request", str(exc))
             except (RosettaBackendError, PlipBackendError) as exc:
-                self._error(422, "backend_error", str(exc))
-            except Exception as exc:
+                status, code, message = _backend_error_contract(exc)
+                self._error(status, code, message)
+            except Exception:
                 traceback.print_exc()
-                self._error(500, "internal_error", str(exc))
+                self._error(500, "internal_error", "internal worker error")
 
     return Handler
 

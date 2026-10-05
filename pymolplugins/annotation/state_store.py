@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ctypes
+import datetime
+from dataclasses import dataclass
 import hashlib
 import json
 import ntpath
@@ -18,6 +20,7 @@ STATE_SCHEMA_V1 = "pymolplugins.structure-annotator-state/1.0"
 STATE_SCHEMA = "pymolplugins.structure-annotator-state/2.0"
 STATE_DIRECTORY = ".pymolplugins"
 STATE_FILENAME = "structure_annotator.json"
+CSV_IDENTITY_SCHEMA = "pymolplugins.structure-annotator-csv-identity/1.0"
 MAX_STATE_BYTES = 1024 * 1024
 
 _SOURCE_MODES = {"directory", "csv"}
@@ -52,16 +55,44 @@ class StateStoreError(ValueError):
     """Raised when a persisted state document is invalid or unsupported."""
 
 
+@dataclass(frozen=True)
+class CsvDatasetIdentity:
+    """Collision-aware portable identity for one CSV source.
+
+    Ordinary datasets retain the historical case-folded basename identity.
+    A case discriminator is introduced only when case-distinct siblings really
+    coexist, or when a previously discriminated sidecar proves that such an
+    identity has already been committed.  This prevents path aliases or merely
+    different spelling on a case-insensitive filesystem from forking state.
+    """
+
+    basename: str
+    actual_basename: str
+    legacy_dataset_id: str
+    dataset_id: str
+    legacy_namespace: str
+    namespace: str
+    discriminator: str = ""
+    collision_names: Tuple[str, ...] = ()
+
+    @property
+    def is_discriminated(self) -> bool:
+        return bool(self.discriminator)
+
+
 def _looks_like_windows_path(path: str) -> bool:
     return bool(ntpath.splitdrive(path)[0]) or path.startswith(("\\\\", "\\\\?\\"))
 
 
 def _absolute_path(path: str) -> str:
-    """Normalize a local path without corrupting Host paths in WSL-side tests."""
+    """Keep SSH identities and Host path syntax intact during normalization."""
 
     text = os.fspath(path) if path is not None else ""
     if not text or "\x00" in text:
         raise StateStoreError("dataset path must be a non-empty path")
+    from pymolplugins.remote.ssh import is_ssh_path, parse_ssh_path
+    if is_ssh_path(text):
+        return parse_ssh_path(text).uri
     if _looks_like_windows_path(text):
         return ntpath.normpath(text)
     return os.path.abspath(os.path.expanduser(text))
@@ -71,6 +102,11 @@ def _path_parts(path: str) -> Tuple[str, str, str]:
     """Return ``(absolute, parent, basename)`` using the path's own syntax."""
 
     absolute = _absolute_path(path)
+    from pymolplugins.remote.ssh import is_ssh_path, parse_ssh_path
+    if is_ssh_path(absolute):
+        import posixpath
+        remote = parse_ssh_path(absolute)
+        return absolute, remote.at(posixpath.dirname(remote.path)).uri, posixpath.basename(remote.path)
     path_module = ntpath if _looks_like_windows_path(absolute) else os.path
     return absolute, path_module.dirname(absolute), path_module.basename(absolute)
 
@@ -84,17 +120,7 @@ def _canonical_source_mode(value: object) -> str:
     return mode
 
 
-def csv_dataset_id(csv_path: str) -> str:
-    """Return the portable sidecar identity for one CSV dataset.
-
-    Only the case-folded basename participates in the digest.  Consequently,
-    the same CSV reached through ``K:``, UNC, or WSL aliases (or moved together
-    with its ``.pymolplugins`` directory) retains its state and annotation
-    sidecars.  The readable stem is Windows-safe and the basename digest still
-    distinguishes files such as ``scores.csv`` and ``scores.tsv``.
-    """
-
-    _, _, basename = _path_parts(csv_path)
+def _legacy_csv_dataset_id(basename: str) -> str:
     stem = os.path.splitext(basename)[0]
     safe_stem = re.sub(r"[^\w.-]+", "_", stem.casefold(), flags=re.UNICODE)
     safe_stem = re.sub(r"_+", "_", safe_stem).strip(" ._")[:80]
@@ -106,6 +132,273 @@ def csv_dataset_id(csv_path: str) -> str:
         basename.casefold().encode("utf-8", "surrogatepass")
     ).hexdigest()[:8]
     return f"{safe_stem}.{digest}"
+
+
+def _legacy_csv_namespace(basename: str) -> str:
+    return hashlib.sha256(
+        basename.casefold().encode("utf-8", "surrogatepass")
+    ).hexdigest()[:16]
+
+
+def _case_equivalent_siblings(
+    absolute: str, parent: str, basename: str
+) -> Tuple[str, Tuple[str, ...]]:
+    """Return the filesystem spelling and any real case-colliding siblings."""
+
+    try:
+        names = tuple(str(value) for value in os.listdir(windows_long_path(parent)))
+    except OSError:
+        return basename, ()
+    matches = tuple(
+        sorted(
+            {name for name in names if name.casefold() == basename.casefold()},
+            key=lambda value: (value.casefold(), value),
+        )
+    )
+    if not matches:
+        return basename, ()
+    if basename in matches:
+        actual = basename
+    elif len(matches) == 1:
+        # A differently cased spelling of one file on a case-insensitive
+        # filesystem must retain that file's identity, not create an alias ID.
+        actual = matches[0]
+    else:
+        path_module = ntpath if _looks_like_windows_path(parent) else os.path
+        same_files = []
+        for candidate in matches:
+            try:
+                if os.path.samefile(
+                    windows_long_path(absolute),
+                    windows_long_path(path_module.join(parent, candidate)),
+                ):
+                    same_files.append(candidate)
+            except OSError:
+                continue
+        # Do not guess when an alias cannot be tied to exactly one colliding
+        # directory entry. The later source read will report the inaccessible
+        # path, while state identity remains on the compatible legacy branch.
+        if len(same_files) != 1:
+            return basename, ()
+        actual = same_files[0]
+    return actual, matches if len(matches) > 1 else ()
+
+
+def _case_discriminator(actual_basename: str) -> str:
+    return hashlib.sha256(
+        actual_basename.encode("utf-8", "surrogatepass")
+    ).hexdigest()[:12]
+
+
+def _discriminated_sidecar_exists(root: str, dataset_id: str) -> bool:
+    path_module = ntpath if _looks_like_windows_path(root) else os.path
+    directory = path_module.join(root, STATE_DIRECTORY)
+    candidates = (
+        path_module.join(directory, f"structure_annotator.{dataset_id}.json"),
+        path_module.join(
+            directory,
+            f"structure_annotator.{dataset_id}.annotations.jsonl",
+        ),
+    )
+    return any(os.path.isfile(windows_long_path(path)) for path in candidates)
+
+
+def _csv_identity_marker_path(root: str, legacy_dataset_id: str) -> str:
+    path_module = ntpath if _looks_like_windows_path(root) else os.path
+    return path_module.join(
+        root,
+        STATE_DIRECTORY,
+        f"structure_annotator.{legacy_dataset_id}.identity.json",
+    )
+
+
+def _legacy_marker_basename(
+    root: str, legacy_dataset_id: str
+) -> Optional[str]:
+    path = _csv_identity_marker_path(root, legacy_dataset_id)
+    resolved = windows_long_path(path)
+    try:
+        if os.path.getsize(resolved) > MAX_STATE_BYTES:
+            return None
+        with open(resolved, "r", encoding="utf-8") as handle:
+            document = json.load(handle)
+        if not (
+            isinstance(document, dict)
+            and document.get("schema") == CSV_IDENTITY_SCHEMA
+            and document.get("legacy_dataset_id") == legacy_dataset_id
+            and isinstance(document.get("basename"), str)
+            and document.get("basename")
+        ):
+            return None
+        return str(document["basename"])
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+
+
+def _legacy_marker_owner(
+    root: str, legacy_dataset_id: str, actual_basename: str
+) -> bool:
+    return _legacy_marker_basename(root, legacy_dataset_id) == actual_basename
+
+
+def _legacy_marker_conflicts(
+    absolute: str,
+    root: str,
+    legacy_dataset_id: str,
+    actual_basename: str,
+) -> bool:
+    """Whether a durable exact owner proves this is a different CSV file."""
+
+    owner = _legacy_marker_basename(root, legacy_dataset_id)
+    if not owner or owner == actual_basename:
+        return False
+    path_module = ntpath if _looks_like_windows_path(root) else os.path
+    try:
+        # A case-insensitive filesystem may expose the same file through the
+        # old spelling after a case-only rename. Preserve legacy identity then.
+        return not os.path.samefile(
+            windows_long_path(absolute),
+            windows_long_path(path_module.join(root, owner)),
+        )
+    except OSError:
+        return True
+
+
+def _legacy_state_owner(
+    root: str, legacy_dataset_id: str, actual_basename: str
+) -> bool:
+    """Whether the shared legacy state unambiguously names this exact sibling."""
+
+    path_module = ntpath if _looks_like_windows_path(root) else os.path
+    path = path_module.join(
+        root,
+        STATE_DIRECTORY,
+        f"structure_annotator.{legacy_dataset_id}.json",
+    )
+    resolved = windows_long_path(path)
+    try:
+        if os.path.getsize(resolved) > MAX_STATE_BYTES:
+            return _legacy_marker_owner(
+                root, legacy_dataset_id, actual_basename
+            )
+        with open(resolved, "r", encoding="utf-8") as handle:
+            document = json.load(handle)
+        source = document.get("source") if isinstance(document, dict) else None
+        csv_path = source.get("csv_path") if isinstance(source, dict) else None
+        if not isinstance(csv_path, str) or not csv_path:
+            return _legacy_marker_owner(
+                root, legacy_dataset_id, actual_basename
+            )
+        _, _, persisted_basename = _path_parts(csv_path)
+        return persisted_basename == actual_basename
+    except (OSError, UnicodeError, json.JSONDecodeError, StateStoreError):
+        return _legacy_marker_owner(
+            root, legacy_dataset_id, actual_basename
+        )
+
+
+def _write_csv_identity_marker(
+    state_dir: str, identity: CsvDatasetIdentity
+) -> str:
+    """Persist exact legacy ownership independently from mutable UI state."""
+
+    path_module = ntpath if _looks_like_windows_path(state_dir) else os.path
+    root = path_module.dirname(state_dir)
+    destination = _csv_identity_marker_path(
+        root, identity.legacy_dataset_id
+    )
+    if _legacy_marker_owner(
+        root, identity.legacy_dataset_id, identity.actual_basename
+    ):
+        return destination
+    document = {
+        "schema": CSV_IDENTITY_SCHEMA,
+        "legacy_dataset_id": identity.legacy_dataset_id,
+        "basename": identity.actual_basename,
+    }
+    serialized = json.dumps(
+        document, indent=2, sort_keys=True, ensure_ascii=False
+    ) + "\n"
+    resolved_dir = windows_long_path(state_dir)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".structure_annotator_identity.",
+        suffix=".tmp",
+        dir=resolved_dir,
+    )
+    try:
+        with os.fdopen(
+            descriptor, "w", encoding="utf-8", newline="\n"
+        ) as handle:
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, windows_long_path(destination))
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+    return destination
+
+
+def csv_dataset_identity(csv_path: str) -> CsvDatasetIdentity:
+    """Return legacy-compatible identity plus a real collision discriminator."""
+
+    absolute, parent, basename = _path_parts(csv_path)
+    from pymolplugins.remote.ssh import is_ssh_path
+    if is_ssh_path(absolute):
+        namespace = hashlib.sha256(absolute.encode("utf-8")).hexdigest()[:24]
+        dataset_id = "ssh." + namespace
+        return CsvDatasetIdentity(basename, basename, dataset_id, dataset_id, namespace, namespace)
+    actual, collisions = _case_equivalent_siblings(absolute, parent, basename)
+    legacy_id = _legacy_csv_dataset_id(basename)
+    legacy_namespace = _legacy_csv_namespace(basename)
+    discriminator = _case_discriminator(actual)
+    candidate_id = f"{legacy_id}.case-{discriminator}"
+    persisted_discriminator = _discriminated_sidecar_exists(parent, candidate_id)
+    legacy_owner = bool(collisions) and _legacy_state_owner(
+        parent, legacy_id, actual
+    )
+    marker_conflict = _legacy_marker_conflicts(
+        absolute, parent, legacy_id, actual
+    )
+    use_discriminator = persisted_discriminator or marker_conflict or (
+        bool(collisions) and not legacy_owner
+    )
+    if not use_discriminator:
+        discriminator = ""
+        dataset_id = legacy_id
+        namespace = legacy_namespace
+    else:
+        dataset_id = candidate_id
+        namespace = hashlib.sha256(
+            (legacy_namespace + "\0case:" + actual).encode(
+                "utf-8", "surrogatepass"
+            )
+        ).hexdigest()[:16]
+    return CsvDatasetIdentity(
+        basename=basename,
+        actual_basename=actual,
+        legacy_dataset_id=legacy_id,
+        dataset_id=dataset_id,
+        legacy_namespace=legacy_namespace,
+        namespace=namespace,
+        discriminator=discriminator,
+        collision_names=collisions,
+    )
+
+
+def csv_dataset_id(csv_path: str) -> str:
+    """Return the portable, collision-aware sidecar identity for one CSV."""
+
+    return csv_dataset_identity(csv_path).dataset_id
+
+
+def csv_dataset_namespace(csv_path: str) -> str:
+    """Return the row-ID namespace paired with :func:`csv_dataset_id`."""
+
+    return csv_dataset_identity(csv_path).namespace
 
 
 def _csv_state_filename(csv_path: str) -> str:
@@ -126,6 +419,7 @@ def _resolve_source(
     if inferred_mode is None and csv_path:
         inferred_mode = "csv"
     mode = _canonical_source_mode(inferred_mode)
+    from pymolplugins.remote.ssh import is_ssh_path, ssh_source_root
 
     if mode == "csv":
         candidate = csv_path or raw_source.get("csv_path") or raw_source.get("path")
@@ -138,13 +432,13 @@ def _resolve_source(
         descriptor["mode"] = "csv"
         descriptor["csv_path"] = absolute
         descriptor.pop("path", None)
-        return mode, absolute, parent, descriptor
+        return mode, absolute, ssh_source_root(absolute) if is_ssh_path(absolute) else parent, descriptor
 
     absolute = _absolute_path(dataset_dir)
     descriptor = raw_source
     descriptor["mode"] = "directory"
     descriptor["dataset_dir"] = absolute
-    return mode, absolute, absolute, descriptor
+    return mode, absolute, ssh_source_root(absolute) if is_ssh_path(absolute) else absolute, descriptor
 
 
 def dataset_state_directory(
@@ -172,9 +466,10 @@ def dataset_state_path(
 
     Existing callers keep using ``dataset_state_path(dataset_dir)``.  CSV
     callers may use either ``dataset_state_path(csv_path, source_mode="csv")``
-    or pass the path through the ``csv_path`` keyword.  The hash is derived
-    from the case-folded CSV basename, so aliasing or moving the dataset and
-    its hidden directory does not change the state identity.
+    or pass the path through the ``csv_path`` keyword. Ordinary identities are
+    derived from the case-folded basename; an exact-case discriminator is used
+    only for real sibling collisions. Aliasing or moving the dataset and its
+    hidden directory therefore does not normally change the identity.
     """
 
     mode, source_path, root, _ = _resolve_source(
@@ -183,6 +478,52 @@ def dataset_state_path(
     path_module = ntpath if _looks_like_windows_path(root) else os.path
     filename = STATE_FILENAME if mode == "directory" else _csv_state_filename(source_path)
     return path_module.join(root, STATE_DIRECTORY, filename)
+
+
+def quarantine_invalid_dataset_state(
+    dataset_dir: str,
+    *,
+    source_mode: Optional[str] = None,
+    csv_path: Optional[str] = None,
+) -> Optional[str]:
+    """Preserve an invalid state file before a successful load repairs it.
+
+    A valid or missing state returns ``None``. Invalid content is moved beside
+    the original with a bounded ``.corrupt-*`` suffix; it is never deleted.
+    """
+
+    path = dataset_state_path(
+        dataset_dir,
+        source_mode=source_mode,
+        csv_path=csv_path,
+    )
+    resolved = windows_long_path(path)
+    if not os.path.exists(resolved):
+        return None
+    try:
+        read_dataset_state(
+            dataset_dir,
+            source_mode=source_mode,
+            csv_path=csv_path,
+        )
+        return None
+    except StateStoreError:
+        pass
+    stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+    for index in range(100):
+        suffix = f".corrupt-{stamp}" if index == 0 else f".corrupt-{stamp}-{index}"
+        candidate = path + suffix
+        resolved_candidate = windows_long_path(candidate)
+        if os.path.exists(resolved_candidate):
+            continue
+        try:
+            os.replace(resolved, resolved_candidate)
+        except OSError as exc:
+            raise StateStoreError(
+                f"cannot quarantine invalid state file: {exc}"
+            ) from exc
+        return candidate
+    raise StateStoreError("cannot choose a quarantine path for invalid state")
 
 
 def mark_hidden_on_windows(path: str) -> None:
@@ -399,9 +740,15 @@ def write_dataset_state(
         csv_path=csv_path,
         source=raw_source if isinstance(raw_source, Mapping) else None,
     )
+    from pymolplugins.remote.ssh import is_ssh_path
+    if is_ssh_path(source_path):
+        os.makedirs(windows_long_path(root), exist_ok=True)
     if not os.path.isdir(windows_long_path(root)):
         kind = "CSV parent directory" if mode == "csv" else "dataset directory"
         raise StateStoreError(f"{kind} does not exist: {root}")
+    csv_identity = (
+        csv_dataset_identity(source_path) if mode == "csv" else None
+    )
 
     state_dir = dataset_state_directory(
         dataset_dir,
@@ -430,11 +777,20 @@ def write_dataset_state(
         raise StateStoreError(
             f"state document exceeds {MAX_STATE_BYTES} bytes: {encoded_size}"
         )
-    destination = dataset_state_path(
-        dataset_dir,
-        source_mode=mode,
-        csv_path=source_path if mode == "csv" else None,
-    )
+    if csv_identity is not None:
+        path_module = ntpath if _looks_like_windows_path(root) else os.path
+        destination = path_module.join(
+            state_dir,
+            f"structure_annotator.{csv_identity.dataset_id}.json",
+        )
+        if not csv_identity.is_discriminated:
+            _write_csv_identity_marker(state_dir, csv_identity)
+    else:
+        destination = dataset_state_path(
+            dataset_dir,
+            source_mode=mode,
+            csv_path=None,
+        )
     resolved_destination = windows_long_path(destination)
     descriptor_fd, temporary = tempfile.mkstemp(
         prefix=".structure_annotator.", suffix=".tmp", dir=resolved_dir
@@ -457,6 +813,8 @@ def write_dataset_state(
 
 
 __all__ = [
+    "CSV_IDENTITY_SCHEMA",
+    "CsvDatasetIdentity",
     "MAX_STATE_BYTES",
     "STATE_DIRECTORY",
     "STATE_FILENAME",
@@ -464,9 +822,12 @@ __all__ = [
     "STATE_SCHEMA_V1",
     "StateStoreError",
     "csv_dataset_id",
+    "csv_dataset_identity",
+    "csv_dataset_namespace",
     "dataset_state_directory",
     "dataset_state_path",
     "mark_hidden_on_windows",
+    "quarantine_invalid_dataset_state",
     "read_dataset_state",
     "write_dataset_state",
 ]

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import csv
+from collections import Counter
 from dataclasses import dataclass
 import hashlib
 import io
-import ntpath
 import os
+import posixpath
 import re
 from typing import Dict, List, Optional, Sequence, TextIO, Tuple
 
@@ -22,6 +23,8 @@ from pymolplugins.annotation.model import (
     build_column_specs_from_metadata,
     build_display_metadata,
 )
+from pymolplugins.annotation.state_store import csv_dataset_namespace
+from pymolplugins.remote.ssh import SshClient, is_ssh_path, local_source_file, normalize_source_path, parse_ssh_path
 
 
 AUTO_DELIMITER = "auto"
@@ -39,6 +42,10 @@ class CsvSourceError(DatasetSourceError):
     """Raised when a CSV dataset cannot satisfy its declared contract."""
 
 
+class CsvReadCancelled(CsvSourceError):
+    """Raised when a caller cancels CSV parsing at a record boundary."""
+
+
 @dataclass(frozen=True)
 class CsvSourceConfig:
     """Serializable configuration for a CSV dataset source."""
@@ -50,6 +57,7 @@ class CsvSourceConfig:
     encoding: str = DEFAULT_ENCODING
     delimiter: str = AUTO_DELIMITER
     source_base: str = ""
+    label_column: str = ""
 
 
 @dataclass(frozen=True)
@@ -113,7 +121,19 @@ def _detect_delimiter(sample: str, path_column: str) -> str:
         # A one-column document looks identical under every candidate.  Comma
         # is the least surprising persisted value in that case.
         return "," if "," in matches else matches[0]
-    return sniffed or ","
+    # Sniffer can reject a valid TSV when the sample ends inside a record or
+    # contains ragged data. Header discovery must still expose its columns.
+    return sniffed or max(candidates, key=lambda value: len(_header_from_sample(sample, value)))
+
+
+def _validate_column_names(header: Tuple[str, ...]) -> None:
+    if not header:
+        raise CsvSourceError("CSV document is empty or has no header")
+    if any(name == "" for name in header):
+        raise CsvSourceError("CSV header contains an empty column name")
+    duplicates = sorted(name for name, count in Counter(header).items() if count > 1)
+    if duplicates:
+        raise CsvSourceError("CSV header contains duplicate columns: %s" % ", ".join(duplicates))
 
 
 def _validate_header(
@@ -122,16 +142,9 @@ def _validate_header(
     path_column: str,
     id_column: str,
     display_columns: Optional[Tuple[str, ...]],
+    label_column: str = "",
 ) -> Tuple[str, ...]:
-    if not header:
-        raise CsvSourceError("CSV document is empty or has no header")
-    if any(name == "" for name in header):
-        raise CsvSourceError("CSV header contains an empty column name")
-    duplicates = sorted({name for name in header if header.count(name) > 1})
-    if duplicates:
-        raise CsvSourceError(
-            "CSV header contains duplicate columns: %s" % ", ".join(duplicates)
-        )
+    _validate_column_names(header)
     if path_column not in header:
         raise CsvSourceError(
             "path_column %r is not an exact CSV column; available: %s"
@@ -141,6 +154,11 @@ def _validate_header(
         raise CsvSourceError(
             "id_column %r is not an exact CSV column; available: %s"
             % (id_column, ", ".join(repr(name) for name in header))
+        )
+    if label_column and label_column not in header:
+        raise CsvSourceError(
+            "label_column %r is not an exact CSV column; available: %s"
+            % (label_column, ", ".join(repr(name) for name in header))
         )
     if display_columns is None:
         return tuple(name for name in header if name != path_column)
@@ -155,22 +173,15 @@ def _validate_header(
 
 
 def _dataset_namespace(source_path: str) -> str:
-    """Return a portable namespace which separates ordinary CSV datasets.
+    """Return the portable, collision-aware namespace for one CSV dataset.
 
     The basename is intentional: moving a CSV together with its hidden
     sidecars keeps row identities stable across ``K:``, UNC and WSL aliases.
-    Runtime generation checks still isolate the rare case of two simultaneously
-    visited CSV files with the same basename.
+    Exact-case discrimination separates case-distinct siblings when the
+    underlying filesystem can represent both.
     """
 
-    basename = (
-        ntpath.basename(source_path)
-        if ntpath.splitdrive(source_path)[0] or source_path.startswith("\\\\")
-        else os.path.basename(source_path)
-    ).casefold()
-    return hashlib.sha256(
-        basename.encode("utf-8", errors="surrogatepass")
-    ).hexdigest()[:16]
+    return csv_dataset_namespace(source_path)
 
 
 def _stable_id(
@@ -197,16 +208,24 @@ def _path_display_name(path: str, row_number: int) -> str:
 
 
 def _parse_csv_stream(
-    handle: TextIO, delimiter: str
+    handle: TextIO, delimiter: str, *, header_validator=None,
+    cancel_event=None, progress=None,
 ) -> Tuple[Tuple[str, ...], Tuple[_RawRow, ...]]:
     reader = csv.reader(handle, delimiter=delimiter, strict=True)
     try:
         header = tuple(next(reader))
     except StopIteration:
         return (), ()
+    if header_validator is not None:
+        header_validator(header)
     rows: List[_RawRow] = []
     ordinal = 0
     while True:
+        if ordinal % 1024 == 0:
+            if cancel_event is not None and cancel_event.is_set():
+                raise CsvReadCancelled("CSV reading cancelled")
+            if progress is not None:
+                progress(ordinal)
         row_number = reader.line_num + 1
         try:
             raw = next(reader)
@@ -230,7 +249,34 @@ def _parse_csv_stream(
             )
         )
         ordinal += 1
+    if progress is not None:
+        progress(ordinal)
     return header, tuple(rows)
+
+
+def read_csv_header(
+    csv_path: str, *, encoding: str = DEFAULT_ENCODING,
+    delimiter: str = AUTO_DELIMITER,
+    cancel_event=None,
+) -> Dict[str, object]:
+    """Read exact column names without requiring a path column or reading rows."""
+    selected = _normalize_delimiter(delimiter)
+    if is_ssh_path(csv_path):
+        result = SshClient(csv_path).read_header(encoding=encoding, delimiter=selected, cancel_event=cancel_event)
+        result["columns"] = tuple(result["columns"])
+        _validate_column_names(result["columns"])
+        return result
+    try:
+        with local_source_file(csv_path, cancel_event=cancel_event) as local_path, open(local_path, "r", encoding=encoding, newline="") as handle:
+            if selected == AUTO_DELIMITER:
+                sample = handle.read(65536)
+                selected = _detect_delimiter(sample, "")
+                handle.seek(0)
+            header = tuple(next(csv.reader(handle, delimiter=selected, strict=True), ()))
+    except (OSError, UnicodeError, LookupError, csv.Error) as exc:
+        raise CsvSourceError(f"cannot read CSV header {csv_path}: {exc}") from exc
+    _validate_column_names(header)
+    return {"columns": header, "delimiter": selected, "encoding": encoding}
 
 
 def _nonempty_id_counts(
@@ -282,12 +328,15 @@ def _entry_from_row(
     source_base: str,
     validation_errors: Tuple[str, ...],
     column_specs: Sequence[ColumnSpec],
+    label_column: str = "",
 ) -> AnnotationEntry:
     return AnnotationEntry(
         id=entry_id,
         ordinal=row.ordinal,
         display_name=(
-            raw_id
+            row.metadata[label_column]
+            if label_column and row.metadata[label_column].strip()
+            else raw_id
             if id_column and raw_id.strip()
             else _path_display_name(raw_path, row.row_number)
         ),
@@ -313,6 +362,7 @@ def _build_entries(
     id_column: str,
     source_base: str,
     column_specs: Sequence[ColumnSpec],
+    label_column: str = "",
 ) -> Tuple[AnnotationEntry, ...]:
     id_counts = _nonempty_id_counts(rows, id_column)
     id_occurrences: Dict[str, int] = {}
@@ -344,6 +394,7 @@ def _build_entries(
                 source_base=source_base,
                 validation_errors=errors,
                 column_specs=column_specs,
+                label_column=label_column,
             )
         )
     return tuple(entries)
@@ -362,6 +413,7 @@ class CsvDatasetSource(DatasetSource):
         encoding: str = DEFAULT_ENCODING,
         delimiter: str = AUTO_DELIMITER,
         source_base: str = "",
+        label_column: str = "",
     ) -> None:
         if not str(csv_path):
             raise CsvSourceError("csv_path is required")
@@ -382,6 +434,7 @@ class CsvDatasetSource(DatasetSource):
             encoding=str(encoding or DEFAULT_ENCODING),
             delimiter=_normalize_delimiter(delimiter),
             source_base=str(source_base or ""),
+            label_column=str(label_column or ""),
         )
 
     @classmethod
@@ -394,56 +447,46 @@ class CsvDatasetSource(DatasetSource):
             encoding=config.encoding,
             delimiter=config.delimiter,
             source_base=config.source_base,
+            label_column=config.label_column,
         )
 
-    def _read_sample(self, source_path: str) -> str:
-        try:
-            with open(
-                source_path,
-                "r",
-                encoding=self.config.encoding,
-                newline="",
-            ) as handle:
-                return handle.read(65536)
-        except (OSError, UnicodeError, LookupError) as exc:
-            raise CsvSourceError("cannot read CSV %s: %s" % (source_path, exc)) from exc
-
-    def _read_rows(
-        self, source_path: str, delimiter: str
-    ) -> Tuple[Tuple[str, ...], Tuple[_RawRow, ...]]:
-        try:
-            with open(
-                source_path,
-                "r",
-                encoding=self.config.encoding,
-                newline="",
-            ) as handle:
-                return _parse_csv_stream(handle, delimiter)
-        except CsvSourceError:
-            raise
-        except (OSError, UnicodeError, LookupError, csv.Error) as exc:
-            raise CsvSourceError("cannot parse CSV %s: %s" % (source_path, exc)) from exc
-
-    def load(self) -> AnnotationDataset:
-        """Parse the CSV and infer typed display values for selected columns."""
-
-        # abspath is intentional, but expanduser is not: a literal ~/ prefix in
-        # a source path belongs to the later remote-path resolver.
-        source_path = os.path.abspath(self.config.csv_path)
-        sample = self._read_sample(source_path)
-        if not sample:
-            raise CsvSourceError("CSV document is empty or has no header")
+    def _read_rows(self, source_path: str, *, cancel_event=None, progress=None):
         delimiter = self.config.delimiter
-        if delimiter == AUTO_DELIMITER:
-            delimiter = _detect_delimiter(sample, self.config.path_column)
-        header, rows = self._read_rows(source_path, delimiter)
+        def validate(header):
+            return _validate_header(
+                header, path_column=self.config.path_column,
+                id_column=self.config.id_column,
+                display_columns=self.config.display_columns,
+                label_column=self.config.label_column,
+            )
+        try:
+            with open(source_path, "r", encoding=self.config.encoding, newline="") as handle:
+                if delimiter == AUTO_DELIMITER:
+                    sample = handle.read(65536)
+                    delimiter = _detect_delimiter(sample, self.config.path_column)
+                    handle.seek(0)
+                header, rows = _parse_csv_stream(
+                    handle, delimiter, header_validator=validate,
+                    cancel_event=cancel_event, progress=progress,
+                )
+        except (OSError, UnicodeError, LookupError, csv.Error) as exc:
+            raise CsvSourceError(f"cannot parse CSV {source_path}: {exc}") from exc
+        return header, rows, delimiter
+
+    def load(self, *, cancel_event=None, progress=None) -> AnnotationDataset:
+        """Parse rows once, checking the declared columns before the data records."""
+        source_path = normalize_source_path(self.config.csv_path)
+        with local_source_file(source_path, cancel_event=cancel_event) as local_path:
+            header, rows, delimiter = self._read_rows(
+                local_path, cancel_event=cancel_event, progress=progress
+            )
         display_columns = _validate_header(
-            header,
-            path_column=self.config.path_column,
-            id_column=self.config.id_column,
-            display_columns=self.config.display_columns,
+            header, path_column=self.config.path_column,
+            id_column=self.config.id_column, display_columns=self.config.display_columns,
+            label_column=self.config.label_column,
         )
-        source_base = self.config.source_base or os.path.dirname(source_path)
+        parent = posixpath.dirname(parse_ssh_path(source_path).path) if is_ssh_path(source_path) else os.path.dirname(source_path)
+        source_base = self.config.source_base or parent
         specs = build_column_specs_from_metadata(
             tuple(row.metadata for row in rows), display_columns
         )
@@ -454,6 +497,7 @@ class CsvDatasetSource(DatasetSource):
             id_column=self.config.id_column,
             source_base=source_base,
             column_specs=specs,
+            label_column=self.config.label_column,
         )
         return AnnotationDataset(
             source_kind="csv",
@@ -467,6 +511,7 @@ class CsvDatasetSource(DatasetSource):
             id_column=self.config.id_column,
             delimiter=delimiter,
             encoding=self.config.encoding,
+            label_column=self.config.label_column,
         )
 
 
@@ -490,5 +535,7 @@ __all__ = [
     "CsvDatasetSource",
     "CsvSourceConfig",
     "CsvSourceError",
+    "CsvReadCancelled",
+    "read_csv_header",
     "load_csv_dataset",
 ]

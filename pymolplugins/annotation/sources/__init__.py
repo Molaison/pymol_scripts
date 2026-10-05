@@ -16,6 +16,7 @@ from .directory import (
     DirectorySource,
     DirectorySourceConfig,
     DirectorySourceError,
+    directory_entry_id,
     load_directory_dataset,
 )
 
@@ -33,6 +34,7 @@ __all__ = [
     "DirectorySource",
     "DirectorySourceConfig",
     "DirectorySourceError",
+    "directory_entry_id",
     "load_csv_dataset",
     "load_directory_dataset",
 ]

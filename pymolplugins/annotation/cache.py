@@ -20,6 +20,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, Mapping, Optional, Set, Union
 
+from pymolplugins.core.windows_paths import windows_long_path
+
 
 CACHE_SCHEMA = "pymolplugins.structure-cache/1.0"
 CACHE_STATUS_SCHEMA = "pymolplugins.structure-cache-status/1.0"
@@ -129,7 +131,7 @@ def sha256_file(path: str, chunk_size: int = 1024 * 1024) -> str:
     """Return a streaming SHA-256 digest without loading the file into RAM."""
 
     digest = hashlib.sha256()
-    with open(path, "rb") as handle:
+    with open(windows_long_path(path), "rb") as handle:
         while True:
             block = handle.read(chunk_size)
             if not block:
@@ -198,7 +200,7 @@ class SourceIdentity:
         resolved and canonicalized.
         """
 
-        physical = os.path.abspath(os.path.expanduser(os.fspath(path)))
+        physical = windows_long_path(os.path.abspath(os.path.expanduser(os.fspath(path))))
         try:
             stat_result = os.stat(physical)
         except OSError as exc:

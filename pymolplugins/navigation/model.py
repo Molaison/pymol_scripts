@@ -126,16 +126,26 @@ class NavigationSession:
         if candidate <= maximum:
             self.cursor = candidate
             return self.cursor
+        # Do not silently skip the complete tail window when ``maximum`` is
+        # off the stride grid (for example five entries, window=2, stride=2).
+        # A second call from that tail window advances to the next batch.
+        if self.cursor < maximum:
+            self.cursor = maximum
+            return self.cursor
         next_batch = self.batch_index + 1
         if next_batch >= self.batch_count:
             if not self.wrap:
-                self.cursor = maximum
                 return self.cursor
             next_batch = 0
         self.cursor = next_batch * self.batch_size
         return self.cursor
 
     def previous(self) -> int:
+        maximum = self._max_window_start(self.batch_start, self.batch_end)
+        last_stride = self._last_stride_start(self.batch_start, self.batch_end)
+        if self.cursor == maximum and maximum != last_stride:
+            self.cursor = last_stride
+            return self.cursor
         candidate = self.cursor - self.stride
         if candidate >= self.batch_start:
             self.cursor = candidate
@@ -148,20 +158,24 @@ class NavigationSession:
             previous_batch = self.batch_count - 1
         start = previous_batch * self.batch_size
         end = min(start + self.batch_size, self.count)
-        self.cursor = self._last_stride_start(start, end)
+        self.cursor = self._max_window_start(start, end)
         return self.cursor
 
     def next_batch(self) -> int:
         index = self.batch_index + 1
         if index >= self.batch_count:
-            index = 0 if self.wrap else self.batch_count - 1
+            if not self.wrap:
+                return self.cursor
+            index = 0
         self.cursor = index * self.batch_size
         return self.cursor
 
     def previous_batch(self) -> int:
         index = self.batch_index - 1
         if index < 0:
-            index = self.batch_count - 1 if self.wrap else 0
+            if not self.wrap:
+                return self.cursor
+            index = self.batch_count - 1
         self.cursor = index * self.batch_size
         return self.cursor
 
@@ -169,7 +183,12 @@ class NavigationSession:
         index = int(index)
         if index < 0 or index >= self.count:
             raise NavigationError(f"index must be in [0, {self.count - 1}]")
-        self.cursor = self._clamp_cursor(index)
+        # ``goto`` names an entry, not a preferred full-window start.  Keeping
+        # the exact index makes status, hooks, and a following ``pin`` refer to
+        # the position the user requested.  A tail window may therefore be
+        # shorter; ordinary next/previous stepping still lands on complete
+        # tail windows whenever possible.
+        self.cursor = index
         return self.cursor
 
     def pin(self, entry_id: Optional[str] = None) -> str:
@@ -183,6 +202,9 @@ class NavigationSession:
         target = self.entries[self.cursor].id if entry_id is None else str(entry_id)
         self.pinned_entry_ids.discard(target)
         return target
+
+    def clear_pins(self) -> None:
+        self.pinned_entry_ids.clear()
 
     def status(self) -> Dict[str, object]:
         return {

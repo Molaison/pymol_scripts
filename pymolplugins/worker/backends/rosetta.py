@@ -51,6 +51,18 @@ class RosettaBackendError(RuntimeError):
     """Typed backend failure suitable for an HTTP error response."""
 
 
+class RosettaRequestError(RosettaBackendError):
+    """The request is invalid before scientific computation begins."""
+
+
+class RosettaUnavailableError(RosettaBackendError):
+    """PyRosetta is not installed or importable in this worker environment."""
+
+
+class RosettaScientificContractError(RosettaBackendError):
+    """The installed backend produced a value outside the result contract."""
+
+
 class RosettaBackend:
     """Initialize PyRosetta once and evaluate requests serially."""
 
@@ -91,6 +103,14 @@ class RosettaBackend:
             "license_note": (
                 "PyRosetta is separately licensed and is not distributed by this repository."
             ),
+            "action": (
+                None
+                if self._pyrosetta is not None
+                else (
+                    "Install or activate a licensed PyRosetta build in this worker "
+                    "environment, then restart the worker."
+                )
+            ),
         }
 
     def capabilities(self) -> Dict[str, object]:
@@ -110,18 +130,18 @@ class RosettaBackend:
         required: Sequence[str] = (),
     ) -> Mapping[str, object]:
         if not isinstance(value, Mapping):
-            raise RosettaBackendError(f"{name} must be an object")
+            raise RosettaRequestError(f"{name} must be an object")
         non_string = [key for key in value if not isinstance(key, str)]
         if non_string:
-            raise RosettaBackendError(f"{name} field names must be strings")
+            raise RosettaRequestError(f"{name} field names must be strings")
         unknown = sorted(set(value).difference(allowed))
         if unknown:
-            raise RosettaBackendError(
+            raise RosettaRequestError(
                 f"unknown {name} fields: {', '.join(unknown)}"
             )
         missing = [field for field in required if field not in value]
         if missing:
-            raise RosettaBackendError(
+            raise RosettaRequestError(
                 f"missing {name} fields: {', '.join(missing)}"
             )
         return value
@@ -135,23 +155,23 @@ class RosettaBackend:
         for name, raw in options.items():
             if name in BOOLEAN_OPTIONS:
                 if not isinstance(raw, bool):
-                    raise RosettaBackendError(f"options.{name} must be a boolean")
+                    raise RosettaRequestError(f"options.{name} must be a boolean")
                 normalized[name] = raw
                 continue
             if name in NUMERIC_OPTIONS:
                 if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-                    raise RosettaBackendError(f"options.{name} must be a number")
+                    raise RosettaRequestError(f"options.{name} must be a number")
                 numeric = float(raw)
                 if not math.isfinite(numeric):
-                    raise RosettaBackendError(f"options.{name} must be finite")
+                    raise RosettaRequestError(f"options.{name} must be finite")
                 if name == "probe_radius" and numeric <= 0.0:
-                    raise RosettaBackendError("options.probe_radius must be > 0")
+                    raise RosettaRequestError("options.probe_radius must be > 0")
                 if name in {
                     "distance_weight",
                     "filtered_area",
                     "burial_cutoff",
                 } and numeric < 0.0:
-                    raise RosettaBackendError(f"options.{name} must be >= 0")
+                    raise RosettaRequestError(f"options.{name} must be >= 0")
                 normalized[name] = numeric
         return normalized
 
@@ -165,10 +185,10 @@ class RosettaBackend:
         )
         structure_format = structure.get("format")
         if not isinstance(structure_format, str) or structure_format.lower() != "pdb":
-            raise RosettaBackendError("only structure.format='pdb' is supported")
+            raise RosettaRequestError("only structure.format='pdb' is supported")
         text = structure.get("text")
         if not isinstance(text, str) or not text.strip():
-            raise RosettaBackendError("structure.text must contain PDB text")
+            raise RosettaRequestError("structure.text must contain PDB text")
         return text
 
     @classmethod
@@ -183,7 +203,7 @@ class RosettaBackend:
         binder = cls._chains(partners.get("binder_chains"), "binder_chains")
         overlap = sorted(set(target).intersection(binder))
         if overlap:
-            raise RosettaBackendError(
+            raise RosettaRequestError(
                 "target_chains and binder_chains must be disjoint; overlap: "
                 + ", ".join(overlap)
             )
@@ -192,15 +212,15 @@ class RosettaBackend:
     @staticmethod
     def _parse_metrics(value: object) -> List[str]:
         if not isinstance(value, list) or not value:
-            raise RosettaBackendError("metrics must be a non-empty list")
+            raise RosettaRequestError("metrics must be a non-empty list")
         if any(not isinstance(item, str) or not item for item in value):
-            raise RosettaBackendError("every metrics entry must be a non-empty string")
+            raise RosettaRequestError("every metrics entry must be a non-empty string")
         requested = list(value)
         if len(set(requested)) != len(requested):
-            raise RosettaBackendError("metrics must not contain duplicates")
+            raise RosettaRequestError("metrics must not contain duplicates")
         unsupported = sorted(set(requested).difference(SUPPORTED_METRICS))
         if unsupported:
-            raise RosettaBackendError("unsupported metrics: " + ", ".join(unsupported))
+            raise RosettaRequestError("unsupported metrics: " + ", ".join(unsupported))
         return requested
 
     def _parse_request(
@@ -218,7 +238,7 @@ class RosettaBackend:
             or not isinstance(schema_version, int)
             or schema_version != 1
         ):
-            raise RosettaBackendError("schema_version must be the integer 1")
+            raise RosettaRequestError("schema_version must be the integer 1")
 
         text = self._parse_structure(request.get("structure"))
         target_chains, binder_chains = self._parse_partners(request.get("partners"))
@@ -229,19 +249,43 @@ class RosettaBackend:
     @staticmethod
     def _integer_count(value: object, name: str, nonnegative: bool) -> int:
         if isinstance(value, bool):
-            raise RosettaBackendError(f"{name} returned a boolean, not a count")
+            raise RosettaScientificContractError(
+                f"{name} returned a boolean, not a count"
+            )
         try:
             numeric = float(value)
         except (TypeError, ValueError) as exc:
-            raise RosettaBackendError(f"{name} returned a non-numeric count") from exc
+            raise RosettaScientificContractError(
+                f"{name} returned a non-numeric count"
+            ) from exc
         if not math.isfinite(numeric) or not numeric.is_integer():
-            raise RosettaBackendError(
+            raise RosettaScientificContractError(
                 f"{name} returned a non-integral count: {value!r}"
             )
         result = int(numeric)
         if nonnegative and result < 0:
-            raise RosettaBackendError(f"{name} returned a negative count: {result}")
+            raise RosettaScientificContractError(
+                f"{name} returned a negative count: {result}"
+            )
         return result
+
+    @staticmethod
+    def _finite_float(value: object, name: str) -> float:
+        if isinstance(value, bool):
+            raise RosettaScientificContractError(
+                f"{name} returned a boolean, not a floating-point metric"
+            )
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError) as exc:
+            raise RosettaScientificContractError(
+                f"{name} returned a non-numeric metric"
+            ) from exc
+        if not math.isfinite(numeric):
+            raise RosettaScientificContractError(
+                f"{name} returned a non-finite metric: {value!r}"
+            )
+        return numeric
 
     @staticmethod
     def _pose_chains(pose) -> List[str]:
@@ -269,7 +313,7 @@ class RosettaBackend:
     ) -> List[str]:
         overlap = sorted(set(target_chains).intersection(binder_chains))
         if overlap:
-            raise RosettaBackendError(
+            raise RosettaRequestError(
                 "target_chains and binder_chains must be disjoint; overlap: "
                 + ", ".join(overlap)
             )
@@ -285,7 +329,7 @@ class RosettaBackend:
                 details.append("missing binder chains: " + ", ".join(missing_binder))
             display = [chain if chain else "<blank>" for chain in pose_chains]
             details.append("pose chains: " + (", ".join(display) or "<none>"))
-            raise RosettaBackendError("; ".join(details))
+            raise RosettaRequestError("; ".join(details))
         return pose_chains
 
     @staticmethod
@@ -462,7 +506,7 @@ class RosettaBackend:
     def _initialize(self):
         if self._pyrosetta is None:
             detail = str(self._import_error) if self._import_error else "not installed"
-            raise RosettaBackendError(f"PyRosetta is unavailable: {detail}")
+            raise RosettaUnavailableError(f"PyRosetta is unavailable: {detail}")
         if not self._initialized:
             try:
                 self._pyrosetta.init(self.init_flags)
@@ -476,20 +520,20 @@ class RosettaBackend:
     @staticmethod
     def _chains(value: object, name: str) -> List[str]:
         if not isinstance(value, list) or not value:
-            raise RosettaBackendError(f"partners.{name} must be a non-empty list")
+            raise RosettaRequestError(f"partners.{name} must be a non-empty list")
         chains = []
         for raw in value:
             if not isinstance(raw, str):
-                raise RosettaBackendError(
+                raise RosettaRequestError(
                     f"every partners.{name} entry must be a string"
                 )
             chain = raw.strip()
             if len(chain) != 1 or not chain.isalnum():
-                raise RosettaBackendError(
+                raise RosettaRequestError(
                     f"PDB chain '{chain}' in partners.{name} must be one alphanumeric character"
                 )
             if chain in chains:
-                raise RosettaBackendError(
+                raise RosettaRequestError(
                     f"partners.{name} must not contain duplicate chain '{chain}'"
                 )
             chains.append(chain)
@@ -500,12 +544,12 @@ class RosettaBackend:
             pose = pyrosetta.Pose()
             pyrosetta.rosetta.core.import_pose.pose_from_pdbstring(pose, text)
             if pose.total_residue() == 0:
-                raise RosettaBackendError("PDB text produced an empty pose")
+                raise RosettaRequestError("PDB text produced an empty pose")
             return pose
-        except RosettaBackendError:
+        except RosettaRequestError:
             raise
         except Exception as exc:
-            raise RosettaBackendError(f"failed to import PDB text: {exc}") from exc
+            raise RosettaRequestError(f"failed to import PDB text: {exc}") from exc
 
     @staticmethod
     def _selector(pyrosetta, chains: Sequence[str]):
@@ -526,7 +570,11 @@ class RosettaBackend:
                 cms_filter.distance_weight(float(options["distance_weight"]))
             if "filtered_area" in options:
                 cms_filter.filtered_area(float(options["filtered_area"]))
-            return float(cms_filter.compute(pose))
+            return self._finite_float(
+                cms_filter.compute(pose), "ContactMolecularSurface"
+            )
+        except RosettaScientificContractError:
+            raise
         except Exception as exc:
             raise RosettaBackendError(f"ContactMolecularSurface failed: {exc}") from exc
 
@@ -547,6 +595,8 @@ class RosettaBackend:
                 "BuriedUnsatHbondFilter",
                 nonnegative=True,
             )
+        except RosettaScientificContractError:
+            raise
         except Exception as exc:
             raise RosettaBackendError(f"bound buried-unsat calculation failed: {exc}") from exc
 
@@ -578,15 +628,25 @@ class RosettaBackend:
                 nonnegative=False,
             )
         if "interface_dsasa" in requested:
-            values["interface_dsasa"] = float(mover.get_interface_delta_sasa())
+            values["interface_dsasa"] = RosettaBackend._finite_float(
+                mover.get_interface_delta_sasa(),
+                "InterfaceAnalyzerMover interface dSASA",
+            )
         if "interface_dg" in requested:
-            values["interface_dg"] = float(mover.get_interface_dG())
+            values["interface_dg"] = RosettaBackend._finite_float(
+                mover.get_interface_dG(),
+                "InterfaceAnalyzerMover interface dG",
+            )
         if "shape_complementarity" in requested:
-            values["shape_complementarity"] = float(
-                mover.get_all_data().sc_value
+            values["shape_complementarity"] = RosettaBackend._finite_float(
+                mover.get_all_data().sc_value,
+                "InterfaceAnalyzerMover shape complementarity",
             )
         if "packstat" in requested:
-            values["packstat"] = float(mover.get_interface_packstat())
+            values["packstat"] = RosettaBackend._finite_float(
+                mover.get_interface_packstat(),
+                "InterfaceAnalyzerMover packstat",
+            )
         return values
 
     def analyze(self, request: Mapping[str, object]) -> Dict[str, object]:

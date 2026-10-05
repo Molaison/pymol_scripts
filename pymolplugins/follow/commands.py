@@ -28,6 +28,7 @@ try:
     )
     from pymolplugins.core.pymol_groups import (
         expand_names as expand_group_names,
+        group_parent_snapshot,
         groups_containing as metadata_groups_containing,
     )
 except ImportError:  # ``run /absolute/path/group_follow.py`` from PyMOL.
@@ -45,6 +46,7 @@ except ImportError:  # ``run /absolute/path/group_follow.py`` from PyMOL.
     )
     from pymolplugins.core.pymol_groups import (  # type: ignore
         expand_names as expand_group_names,
+        group_parent_snapshot,
         groups_containing as metadata_groups_containing,
     )
 
@@ -86,15 +88,100 @@ class FollowSession:
     expected_h: Dict[str, Matrix]
     source_group: str = ""
     source_group_leaves: Tuple[str, ...] = ()
+    group_inferred: bool = False
+    group_candidates: Tuple[str, ...] = ()
     cgo_policy: str = "skip_callback"
     allow_external_changes: bool = False
     skipped: Dict[str, str] = field(default_factory=dict)
+    rebuild_followers: Tuple[str, ...] = ()
     apply_count: int = 0
 
 
 _SESSION: Optional[FollowSession] = None
 _CALLBACK_OWNED: Set[str] = set()
 _REBUILD_HOOKS: Dict[str, RebuildHook] = {}
+
+
+class FollowWorkflowError(RuntimeError):
+    """Expected follow state/input error with a concise recovery action."""
+
+    def __init__(self, message: str, error_code: str, guidance: str):
+        self.error_code = str(error_code)
+        self.guidance = str(guidance)
+        super().__init__(str(message))
+
+
+def _follow_error_result(
+    exc: Exception,
+    *,
+    operation: str = "request",
+    rollback_failures: Optional[Sequence[Dict[str, str]]] = None,
+    objects_attempted: Optional[Sequence[str]] = None,
+) -> Dict[str, object]:
+    failures = [dict(item) for item in (rollback_failures or ())]
+    result: Dict[str, object] = {
+        "status": "error",
+        "error": str(exc),
+        "changed": False,
+        "scene_preserved": not bool(failures),
+        "scene_changed": False if not failures else None,
+        "rollback_failures": failures,
+    }
+    if objects_attempted is not None:
+        result["objects_attempted"] = list(objects_attempted)
+    if isinstance(exc, FollowWorkflowError):
+        result.update(
+            {
+                "error_code": exc.error_code,
+                "guidance": exc.guidance,
+            }
+        )
+    elif isinstance(exc, (ValueError, GeometryError)):
+        result.update(
+            {
+                "error_code": "invalid_follow_request",
+                "guidance": (
+                    "check driver/group/followers and use pp_follow_status before retrying"
+                ),
+            }
+        )
+    else:
+        result.update(
+            {
+                "error_code": "follow_{}_failed".format(operation),
+                "guidance": (
+                    "inspect rollback_failures and affected objects before retrying"
+                    if failures
+                    else "the prior scene state was restored; inspect the PyMOL error"
+                ),
+            }
+        )
+    return result
+
+
+def _report_follow_error(
+    exc: Exception,
+    *,
+    operation: str = "request",
+    rollback_failures: Optional[Sequence[Dict[str, str]]] = None,
+    objects_attempted: Optional[Sequence[str]] = None,
+) -> Dict[str, object]:
+    result = _follow_error_result(
+        exc,
+        operation=operation,
+        rollback_failures=rollback_failures,
+        objects_attempted=objects_attempted,
+    )
+    print(
+        "Follow error: {} Scene {} Next: {}.".format(
+            exc,
+            "unchanged." if result["scene_preserved"] else "may be partial.",
+            result["guidance"],
+        )
+    )
+    if not isinstance(exc, (FollowWorkflowError, ValueError, GeometryError)):
+        traceback.print_exc()
+    return result
 
 
 def _require_cmd():
@@ -143,6 +230,11 @@ def _groups_containing(driver: str) -> List[Tuple[str, List[str]]]:
     return metadata_groups_containing(_require_cmd(), driver)
 
 
+def _direct_parent_group(name: str) -> str:
+    parent = str(group_parent_snapshot(_require_cmd()).get(str(name), "") or "")
+    return parent if parent and _is_group(parent) else ""
+
+
 def _get_ttt(name: str) -> Optional[Tuple[float, ...]]:
     value = _require_cmd().get_object_ttt(name, quiet=1)
     if value is None:
@@ -165,8 +257,9 @@ def register_callback_owned_object(name: str, rebuild_hook: Optional[RebuildHook
     """Mark a callback object so follow sessions can safely skip or rebuild it.
 
     A rebuild hook receives ``(name, delta, context)``. ``context["operation"]``
-    is ``"apply"`` for a driver delta and ``"undo"`` when the identity delta
-    should rebuild the armed/rebased baseline.
+    is ``"apply"`` for a driver delta, ``"undo"`` when the identity delta
+    should rebuild the armed/rebased baseline, or ``"rollback"`` when a failed
+    command must replay the state from immediately before that command.
     """
     clean_name = str(name).strip()
     if not clean_name:
@@ -194,12 +287,113 @@ def _capture(names: Iterable[str]) -> Tuple[Dict[str, Optional[Tuple[float, ...]
     return raw, homogeneous
 
 
+def _restore_raw_ttt(name: str, value: Optional[Tuple[float, ...]]) -> None:
+    """Restore one captured TTT, treating PyMOL's ``None`` as identity."""
+
+    if value is None:
+        _set_homogeneous(name, identity4())
+    else:
+        _require_cmd().set_object_ttt(name, list(value), quiet=1)
+
+
+def _uses_rebuild_hook(session: FollowSession, name: str) -> bool:
+    return name in session.rebuild_followers
+
+
+def _hook_context(
+    session: FollowSession, operation: str, **extra: object
+) -> Dict[str, object]:
+    context: Dict[str, object] = {
+        "driver": session.driver,
+        "group": session.source_group,
+        "operation": operation,
+    }
+    context.update(extra)
+    return context
+
+
+def _preflight_rebuild_hooks(
+    session: FollowSession, names: Iterable[str]
+) -> Dict[str, RebuildHook]:
+    rebuild_names = [name for name in names if _uses_rebuild_hook(session, name)]
+    missing = [
+        name
+        for name in rebuild_names
+        if name not in _REBUILD_HOOKS
+    ]
+    if missing:
+        raise FollowWorkflowError(
+            "callback-owned objects lost their rebuild hooks: " + ", ".join(missing),
+            "missing_follow_rebuild_hook",
+            "register the missing hooks again or stop and re-arm with cgo_policy=skip_callback",
+        )
+    return {name: _REBUILD_HOOKS[name] for name in rebuild_names}
+
+
+def _driver_delta(session: FollowSession, driver_h: Sequence[float]) -> Matrix:
+    delta = mat4_multiply(
+        driver_h, rigid_inverse(session.baseline_h[session.driver])
+    )
+    validate_rigid_matrix(delta)
+    return tuple(delta)
+
+
+def _incremental_driver_delta(
+    session: FollowSession, driver_h: Sequence[float]
+) -> Matrix:
+    delta = mat4_multiply(
+        driver_h, rigid_inverse(session.expected_h[session.driver])
+    )
+    validate_rigid_matrix(delta)
+    return tuple(delta)
+
+
+def _rollback_attempted(
+    session: FollowSession,
+    attempted: Iterable[str],
+    raw_before: Dict[str, Optional[Tuple[float, ...]]],
+    previous_delta: Matrix,
+    failed_operation: str,
+    rebuild_hooks: Dict[str, RebuildHook],
+) -> List[Dict[str, str]]:
+    """Best-effort reverse rollback with an explicit callback replay boundary."""
+
+    failures: List[Dict[str, str]] = []
+    for name in reversed(list(attempted)):
+        errors = []
+        if _uses_rebuild_hook(session, name):
+            hook = rebuild_hooks.get(name)
+            if hook is None:
+                errors.append("rebuild hook is missing")
+            else:
+                try:
+                    hook(
+                        name,
+                        previous_delta,
+                        _hook_context(
+                            session,
+                            "rollback",
+                            failed_operation=failed_operation,
+                        ),
+                    )
+                except Exception as exc:
+                    errors.append(f"callback replay failed: {exc}")
+        try:
+            _restore_raw_ttt(name, raw_before[name])
+        except Exception as exc:
+            errors.append(f"TTT restore failed: {exc}")
+        if errors:
+            failures.append({"object": name, "error": "; ".join(errors)})
+    return failures
+
+
 def pp_follow_arm(
     driver: str,
     group: str = "",
     followers: str = "",
     cgo_policy: str = "skip_callback",
     allow_external_changes: object = 0,
+    replace: object = 0,
 ) -> Dict[str, object]:
     """Arm a driver and capture follower object matrices.
 
@@ -210,10 +404,19 @@ def pp_follow_arm(
         cgo_policy: ``skip_callback`` (safe default), ``static`` (transform
             even callback-owned objects), or ``rebuild``.
         allow_external_changes: Whether to overwrite followers changed after arm.
+        replace: Explicitly replace an already armed session after preflight.
     """
     global _SESSION
     try:
         _require_cmd()
+        previous_session = _SESSION
+        replace_value = as_bool(replace)
+        if previous_session is not None and not replace_value:
+            raise FollowWorkflowError(
+                "a follow session is already armed",
+                "follow_session_active",
+                "run pp_follow_stop first or pass replace=1 explicitly",
+            )
         driver = str(driver).strip()
         if not driver or not _is_leaf_object(driver):
             raise ValueError(f"driver must be an existing leaf object: '{driver}'")
@@ -224,6 +427,8 @@ def pp_follow_arm(
         explicit = split_names(followers)
         source_group = str(group or "").strip()
         source_group_leaves: Tuple[str, ...] = ()
+        group_inferred = False
+        group_candidates: Tuple[str, ...] = ()
         if source_group:
             if not _is_group(source_group):
                 raise ValueError(f"group is not an object:group: '{source_group}'")
@@ -237,8 +442,29 @@ def pp_follow_arm(
                 raise ValueError(
                     "driver is not inside a discoverable group; provide group= or followers="
                 )
-            source_group, candidates = containing[0]
+            direct_parent = _direct_parent_group(driver)
+            direct_match = next(
+                (item for item in containing if item[0] == direct_parent), None
+            )
+            minimum_size = len(containing[0][1])
+            equally_specific = [item for item in containing if len(item[1]) == minimum_size]
+            if direct_match is not None:
+                selected_group = direct_match
+            elif len(equally_specific) == 1:
+                selected_group = equally_specific[0]
+            else:
+                names = [item[0] for item in equally_specific]
+                raise FollowWorkflowError(
+                    "driver belongs to equally specific groups: {}".format(
+                        ", ".join(names)
+                    ),
+                    "ambiguous_follow_group",
+                    "pass group=<name> or followers=<names> explicitly",
+                )
+            source_group, candidates = selected_group
             source_group_leaves = tuple(candidates)
+            group_inferred = True
+            group_candidates = tuple(item[0] for item in containing)
 
         if explicit and source_group:
             candidates.extend(_expand_names(explicit))
@@ -262,7 +488,7 @@ def pp_follow_arm(
 
         all_capture = [driver] + accepted
         raw, baseline = _capture(all_capture)
-        _SESSION = FollowSession(
+        new_session = FollowSession(
             driver=driver,
             followers=tuple(accepted),
             baseline_ttt=raw,
@@ -270,41 +496,73 @@ def pp_follow_arm(
             expected_h=dict(baseline),
             source_group=source_group,
             source_group_leaves=source_group_leaves,
+            group_inferred=group_inferred,
+            group_candidates=group_candidates,
             cgo_policy=policy,
             allow_external_changes=as_bool(allow_external_changes),
             skipped=skipped,
+            rebuild_followers=tuple(
+                name
+                for name in accepted
+                if name in _CALLBACK_OWNED and policy == "rebuild"
+            ),
         )
+        _SESSION = new_session
         status = pp_follow_status(quiet=1)
+        status["replaced"] = previous_session is not None
+        status["replaced_apply_count"] = (
+            previous_session.apply_count if previous_session is not None else 0
+        )
+        status["discarded_undo_baseline"] = bool(
+            previous_session is not None and previous_session.apply_count > 0
+        )
         print(
             f"Follow armed: driver={driver}, followers={len(accepted)}, "
             f"group={source_group or '(explicit)'}"
         )
         if skipped:
             print("Follow skipped: " + ", ".join(f"{name} ({reason})" for name, reason in skipped.items()))
+        if status["discarded_undo_baseline"]:
+            print(
+                "Follow warning: replace=1 discarded the prior session's "
+                "applied undo baseline."
+            )
         return status
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _report_follow_error(exc, operation="arm")
 
 
 def _require_session() -> FollowSession:
     if _SESSION is None:
-        raise RuntimeError("no follow session is armed; run pp_follow_arm first")
+        raise FollowWorkflowError(
+            "no follow session is armed",
+            "no_follow_session",
+            "run pp_follow_arm first",
+        )
     return _SESSION
 
 
 def _validate_session_objects(session: FollowSession) -> None:
     if not _is_leaf_object(session.driver):
-        raise RuntimeError(f"follow driver no longer exists: '{session.driver}'")
+        raise FollowWorkflowError(
+            f"follow driver no longer exists: '{session.driver}'",
+            "stale_follow_session",
+            "restore the driver or stop and re-arm the session",
+        )
     missing = [name for name in session.followers if not _is_leaf_object(name)]
     if missing:
-        raise RuntimeError("follow objects no longer exist: " + ", ".join(missing))
+        raise FollowWorkflowError(
+            "follow objects no longer exist: " + ", ".join(missing),
+            "stale_follow_session",
+            "restore the objects or stop and re-arm the session",
+        )
     if session.source_group:
         current = tuple(_expand_names([session.source_group]))
         if set(current) != set(session.source_group_leaves):
-            raise RuntimeError(
-                "follow group membership changed since arm; stop/re-arm before applying"
+            raise FollowWorkflowError(
+                "follow group membership changed since arm",
+                "stale_follow_group",
+                "run pp_follow_stop and pp_follow_arm again before applying",
             )
 
 
@@ -314,66 +572,93 @@ def pp_follow_apply() -> Dict[str, object]:
         session = _require_session()
         _validate_session_objects(session)
         driver_now = ttt_to_homogeneous(_get_ttt(session.driver))
-        delta = mat4_multiply(driver_now, rigid_inverse(session.baseline_h[session.driver]))
-        validate_rigid_matrix(delta)
-
-        current_followers: Dict[str, Matrix] = {}
+        delta = _driver_delta(session, driver_now)
+        incremental_delta = _incremental_driver_delta(session, driver_now)
+        raw_before, current_followers = _capture(session.followers)
         for name in session.followers:
-            current = ttt_to_homogeneous(_get_ttt(name))
-            current_followers[name] = current
+            current = current_followers[name]
             expected = session.expected_h[name]
             if not session.allow_external_changes and not _matrices_close(current, expected):
-                raise RuntimeError(
-                    f"follower '{name}' changed outside this follow session; "
-                    "rebase or arm with allow_external_changes=1"
+                raise FollowWorkflowError(
+                    f"follower '{name}' changed outside this follow session",
+                    "stale_follow_follower",
+                    "rebase intentionally or re-arm with allow_external_changes=1",
                 )
+        if _matrices_close(incremental_delta, identity4()):
+            print("Follow apply: driver has not moved; no follower was changed")
+            return {
+                "status": "no_change",
+                "changed": False,
+                "scene_changed": False,
+                "driver": session.driver,
+                "followers": [],
+                "delta": list(incremental_delta),
+                "absolute_delta": list(delta),
+                "apply_count": session.apply_count,
+                "next_command": "move {}, then run pp_follow_apply".format(
+                    session.driver
+                ),
+            }
 
+        rebuild_hooks = _preflight_rebuild_hooks(session, session.followers)
+
+        expected_before = dict(session.expected_h)
+        apply_count_before = session.apply_count
+        previous_delta = _driver_delta(
+            session, session.expected_h[session.driver]
+        )
+        expected_after = dict(expected_before)
         applied: List[str] = []
+        attempted: List[str] = []
         try:
             for name in session.followers:
+                attempted.append(name)
                 target = mat4_multiply(delta, session.baseline_h[name])
-                if name in _CALLBACK_OWNED and session.cgo_policy == "rebuild":
-                    hook = _REBUILD_HOOKS.get(name)
-                    if hook is None:
-                        continue
+                if _uses_rebuild_hook(session, name):
+                    hook = rebuild_hooks[name]
                     hook(
                         name,
                         delta,
-                        {
-                            "driver": session.driver,
-                            "group": session.source_group,
-                            "operation": "apply",
-                        },
+                        _hook_context(session, "apply"),
                     )
-                    session.expected_h[name] = ttt_to_homogeneous(_get_ttt(name))
+                    expected_after[name] = ttt_to_homogeneous(_get_ttt(name))
                 else:
                     _set_homogeneous(name, target)
-                    session.expected_h[name] = target
+                    expected_after[name] = tuple(target)
                 applied.append(name)
-        except Exception:
-            for name in reversed(applied):
-                if name in _CALLBACK_OWNED and session.cgo_policy == "rebuild":
-                    continue
-                try:
-                    _set_homogeneous(name, current_followers[name])
-                    session.expected_h[name] = current_followers[name]
-                except Exception:
-                    traceback.print_exc()
-            raise
-        session.expected_h[session.driver] = driver_now
-        session.apply_count += 1
+        except Exception as exc:
+            rollback_failures = _rollback_attempted(
+                session,
+                attempted,
+                raw_before,
+                previous_delta,
+                "apply",
+                rebuild_hooks,
+            )
+            session.expected_h = expected_before
+            session.apply_count = apply_count_before
+            return _report_follow_error(
+                exc,
+                operation="apply",
+                rollback_failures=rollback_failures,
+                objects_attempted=attempted,
+            )
+        expected_after[session.driver] = tuple(driver_now)
+        session.expected_h = expected_after
+        session.apply_count = apply_count_before + 1
         print(f"Follow applied: {len(applied)} objects, apply_count={session.apply_count}")
         return {
             "status": "applied",
+            "changed": True,
+            "scene_changed": True,
             "driver": session.driver,
             "followers": applied,
             "delta": list(delta),
             "apply_count": session.apply_count,
+            "next_command": "pp_follow_undo",
         }
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _report_follow_error(exc, operation="apply")
 
 
 def pp_follow_rebase() -> Dict[str, object]:
@@ -381,17 +666,29 @@ def pp_follow_rebase() -> Dict[str, object]:
     try:
         session = _require_session()
         _validate_session_objects(session)
+        previous_apply_count = session.apply_count
         raw, baseline = _capture([session.driver] + list(session.followers))
         session.baseline_ttt = raw
         session.baseline_h = baseline
         session.expected_h = dict(baseline)
         session.apply_count = 0
         print("Follow baseline rebased")
-        return pp_follow_status(quiet=1)
+        result = pp_follow_status(quiet=1)
+        result.update(
+            {
+                "status": "rebased",
+                "changed": False,
+                "scene_changed": False,
+                "previous_apply_count": previous_apply_count,
+                "undo_baseline_replaced": True,
+                "next_command": "move {}, then run pp_follow_apply".format(
+                    session.driver
+                ),
+            }
+        )
+        return result
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _report_follow_error(exc, operation="rebase")
 
 
 def _stale_undo_objects(session: FollowSession) -> List[str]:
@@ -420,68 +717,114 @@ def pp_follow_undo(force: object = 0) -> Dict[str, object]:
         force_value = as_bool(force)
         stale = _stale_undo_objects(session)
         if stale and not force_value:
-            raise RuntimeError(
-                "follow objects changed after the most recent apply: %s; "
-                "undo refused to overwrite external changes (use force=1)"
-                % ", ".join(stale)
+            raise FollowWorkflowError(
+                "follow objects changed after the most recent apply: %s"
+                % ", ".join(stale),
+                "stale_follow_undo",
+                "inspect newer edits, then use force=1 only if they may be overwritten",
             )
+        names = [session.driver] + list(session.followers)
+        rebuild_hooks = _preflight_rebuild_hooks(session, names)
+        raw_before, _current_before = _capture(names)
+        previous_delta = _driver_delta(
+            session, session.expected_h[session.driver]
+        )
+        expected_before = dict(session.expected_h)
+        apply_count_before = session.apply_count
+        expected_after = dict(expected_before)
         restored: List[str] = []
-        for name in [session.driver] + list(session.followers):
-            if name in _CALLBACK_OWNED and session.cgo_policy == "rebuild":
-                hook = _REBUILD_HOOKS.get(name)
-                if hook is None:
-                    raise RuntimeError(
-                        f"callback-owned object '{name}' lost its rebuild hook"
+        attempted: List[str] = []
+        try:
+            for name in names:
+                attempted.append(name)
+                if _uses_rebuild_hook(session, name):
+                    hook = rebuild_hooks[name]
+                    hook(
+                        name,
+                        identity4(),
+                        _hook_context(session, "undo"),
                     )
-                hook(
-                    name,
-                    identity4(),
-                    {
-                        "driver": session.driver,
-                        "group": session.source_group,
-                        "operation": "undo",
-                    },
-                )
-                session.expected_h[name] = ttt_to_homogeneous(_get_ttt(name))
-            else:
-                original = session.baseline_ttt[name]
-                if original is None:
-                    _set_homogeneous(name, identity4())
+                    expected_after[name] = ttt_to_homogeneous(_get_ttt(name))
                 else:
-                    _require_cmd().set_object_ttt(name, list(original), quiet=1)
-                session.expected_h[name] = session.baseline_h[name]
-            restored.append(name)
+                    _restore_raw_ttt(name, session.baseline_ttt[name])
+                    expected_after[name] = session.baseline_h[name]
+                restored.append(name)
+        except Exception as exc:
+            rollback_failures = _rollback_attempted(
+                session,
+                attempted,
+                raw_before,
+                previous_delta,
+                "undo",
+                rebuild_hooks,
+            )
+            session.expected_h = expected_before
+            session.apply_count = apply_count_before
+            result = _report_follow_error(
+                exc,
+                operation="undo",
+                rollback_failures=rollback_failures,
+                objects_attempted=attempted,
+            )
+            result["forced"] = force_value
+            return result
+        session.expected_h = expected_after
         session.apply_count = 0
         print(f"Follow undo restored {len(restored)} objects")
         return {
             "status": "restored",
+            "changed": True,
+            "scene_changed": True,
             "objects": restored,
             "forced": force_value,
             "stale_overwritten": stale if force_value else [],
+            "rollback_failures": [],
+            "next_command": "move {}, then run pp_follow_apply".format(
+                session.driver
+            ),
         }
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _report_follow_error(exc, operation="undo")
 
 
 def pp_follow_status(quiet: object = 0) -> Dict[str, object]:
-    if _SESSION is None:
-        status: Dict[str, object] = {"status": "inactive"}
-    else:
-        status = {
-            "status": "armed",
-            "driver": _SESSION.driver,
-            "followers": list(_SESSION.followers),
-            "group": _SESSION.source_group,
-            "cgo_policy": _SESSION.cgo_policy,
-            "allow_external_changes": _SESSION.allow_external_changes,
-            "skipped": dict(_SESSION.skipped),
-            "apply_count": _SESSION.apply_count,
-        }
-    if not as_bool(quiet):
-        print(status)
-    return status
+    try:
+        quiet_value = as_bool(quiet)
+        if _SESSION is None:
+            status: Dict[str, object] = {
+                "status": "inactive",
+                "changed": False,
+                "scene_changed": False,
+                "next_command": "pp_follow_arm DRIVER, group=GROUP",
+            }
+        else:
+            status = {
+                "status": "armed",
+                "changed": False,
+                "scene_changed": False,
+                "driver": _SESSION.driver,
+                "followers": list(_SESSION.followers),
+                "group": _SESSION.source_group,
+                "group_inferred": _SESSION.group_inferred,
+                "group_candidates": list(_SESSION.group_candidates),
+                "cgo_policy": _SESSION.cgo_policy,
+                "allow_external_changes": _SESSION.allow_external_changes,
+                "skipped": dict(_SESSION.skipped),
+                "rebuild_followers": list(_SESSION.rebuild_followers),
+                "apply_count": _SESSION.apply_count,
+                "next_command": (
+                    "pp_follow_undo"
+                    if _SESSION.apply_count
+                    else "move {}, then run pp_follow_apply".format(
+                        _SESSION.driver
+                    )
+                ),
+            }
+        if not quiet_value:
+            print(status)
+        return status
+    except Exception as exc:
+        return _report_follow_error(exc, operation="status")
 
 
 def pp_follow_stop() -> Dict[str, object]:
@@ -491,9 +834,21 @@ def pp_follow_stop() -> Dict[str, object]:
     _SESSION = None
     if previous is None:
         print("Follow is already inactive")
-        return {"status": "inactive"}
+        return {
+            "status": "inactive",
+            "changed": False,
+            "scene_changed": False,
+            "next_command": "pp_follow_arm DRIVER, group=GROUP",
+        }
     print(f"Follow stopped: driver={previous.driver}")
-    return {"status": "stopped", "driver": previous.driver}
+    return {
+        "status": "stopped",
+        "changed": False,
+        "scene_changed": False,
+        "driver": previous.driver,
+        "discarded_undo_baseline": previous.apply_count > 0,
+        "next_command": "pp_follow_arm DRIVER, group=GROUP",
+    }
 
 
 if cmd is not None:

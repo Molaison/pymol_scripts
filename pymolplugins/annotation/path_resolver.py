@@ -15,6 +15,8 @@ import posixpath
 import re
 from typing import Callable, Dict, Mapping, Optional, Sequence, Tuple, Union
 
+from .path_formats import convert_path, rewrite_path, validate_distribution, validate_format, validate_rewrites
+
 
 STATUS_AVAILABLE = "available"
 STATUS_UNCHECKED = "unchecked"
@@ -34,7 +36,7 @@ class PathResolverError(ValueError):
 
 @dataclass(frozen=True)
 class PathMappingRule:
-    """Map one POSIX source prefix to an absolute Windows/UNC prefix.
+    """Map one absolute Windows, UNC or POSIX root to another root.
 
     ``~/`` is a literal remote-home alias.  It is deliberately never passed
     through :func:`os.path.expanduser`.
@@ -50,8 +52,8 @@ class PathMappingRule:
     name: str = ""
 
     def __post_init__(self) -> None:
-        source = _normalize_source_prefix(self.source_prefix)
-        target = _normalize_windows_absolute(self.target_prefix, "target_prefix")
+        source = _normalize_source_prefix(_mapping_root(self.source_prefix))
+        target = _normalize_absolute(_mapping_root(self.target_prefix), "target_prefix")
         if type(self.priority) is not int:
             raise PathResolverError("mapping priority must be an integer")
         for field_name in ("enabled", "case_sensitive", "require_exists"):
@@ -167,6 +169,7 @@ class PathResolution:
     matched_rule: str = ""
     candidates: Tuple[PathCandidate, ...] = ()
     diagnostics: Tuple[str, ...] = ()
+    rewritten_path: str = ""
 
     @property
     def is_resolved(self) -> bool:
@@ -184,6 +187,7 @@ class PathResolution:
     def to_dict(self) -> Dict[str, object]:
         return {
             "raw_path": self.raw_path,
+            "rewritten_path": self.rewritten_path or self.raw_path,
             "resolved_path": self.resolved_path or None,
             "status": self.status,
             "provider": self.provider or None,
@@ -201,12 +205,19 @@ def _contains_nul(value: str) -> bool:
     return "\x00" in value
 
 
+def _mapping_root(value: object) -> str:
+    text = str(value).strip()
+    return text + "\\" if re.fullmatch(r"[A-Za-z]:", text) else text
+
+
 def _normalize_source_prefix(value: object) -> str:
     text = str(value).strip()
     if not text:
         raise PathResolverError("mapping source_prefix must not be empty")
     if _contains_nul(text):
         raise PathResolverError("mapping source_prefix contains a NUL byte")
+    if _is_windows_absolute(text):
+        return _normalize_windows_absolute(text, "source_prefix")
     if "\\" in text:
         raise PathResolverError("mapping source_prefix must use POSIX separators")
     if text in {"~", "~/"}:
@@ -244,6 +255,17 @@ def _normalize_windows_absolute(value: object, label: str = "path") -> str:
     if not drive or (not tail.startswith("\\") and not is_unc_root):
         raise PathResolverError("%s is not a complete Windows or UNC path" % label)
     return normalized
+
+
+def _normalize_absolute(value: object, label: str = "path") -> str:
+    text = str(value).strip()
+    if _is_windows_absolute(text):
+        return _normalize_windows_absolute(text, label)
+    if not text.startswith("/") or _contains_nul(text) or "\\" in text:
+        raise PathResolverError("%s must be an absolute Windows, UNC or POSIX path" % label)
+    if _relative_components_escape(text.lstrip("/"), windows=False):
+        raise PathResolverError("%s escapes its POSIX root" % label)
+    return posixpath.normpath(text)
 
 
 def _relative_components_escape(value: str, *, windows: bool) -> bool:
@@ -303,6 +325,11 @@ def _safe_relative_join(base: str, relative: str) -> Tuple[str, str]:
 
 def _posix_prefix_match(path: str, rule: PathMappingRule) -> Optional[str]:
     prefix = "~" if rule.source_prefix == "~/" else rule.source_prefix
+    windows = _is_windows_absolute(prefix)
+    if windows:
+        if not _is_windows_absolute(path):
+            return None
+        path, prefix = path.replace("\\", "/"), prefix.replace("\\", "/").rstrip("/")
     compared_path = path if rule.case_sensitive else path.casefold()
     compared_prefix = prefix if rule.case_sensitive else prefix.casefold()
     if compared_path == compared_prefix:
@@ -368,8 +395,16 @@ class PathResolver:
         exists: Callable[[str], bool] = os.path.exists,
         readable: Callable[[str], bool] = lambda path: os.access(path, os.R_OK),
         is_file: Optional[Callable[[str], bool]] = None,
+        source_format: str = "custom",
+        target_format: str = "windows",
+        rewrites: Sequence[Mapping[str, object]] = (),
+        wsl_distribution: str = "",
     ) -> None:
         self.rules = _coerce_rules(DEFAULT_X_K_RULES if rules is None else rules)
+        self.source_format = validate_format(source_format)
+        self.target_format = validate_format(target_format)
+        self.rewrites = validate_rewrites(rewrites)
+        self.wsl_distribution = validate_distribution(wsl_distribution)
         if not callable(exists) or not callable(readable):
             raise PathResolverError("exists and readable must be callable")
         if is_file is not None and not callable(is_file):
@@ -392,9 +427,19 @@ class PathResolver:
             Tuple[Optional[bool], Optional[bool], Optional[bool], str],
         ] = {}
 
+    @classmethod
+    def from_profile(cls, profile, **kwargs):
+        """Build from a saved profile, allowing explicit per-import overrides."""
+        options = {"source_format": profile.get("source_format", "custom"),
+                   "target_format": profile.get("target_format", "windows"),
+                   "rewrites": profile.get("rewrites", []),
+                   "wsl_distribution": profile.get("wsl_distribution", "")}
+        options.update(kwargs)
+        return cls(profile.get("rules", []), **options)
+
     @staticmethod
     def _evaluation_key(path: str) -> str:
-        return ntpath.normcase(ntpath.normpath(str(path)))
+        return ntpath.normcase(ntpath.normpath(path)) if _is_windows_absolute(path) else posixpath.normpath(path)
 
     @staticmethod
     def _apply_evaluation(
@@ -513,9 +558,8 @@ class PathResolver:
                 )
             resolved = rule.target_prefix
             if tail:
-                resolved = ntpath.normpath(
-                    ntpath.join(rule.target_prefix, tail.replace("/", "\\"))
-                )
+                resolved, _ = _safe_relative_join(rule.target_prefix, tail)
+            resolved = self._target_path(resolved)
             required = rule.require_exists if require_exists is None else require_exists
             candidates.append(
                 self._evaluate(
@@ -533,20 +577,35 @@ class PathResolver:
         unique = []
         seen = set()
         for candidate in candidates:
-            key = ntpath.normcase(candidate.path)
+            key = self._evaluation_key(candidate.path)
             if key not in seen:
                 seen.add(key)
                 unique.append(candidate)
         return tuple(unique)
 
-    def resolve(
+    def _target_path(self, path):
+        return _normalize_absolute(convert_path(path, self.source_format, self.target_format, self.wsl_distribution))
+
+    def resolve(self, raw_path, *, source_base=None, require_exists=None):
+        """Apply rewrites and root/format rules while preserving the raw path."""
+        raw = "" if raw_path is None else str(raw_path)
+        if _contains_nul(raw):
+            return _invalid(raw, "path contains a NUL byte")
+        rewritten = rewrite_path(raw.strip(), self.rewrites)
+        try:
+            result = self._resolve(rewritten, source_base=source_base, require_exists=require_exists)
+        except ValueError as exc:
+            result = _invalid(raw, str(exc))
+        return replace(result, raw_path=raw, rewritten_path=rewritten)
+
+    def _resolve(
         self,
         raw_path: object,
         *,
         source_base: Optional[object] = None,
         require_exists: Optional[bool] = None,
     ) -> PathResolution:
-        """Resolve one CSV path to a Windows/UNC Host candidate.
+        """Resolve one rewritten CSV path to a candidate on this computer.
 
         ``require_exists=None`` honors each mapping rule's setting and checks
         direct/CSV-relative Windows paths.  A boolean explicitly overrides all
@@ -570,13 +629,17 @@ class PathResolver:
         if _is_windows_absolute(value):
             try:
                 path = _normalize_windows_absolute(value)
+                mapped = self._mapping_candidates(path, method="mapping", require_exists=require_exists)
+                if mapped:
+                    return _resolution_from_candidates(raw, mapped)
+                path = self._target_path(path)
             except PathResolverError as exc:
                 return _invalid(raw, str(exc))
             required = True if require_exists is None else require_exists
             candidate = self._evaluate(
                 PathCandidate(
                     path=path,
-                    provider="windows-host",
+                    provider="windows-host" if _is_windows_absolute(path) else "local",
                     method="direct",
                     require_exists=required,
                 )
@@ -596,11 +659,15 @@ class PathResolver:
             except PathResolverError as exc:
                 return _invalid(raw, str(exc))
             if style == "windows":
+                mapped = self._mapping_candidates(source_path, method="csv-relative-mapping", require_exists=require_exists)
+                if mapped:
+                    return _resolution_from_candidates(raw, mapped)
+                source_path = self._target_path(source_path)
                 required = True if require_exists is None else require_exists
                 candidate = self._evaluate(
                     PathCandidate(
                         path=source_path,
-                        provider="windows-host",
+                        provider="windows-host" if _is_windows_absolute(source_path) else "local",
                         method="csv-relative",
                         require_exists=required,
                     )
@@ -627,6 +694,13 @@ class PathResolver:
         except PathResolverError as exc:
             return _invalid(raw, str(exc))
         if not candidates:
+            if source_path.startswith("/") and (self.target_format != "windows" or self.source_format == "wsl"):
+                path = self._target_path(source_path)
+                return _resolution_from_candidates(raw, (self._evaluate(PathCandidate(
+                    path=path, provider="windows-host" if _is_windows_absolute(path) else "local",
+                    method="format" if path != source_path else "direct",
+                    require_exists=True if require_exists is None else require_exists,
+                )),))
             return PathResolution(
                 raw_path=raw,
                 status=STATUS_MISSING,
@@ -700,11 +774,16 @@ def resolve_path(
     exists: Callable[[str], bool] = os.path.exists,
     readable: Callable[[str], bool] = lambda path: os.access(path, os.R_OK),
     is_file: Optional[Callable[[str], bool]] = None,
+    source_format: str = "custom",
+    target_format: str = "windows",
+    rewrites: Sequence[Mapping[str, object]] = (),
+    wsl_distribution: str = "",
 ) -> PathResolution:
     """Convenience wrapper around :class:`PathResolver`."""
 
     return PathResolver(
-        rules, exists=exists, readable=readable, is_file=is_file
+        rules, exists=exists, readable=readable, is_file=is_file,
+        source_format=source_format, target_format=target_format, rewrites=rewrites, wsl_distribution=wsl_distribution,
     ).resolve(
         raw_path,
         source_base=source_base,

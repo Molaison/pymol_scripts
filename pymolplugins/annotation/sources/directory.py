@@ -8,6 +8,8 @@ import os
 import re
 from typing import Dict, List, Pattern, Sequence, Tuple
 
+from pymolplugins.core.windows_paths import windows_long_path
+
 from pymolplugins.annotation.model import (
     AVAILABILITY_AVAILABLE,
     AnnotationDataset,
@@ -62,7 +64,9 @@ def _format_name(path: str) -> str:
     return ""
 
 
-def _entry_id(relative_path: str) -> str:
+def directory_entry_id(relative_path: str) -> str:
+    """Return a dataset-movable ID for one relative structure path."""
+
     canonical = os.path.normcase(relative_path).replace("\\", "/")
     digest = hashlib.sha256(
         canonical.encode("utf-8", errors="surrogatepass")
@@ -119,7 +123,7 @@ class DirectoryDatasetSource(DatasetSource):
 
     def _discover(self, root: str, pattern: Pattern[str]) -> Tuple[str, ...]:
         try:
-            names = sorted(os.listdir(root), key=lambda value: value.lower())
+            names = sorted(os.listdir(windows_long_path(root)), key=lambda value: value.lower())
         except OSError as exc:
             raise DirectorySourceError("cannot list directory %s: %s" % (root, exc)) from exc
         selected: Dict[str, str] = {}
@@ -127,7 +131,7 @@ class DirectoryDatasetSource(DatasetSource):
             if not pattern.match(name):
                 continue
             path = os.path.join(root, name)
-            if not os.path.isfile(path):
+            if not os.path.isfile(windows_long_path(path)):
                 continue
             key = _dedupe_key(path)
             existing = selected.get(key)
@@ -144,7 +148,7 @@ class DirectoryDatasetSource(DatasetSource):
 
     def load(self) -> AnnotationDataset:
         root = os.path.abspath(os.path.expanduser(self.config.directory))
-        if not os.path.isdir(root):
+        if not os.path.isdir(windows_long_path(root)):
             raise DirectorySourceError("structure directory does not exist: %s" % root)
         paths = self._discover(root, self._compiled_pattern())
         entries: List[AnnotationEntry] = []
@@ -159,7 +163,7 @@ class DirectoryDatasetSource(DatasetSource):
             }
             entries.append(
                 AnnotationEntry(
-                    id=_entry_id(relative),
+                    id=directory_entry_id(relative),
                     ordinal=ordinal,
                     display_name=os.path.basename(path),
                     source_path=path,
@@ -202,5 +206,6 @@ __all__ = [
     "DirectorySource",
     "DirectorySourceConfig",
     "DirectorySourceError",
+    "directory_entry_id",
     "load_directory_dataset",
 ]

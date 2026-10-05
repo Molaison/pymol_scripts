@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import datetime
 import difflib
 import json
@@ -14,6 +15,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from pymolplugins.annotation.state_store import mark_hidden_on_windows
 from pymolplugins.core.windows_paths import windows_long_path
+from pymolplugins.remote.ssh import is_ssh_path, parse_ssh_path
 
 
 HISTORY_SCHEMA_V1 = "pymolplugins.structure-annotator-history/1.0"
@@ -33,7 +35,12 @@ HISTORY_FIELDS = (
     "path_column",
     "id_column",
     "display_columns",
+    "csv_encoding",
+    "csv_delimiter",
+    "source_base",
     "mapping_profile",
+    "stage_root",
+    "stage_alias",
     "pattern",
     "label_name",
     "values_text",
@@ -42,11 +49,21 @@ HISTORY_FIELDS = (
 )
 
 _CONFIG_FIELDS = (
+    "filter_text",
+    "sort_column",
+    "sort_descending",
+    "annotation_fields",
+    "score_guidance",
+    "display_columns_selected",
+    "label_column",
     "pattern",
     "label_name",
     "values_text",
     "step_cmd",
     "auto_advance",
+    "save_on_label_click",
+    "show_source_row",
+    "show_file_status",
     "keep_previous",
     "prefer_gz",
     "skip_annotated",
@@ -62,10 +79,18 @@ _CONFIG_FIELDS = (
     "path_column",
     "id_column",
     "display_columns",
+    "csv_encoding",
+    "csv_delimiter",
+    "source_base",
     "mapping_profile",
+    "stage_root",
+    "stage_alias",
 )
 
 _TEXT_CONFIG_FIELDS = {
+    "label_column",
+    "filter_text",
+    "sort_column",
     "pattern",
     "label_name",
     "values_text",
@@ -73,6 +98,11 @@ _TEXT_CONFIG_FIELDS = {
     "csv_path",
     "path_column",
     "id_column",
+    "csv_encoding",
+    "csv_delimiter",
+    "source_base",
+    "stage_root",
+    "stage_alias",
 }
 _SOURCE_MODES = {"directory", "csv"}
 
@@ -146,7 +176,13 @@ def _validate_config(raw: object) -> Dict[str, object]:
         if name not in expanded:
             continue
         value = expanded[name]
-        if name in _TEXT_CONFIG_FIELDS:
+        if name in {"annotation_fields", "score_guidance"}:
+            from .review_config import validate_fields, validate_score_config
+            try:
+                clean[name] = validate_fields(value) if name == "annotation_fields" else validate_score_config(value)
+            except ValueError as exc:
+                raise HistoryStoreError(str(exc)) from exc
+        elif name in _TEXT_CONFIG_FIELDS:
             clean[name] = _validate_text(value, f"config.{name}")
         elif name == "source_mode":
             mode = _validate_text(value, "config.source_mode").strip().lower()
@@ -398,6 +434,8 @@ def _normalized_dataset_dir(dataset_dir: str) -> str:
     if not str(dataset_dir or "").strip():
         return ""
     text = str(dataset_dir)
+    if is_ssh_path(text):
+        return parse_ssh_path(text).uri
     if ntpath.splitdrive(text)[0] or text.startswith(("\\\\", "\\\\?\\")):
         return ntpath.normpath(text)
     return os.path.abspath(os.path.expanduser(text))
@@ -407,12 +445,16 @@ def _normalized_csv_path(csv_path: str) -> str:
     if not str(csv_path or "").strip():
         return ""
     text = str(csv_path)
+    if is_ssh_path(text):
+        return parse_ssh_path(text).uri
     if ntpath.splitdrive(text)[0] or text.startswith(("\\\\", "\\\\?\\")):
         return ntpath.normpath(text)
     return os.path.abspath(os.path.expanduser(text))
 
 
 def _path_identity(path: str) -> str:
+    if is_ssh_path(path):
+        return parse_ssh_path(path).uri
     if ntpath.splitdrive(path)[0] or path.startswith(("\\\\", "\\\\?\\")):
         return ntpath.normcase(ntpath.normpath(path))
     return os.path.normcase(os.path.normpath(path))
@@ -436,6 +478,17 @@ def _field_values(dataset_dir: str, config: Mapping[str, object]) -> Dict[str, L
         value = config.get(field)
         if isinstance(value, str) and value.strip():
             values[field].append(value)
+    if str(config.get("source_mode", "directory")) == "csv":
+        for field in (
+            "csv_encoding",
+            "csv_delimiter",
+            "source_base",
+            "stage_root",
+            "stage_alias",
+        ):
+            value = config.get(field)
+            if isinstance(value, str) and value.strip():
+                values[field].append(value)
     display_columns = config.get("display_columns", [])
     if isinstance(display_columns, Sequence) and not isinstance(
         display_columns, (str, bytes)
@@ -628,7 +681,19 @@ def latest_config_snapshot() -> Optional[Dict[str, object]]:
     snapshots = history.get("snapshots", [])
     if not isinstance(snapshots, list) or not snapshots:
         return None
-    return dict(snapshots[0])
+    return copy.deepcopy(snapshots[0])
+
+
+def configuration_snapshots(query: str = "") -> List[Dict[str, object]]:
+    """Browse complete configurations, newest first, without changing history."""
+
+    tokens = str(query).casefold().split()
+    snapshots = read_global_history()["snapshots"]
+    return [
+        copy.deepcopy(snapshot)
+        for snapshot in snapshots
+        if all(token in json.dumps(snapshot, ensure_ascii=False).casefold() for token in tokens)
+    ]
 
 
 def _search_variants(value: str) -> List[str]:
@@ -648,9 +713,26 @@ def _is_subsequence(needle: str, haystack: str) -> bool:
     return all(any(char == candidate for candidate in iterator) for char in needle)
 
 
+def _subsequence_rank(needle: str, haystack: str) -> Optional[Tuple[int, int, int]]:
+    positions = []
+    start = 0
+    for char in needle:
+        position = haystack.find(char, start)
+        if position < 0:
+            return None
+        positions.append(position)
+        start = position + 1
+    boundaries = sum(
+        position == 0 or not haystack[position - 1].isalnum()
+        for position in positions
+    )
+    gaps = positions[-1] - positions[0] + 1 - len(positions)
+    return -gaps, boundaries, -positions[0]
+
+
 def _fuzzy_score(
     value: str, query: str, count: int, recency_index: int
-) -> Optional[Tuple[float, float, float, float, float, float]]:
+) -> Optional[Tuple[float, ...]]:
     needle = query.casefold().strip()
     if not needle:
         return (
@@ -663,23 +745,54 @@ def _fuzzy_score(
         )
 
     variants = _search_variants(value)
-    prefix = any(candidate.startswith(needle) for candidate in variants)
-    substring = any(needle in candidate for candidate in variants)
-    subsequence = any(_is_subsequence(needle, candidate) for candidate in variants)
     ratio = max(
         difflib.SequenceMatcher(None, needle, candidate).ratio()
         for candidate in variants
     )
-    if not (prefix or substring or subsequence or ratio >= 0.38):
-        return None
+    ranks = []
+    for candidate in variants:
+        subsequence = _subsequence_rank(needle, candidate)
+        if candidate == needle:
+            ranks.append((4, len(needle), 0, 0))
+        elif candidate.startswith(needle):
+            ranks.append((3, 1, 0, 0))
+        elif needle in candidate:
+            start = candidate.index(needle)
+            boundary = int(start == 0 or not candidate[start - 1].isalnum())
+            ranks.append((2, boundary, 0, -start))
+        elif subsequence is not None:
+            ranks.append((1,) + subsequence)
+
+    tokens = needle.split()
+    if len(tokens) > 1:
+        token_ranks = [_subsequence_rank(token, variants[0]) for token in tokens]
+        if all(rank is not None for rank in token_ranks):
+            ranks.append((1,) + tuple(sum(rank[index] for rank in token_ranks) for index in range(3)))
+
+    if not ranks:
+        if len(needle) < 4 or ratio < 0.70:
+            return None
+        ranks.append((0, 0, 0, 0))
+    best = max(ranks)
+    folded_exact = value.casefold().strip() == needle
     return (
-        1.0 if prefix else 0.0,
-        1.0 if substring else 0.0,
-        1.0 if subsequence else 0.0,
+        2.0 if value == query.strip() else 1.0 if folded_exact else 0.0,
+        *best,
         ratio,
         min(math.log1p(max(1, count)), 10.0) / 10.0,
         1.0 / (recency_index + 1.0),
     )
+
+
+def fuzzy_matches(values, query="", limit=None):
+    """Rank original values for history, column and choice completion."""
+    ranked = []
+    for index, value in enumerate(dict.fromkeys(str(value) for value in values)):
+        score = _fuzzy_score(value, str(query), 1, index)
+        if score is not None:
+            ranked.append((score, value))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return [value for _, value in ranked[:limit]]
 
 
 def search_config_history(field: str, query: str = "", limit: int = 12) -> List[str]:
@@ -743,6 +856,7 @@ def history_summary() -> Dict[str, object]:
 
 
 __all__ = [
+    "configuration_snapshots",
     "HISTORY_ENVIRONMENT_VARIABLE",
     "HISTORY_FIELDS",
     "HISTORY_FILENAME",

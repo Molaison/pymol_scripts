@@ -1,6 +1,7 @@
 """Bounded, typed standard-library client for the WSL worker."""
 
 import json
+import math
 import os
 import socket
 from typing import Dict, Mapping, Optional
@@ -12,6 +13,35 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 DEFAULT_WORKER_URL = "http://127.0.0.1:8765"
 DEFAULT_MAX_REQUEST_BYTES = 10 * 1024 * 1024
 DEFAULT_MAX_RESPONSE_BYTES = 20 * 1024 * 1024
+
+
+def _reject_json_constant(value: str):
+    raise ValueError("invalid JSON constant: %s" % value)
+
+
+def _unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON field: %s" % key)
+        result[key] = value
+    return result
+
+
+def _strict_json_loads(value: str):
+    return json.loads(
+        value,
+        parse_constant=_reject_json_constant,
+        object_pairs_hook=_unique_json_object,
+    )
+
+
+def _http_error_retriable(code: str, status: int) -> bool:
+    if code in {"timeout", "request_timeout"}:
+        return True
+    if code == "scientific_contract_error":
+        return False
+    return status >= 500
 
 
 class WorkerRequestError(RuntimeError):
@@ -123,15 +153,34 @@ def worker_request(
     expected_schema: str = "",
 ) -> Dict[str, object]:
     path = _endpoint_path(endpoint)
+    if isinstance(timeout, bool):
+        raise ValueError("timeout must be a finite number > 0, not a boolean")
+    try:
+        timeout_seconds = float(timeout)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("timeout must be a finite number > 0") from exc
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0.0:
+        raise ValueError("timeout must be a finite number > 0")
     request_limit = int(max_request_bytes)
     response_limit = int(max_response_bytes)
     if request_limit < 1 or response_limit < 1:
         raise ValueError("request and response limits must be positive")
     data = None
     if payload is not None:
-        data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode(
-            "utf-8"
-        )
+        try:
+            data = json.dumps(
+                payload,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise WorkerRequestError(
+                "worker request must be strict JSON",
+                code="invalid_request",
+                endpoint=path,
+                retriable=False,
+            ) from exc
         if len(data) > request_limit:
             raise WorkerRequestError(
                 f"worker request exceeds {request_limit} byte limit",
@@ -146,7 +195,7 @@ def worker_request(
     )
     opener = build_opener(_NoRedirect())
     try:
-        with opener.open(request, timeout=float(timeout)) as response:
+        with opener.open(request, timeout=timeout_seconds) as response:
             content_type = response.headers.get("Content-Type", "")
             if content_type.split(";", 1)[0].strip().lower() != "application/json":
                 raise WorkerRequestError(
@@ -160,7 +209,7 @@ def worker_request(
     except HTTPError as exc:
         try:
             raw = _read_bounded(exc, response_limit, path)
-            error_payload = json.loads(raw.decode("utf-8"))
+            error_payload = _strict_json_loads(raw.decode("utf-8"))
         except WorkerRequestError:
             raise
         except Exception:
@@ -173,12 +222,12 @@ def worker_request(
             code=code,
             endpoint=path,
             http_status=exc.code,
-            retriable=exc.code >= 500,
+            retriable=_http_error_retriable(code, exc.code),
             detail=error if isinstance(error, dict) else {},
         ) from exc
     except (socket.timeout, TimeoutError) as exc:
         raise WorkerRequestError(
-            f"worker request timed out after {float(timeout):g} seconds",
+            f"worker request timed out after {timeout_seconds:g} seconds",
             code="timeout",
             endpoint=path,
             retriable=True,
@@ -186,7 +235,10 @@ def worker_request(
     except (URLError, OSError) as exc:
         reason = getattr(exc, "reason", exc)
         if isinstance(reason, (socket.timeout, TimeoutError)):
-            code, message = "timeout", f"worker request timed out after {float(timeout):g} seconds"
+            code, message = (
+                "timeout",
+                f"worker request timed out after {timeout_seconds:g} seconds",
+            )
         else:
             code, message = "unreachable", f"worker is unreachable: {reason}"
         raise WorkerRequestError(
@@ -196,8 +248,8 @@ def worker_request(
             retriable=True,
         ) from exc
     try:
-        result = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        result = _strict_json_loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
         raise WorkerRequestError(
             "worker returned invalid JSON",
             code="invalid_response",

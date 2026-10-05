@@ -8,6 +8,8 @@ import shutil
 from dataclasses import dataclass
 from typing import Optional
 
+from pymolplugins.core.windows_paths import windows_long_path
+
 from pymolplugins.annotation.cache import (
     CacheResult,
     InvalidSourceError,
@@ -41,7 +43,7 @@ class MaterializedStructure:
 
 
 def _physical_path(source_path: str) -> str:
-    path = os.path.abspath(os.path.expanduser(os.fspath(source_path)))
+    path = windows_long_path(os.path.abspath(os.path.expanduser(os.fspath(source_path))))
     if not os.path.isfile(path):
         raise InvalidSourceError(f"source is not a regular file: {source_path}")
     return path

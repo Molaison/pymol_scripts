@@ -10,23 +10,46 @@ import os
 import re
 import sys
 import traceback
+from functools import wraps
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from pymol import cmd
 
 try:
-    from pymolplugins.core.parameters import as_bool, as_int
+    from pymolplugins.core.parameters import as_bool, as_int, extend_command
     from pymolplugins.navigation import commands as _navigation
+    from pymolplugins.navigation.compat.selected_paths import (
+        derive_structure_stem,
+        selected_output_name,
+    )
 except ImportError:
     _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     if _ROOT not in sys.path:
         sys.path.insert(0, _ROOT)
-    from pymolplugins.core.parameters import as_bool, as_int  # type: ignore
+    from pymolplugins.core.parameters import (  # type: ignore
+        as_bool,
+        as_int,
+        extend_command,
+    )
     from pymolplugins.navigation import commands as _navigation  # type: ignore
+    from pymolplugins.navigation.compat.selected_paths import (  # type: ignore
+        derive_structure_stem,
+        selected_output_name,
+    )
 
 
 STRUCTURE_PATTERN = _navigation.STRUCTURE_PATTERN
 OBJECT_PREFIX = "structure"
+
+
+def _compat_error(command_name, exc, hint):
+    """Return one actionable line for input mistakes and trace internal faults."""
+
+    message = " ".join(str(exc).splitlines())
+    print(f"{command_name} error: {message}. Next: {hint}")
+    if not isinstance(exc, (ValueError, TypeError, _navigation.NavigationError)):
+        traceback.print_exc()
+    return {"status": "error", "error": str(exc)}
 
 
 @dataclass
@@ -52,17 +75,7 @@ def _warn_once(command: str) -> None:
 
 def derive_object_name(filename: str) -> str:
     """Return the historical selected-file stem for a structure path."""
-    base_name = os.path.basename(str(filename))
-    lower_name = base_name.lower()
-    for extension in (".pdb.gz", ".cif.gz", ".pdb", ".cif"):
-        if lower_name.endswith(extension):
-            base_name = base_name[: -len(extension)]
-            break
-    starts_with_underscore = base_name.startswith("_")
-    value = re.sub(r"[^0-9A-Za-z_]+", "_", base_name).strip("_") or OBJECT_PREFIX
-    if value[0].isdigit() or starts_with_underscore:
-        value = f"{OBJECT_PREFIX}_{value}"
-    return value
+    return derive_structure_stem(filename, prefix=OBJECT_PREFIX)
 
 
 def _selected_dir() -> str:
@@ -70,8 +83,7 @@ def _selected_dir() -> str:
 
 
 def _selected_output_name(source_path: str, fallback: str) -> str:
-    source = source_path or fallback
-    return derive_object_name(source) + ".pdb"
+    return selected_output_name(source_path, fallback, prefix=OBJECT_PREFIX)
 
 
 def _matching_paths() -> List[str]:
@@ -127,6 +139,43 @@ def _start_navigation(*, bind_keys: object = 1, replace: object = 1) -> Dict[str
     return _install_configured_hooks()
 
 
+def _configure_loader(
+    path=None,
+    pattern=STRUCTURE_PATTERN,
+    group_size=None,
+    objects_per_step=None,
+    exclude_selected=None,
+) -> None:
+    configured_path = _CONFIG.path if path is None else str(path)
+    configured_pattern = _CONFIG.pattern if pattern is None else str(pattern)
+    try:
+        re.compile(configured_pattern)
+    except re.error as exc:
+        raise ValueError(f"invalid file regex: {exc}") from exc
+    configured_batch = (
+        _CONFIG.batch_size
+        if group_size is None
+        else as_int(group_size, minimum=1, name="group_size")
+    )
+    configured_window = (
+        _CONFIG.window_size
+        if objects_per_step is None
+        else as_int(objects_per_step, minimum=1, name="objects_per_step")
+    )
+    if configured_window > configured_batch:
+        raise ValueError("objects_per_step cannot exceed group_size")
+    configured_exclude = (
+        _CONFIG.exclude_selected
+        if exclude_selected is None
+        else as_bool(exclude_selected)
+    )
+    _CONFIG.path = configured_path
+    _CONFIG.pattern = configured_pattern
+    _CONFIG.batch_size = configured_batch
+    _CONFIG.window_size = configured_window
+    _CONFIG.exclude_selected = configured_exclude
+
+
 def setup_loader(
     path=None,
     pattern=STRUCTURE_PATTERN,
@@ -135,22 +184,21 @@ def setup_loader(
     exclude_selected=None,
 ) -> Dict[str, object]:
     """Configure the next legacy ``loadpath`` call without loading anything."""
-    _warn_once("setup_loader")
-    if path is not None:
-        _CONFIG.path = str(path)
-    if pattern is not None:
-        re.compile(str(pattern))
-        _CONFIG.pattern = str(pattern)
-    if group_size is not None:
-        _CONFIG.batch_size = as_int(group_size, minimum=1, name="group_size")
-    if objects_per_step is not None:
-        _CONFIG.window_size = as_int(
-            objects_per_step, minimum=1, name="objects_per_step"
+    try:
+        _configure_loader(
+            path,
+            pattern,
+            group_size,
+            objects_per_step,
+            exclude_selected,
         )
-    if _CONFIG.window_size > _CONFIG.batch_size:
-        raise ValueError("objects_per_step cannot exceed group_size")
-    if exclude_selected is not None:
-        _CONFIG.exclude_selected = as_bool(exclude_selected)
+    except Exception as exc:
+        return _compat_error(
+            "setup_loader",
+            exc,
+            "use a valid regex, positive sizes, and objects_per_step <= group_size",
+        )
+    _warn_once("setup_loader")
     return legacy_status()
 
 
@@ -164,18 +212,23 @@ def load_by_path(
     replace=1,
 ) -> Dict[str, object]:
     """Start canonical file navigation with historical ``loadpath`` arguments."""
-    _warn_once("loadpath")
-    setup_loader(
-        path=path,
-        pattern=pattern,
-        group_size=bucket_size,
-        objects_per_step=(
-            _CONFIG.window_size if objects_per_step is None else objects_per_step
-        ),
-        exclude_selected=exclude_selected,
-    )
     try:
-        result = _start_navigation(bind_keys=bind_keys, replace=replace)
+        bind_keys_value = as_bool(bind_keys)
+        replace_value = as_bool(replace)
+        _configure_loader(
+            path,
+            pattern,
+            bucket_size,
+            (
+                _CONFIG.window_size if objects_per_step is None else objects_per_step
+            ),
+            exclude_selected,
+        )
+        _warn_once("loadpath")
+        result = _start_navigation(
+            bind_keys=bind_keys_value,
+            replace=replace_value,
+        )
         print(
             f"screen_boost adapter: path={_CONFIG.path}, "
             f"batch={_CONFIG.batch_size}, window={_CONFIG.window_size}, "
@@ -183,9 +236,11 @@ def load_by_path(
         )
         return result
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _compat_error(
+            "loadpath",
+            exc,
+            "check the dataset path and use positive batch/window sizes",
+        )
 
 
 def load_by_bucket(path="."):
@@ -329,15 +384,17 @@ def toggle_auto_bucket(enable=None) -> bool:
 
 def toggle_exclude_selected(enable=None, reload=1):
     """Toggle selected-file filtering and optionally rebuild the active file session."""
-    _CONFIG.exclude_selected = (
+    configured = (
         not _CONFIG.exclude_selected if enable is None else as_bool(enable)
     )
+    reload_value = as_bool(reload)
+    _CONFIG.exclude_selected = configured
     print(
         f"Exclude selected mode "
         f"{'enabled' if _CONFIG.exclude_selected else 'disabled'}"
     )
     status = _navigation.pp_nav_status(quiet=1)
-    if as_bool(reload) and status.get("source") == "files":
+    if reload_value and status.get("source") == "files":
         return _start_navigation(bind_keys=status.get("keys_bound", False), replace=1)
     return _CONFIG.exclude_selected
 
@@ -371,7 +428,7 @@ def execute_switch_commands(object_names: Iterable[str]) -> None:
         return
     for template, offset in _navigation.legacy_switch_commands():
         target = names[min(offset, len(names) - 1)]
-        cmd.do(template.format(object=target))
+        _navigation.cmd.do(template.format(object=target))
 
 
 def register_show_sticks():
@@ -410,7 +467,10 @@ def save_selected(offset=0) -> Optional[str]:
     output = os.path.join(
         selected_dir, _selected_output_name(source_path or "", object_name)
     )
-    cmd.save(output, object_name)
+    # Resolve the command API through the canonical navigation module.  PyMOL
+    # normally exposes one singleton, but this also keeps a manually reloaded
+    # compatibility adapter attached to the currently active controller/API.
+    _navigation.cmd.save(output, object_name)
     print(f"Saved {object_name} to {output}")
     return output
 
@@ -508,7 +568,18 @@ def register_commands(command_api=None):
     """Register legacy aliases against an explicit PyMOL command API."""
     command_api = cmd if command_api is None else command_api
     for name, function in LEGACY_COMMANDS.items():
-        command_api.extend(name, function)
+        @wraps(function)
+        def guarded(*args, __name=name, __function=function, **kwargs):
+            try:
+                return __function(*args, **kwargs)
+            except Exception as exc:
+                return _compat_error(
+                    __name,
+                    exc,
+                    "check the command arguments and run pp_nav_status",
+                )
+
+        extend_command(command_api, name, guarded)
 
 
 register_commands()

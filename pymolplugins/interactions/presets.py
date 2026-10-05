@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from difflib import get_close_matches
 import re
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
@@ -19,6 +20,8 @@ class PresetDefinition:
     backend: str
     parameters: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     aliases: Tuple[str, ...] = ()
+    examples: Tuple[str, ...] = ()
+    limitations: Tuple[str, ...] = ()
 
     def validate(self) -> None:
         if not _PRESET_NAME.match(self.name):
@@ -30,6 +33,12 @@ class PresetDefinition:
         for alias in self.aliases:
             if not _PRESET_NAME.match(alias):
                 raise ValueError("invalid preset alias %r" % alias)
+        for example in self.examples:
+            if not str(example).strip():
+                raise ValueError("preset %s has an empty example" % self.name)
+        for limitation in self.limitations:
+            if not str(limitation).strip():
+                raise ValueError("preset %s has an empty limitation" % self.name)
         for name, definition in self.parameters.items():
             if not _PRESET_NAME.match(name):
                 raise ValueError("invalid parameter name %r" % name)
@@ -45,6 +54,8 @@ class PresetDefinition:
             "aliases": list(self.aliases),
             "summary": self.summary,
             "backend": self.backend,
+            "examples": list(self.examples),
+            "limitations": list(self.limitations),
             "parameters": {
                 key: dict(value) for key, value in sorted(self.parameters.items())
             },
@@ -74,9 +85,17 @@ class PresetRegistry:
         requested = str(name).strip().lower()
         canonical = self._names.get(requested)
         if canonical is None:
+            suggestions = get_close_matches(
+                requested, sorted(self._names), n=3, cutoff=0.55
+            )
+            hint = (
+                "; did you mean %s?" % ", ".join(suggestions)
+                if suggestions
+                else ""
+            )
             raise KeyError(
-                "unknown interaction preset %r; available: %s"
-                % (name, ", ".join(self.names()))
+                "unknown interaction preset %r%s; run pp_interact_list"
+                % (name, hint)
             )
         return self._canonical[canonical]
 
@@ -115,6 +134,10 @@ PRESETS = PresetRegistry(
             summary="Local PyMOL hydrogen bonds and salt bridges between chain partners.",
             backend="pymol-local",
             parameters=dict(_COMMON_LOCAL),
+            examples=("pp_interact_run interchain_basic, source=complex",),
+            limitations=(
+                "Geometry and PyMOL atom typing only; it is not an energetic interface score.",
+            ),
         ),
         PresetDefinition(
             name="polar_qc",
@@ -140,6 +163,40 @@ PRESETS = PresetRegistry(
                     "description": "Maximum distance for like-polar donor/acceptor clashes.",
                 },
             },
+            examples=(
+                "pp_interact_run polar_qc, source=complex, partner1=chain A, partner2=chain B",
+            ),
+            limitations=(
+                "Distance/type heuristics flag candidates; inspect protonation and geometry.",
+            ),
+        ),
+        PresetDefinition(
+            name="ligand_contacts",
+            aliases=("contacts",),
+            summary=(
+                "Closest heavy-atom contact for each ligand/receptor residue pair "
+                "within 4 A; works without the WSL worker."
+            ),
+            backend="pymol-local",
+            parameters={
+                "site_cutoff": {
+                    "default": 4.0,
+                    "type": "number",
+                    "description": "Displayed binding-site residue cutoff in Angstrom.",
+                },
+                "contact_cutoff": {
+                    "default": 4.0,
+                    "type": "number",
+                    "description": "Maximum heavy-atom contact distance in Angstrom.",
+                },
+            },
+            examples=(
+                "pp_interact_run",
+                'pp_interact_run contacts, source=complex, ligand="resn LIG"',
+            ),
+            limitations=(
+                "Distance-only contacts are not hydrogen-bond, hydrophobic, or energy classifications.",
+            ),
         ),
         PresetDefinition(
             name="ligand_quick",
@@ -157,6 +214,12 @@ PRESETS = PresetRegistry(
                 },
                 "hbond_cutoff": dict(_COMMON_LOCAL["hbond_cutoff"]),
             },
+            examples=(
+                'pp_interact_run ligand_quick, source=complex, ligand="resn LIG"',
+            ),
+            limitations=(
+                "Reports local donor/acceptor geometry only; use PLIP for broader chemistry.",
+            ),
         ),
         PresetDefinition(
             name="ligand_site",
@@ -185,6 +248,12 @@ PRESETS = PresetRegistry(
                     "description": "Label residues on the generated interface copy.",
                 },
             },
+            examples=(
+                'pp_interact_run ligand_site, source=complex, ligand="resn LIG"',
+            ),
+            limitations=(
+                "Local PyMOL typing covers hydrogen bonds and salt bridges, not all PLIP categories.",
+            ),
         ),
         PresetDefinition(
             name="plip_overview",
@@ -197,6 +266,12 @@ PRESETS = PresetRegistry(
                     "description": "Display-interface cutoff in Angstrom.",
                 },
             },
+            examples=(
+                'pp_interact_run plip_overview, source=complex, ligand="resn LIG"',
+            ),
+            limitations=(
+                "Requires a reachable WSL worker with PLIP; run pp_worker_health first.",
+            ),
         ),
         PresetDefinition(
             name="plip_publication",
@@ -222,6 +297,12 @@ PRESETS = PresetRegistry(
                     "description": "Label residues on the generated interface copy.",
                 },
             },
+            examples=(
+                'pp_interact_run plip_publication, source=complex, ligand="resn LIG"',
+            ),
+            limitations=(
+                "Requires a reachable WSL worker with PLIP; local fallback is ligand_site.",
+            ),
         ),
     )
 )

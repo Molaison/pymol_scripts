@@ -274,6 +274,7 @@ class AnnotationDataset:
     id_column: str = ""
     delimiter: str = ""
     encoding: str = ""
+    label_column: str = ""
 
     def __post_init__(self) -> None:
         entries = tuple(self.entries)
@@ -300,6 +301,8 @@ class AnnotationDataset:
             raise DatasetSourceError("path_column is not present in dataset columns")
         if self.id_column and self.id_column not in self.columns:
             raise DatasetSourceError("id_column is not present in dataset columns")
+        if self.label_column and self.label_column not in self.columns:
+            raise DatasetSourceError("label_column is not present in dataset columns")
         if any(entry.source_kind != self.source_kind for entry in entries):
             raise DatasetSourceError(
                 "all entries must have the dataset's source_kind"

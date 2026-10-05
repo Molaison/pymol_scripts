@@ -1,5 +1,6 @@
 """PCA/cyclic orientation and membrane-slab tools for PyMOL."""
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -10,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -50,6 +52,7 @@ try:
         split_names,
     )
     from pymolplugins.core.pymol_groups import expand_names as expand_group_names
+    from pymolplugins.core.sequence import parse_residue_identifier
 except ImportError:
     _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     if _ROOT not in sys.path:
@@ -85,6 +88,7 @@ except ImportError:
         split_names,
     )
     from pymolplugins.core.pymol_groups import expand_names as expand_group_names  # type: ignore
+    from pymolplugins.core.sequence import parse_residue_identifier  # type: ignore
 
 
 Point = Tuple[float, float, float]
@@ -164,9 +168,278 @@ class MembraneResult:
         }
 
 
+@dataclass(frozen=True)
+class GeometryOutputOwnership:
+    """One in-session geometry output bundle owned by this module."""
+
+    id: str
+    kind: str
+    names: Tuple[str, ...]
+    expected_types: Mapping[str, str]
+    markers: Mapping[str, str]
+    marker_backends: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class AxisSourceSnapshot:
+    """Source state used to reject stale stored-axis reuse."""
+
+    selection: str
+    atoms: str
+    state: int
+    objects: Tuple[str, ...]
+    object_ttt: Mapping[str, Optional[Tuple[float, ...]]]
+    coordinate_hash: str
+
+
+@dataclass(frozen=True)
+class _SubunitCARecord:
+    """One world-coordinate CA atom with explicit subunit/residue identity."""
+
+    object: str
+    segi: str
+    chain: str
+    resi: str
+    resn: str
+    alt: str
+    index: int
+    coord: Point
+
+
+class _SubunitCloudMap(dict):
+    """Coordinate-cloud mapping carrying Host-resolution diagnostics."""
+
+    def __init__(self, *args, diagnostics=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.resolution_diagnostics = dict(diagnostics or {})
+
+
+@dataclass
+class OrientationRecord:
+    """A committed orientation and the exact state needed for safe undo."""
+
+    id: str
+    created_at: float
+    objects: Tuple[str, ...]
+    baseline_ttt: Dict[str, Optional[Tuple[float, ...]]]
+    committed_ttt: Dict[str, Optional[Tuple[float, ...]]]
+    committed_fingerprint: str
+    undone: bool = False
+
+
+class GeometryOutputCollision(RuntimeError):
+    """Raised when a requested output name is not plugin-owned."""
+
+    def __init__(self, kind: str, collisions: Sequence[Mapping[str, str]]):
+        self.kind = str(kind)
+        self.collisions = tuple(dict(item) for item in collisions)
+        rendered = ", ".join(
+            "{} ({})".format(item["name"], item.get("type", "unknown"))
+            for item in self.collisions
+        )
+        super().__init__(
+            "geometry output name collision: {}; choose a different name".format(
+                rendered
+            )
+        )
+
+
+class StaleStoredAxis(RuntimeError):
+    """Raised when a stored axis no longer describes its source selection."""
+
+    def __init__(self, name: str, reasons: Sequence[str]):
+        self.axis_name = str(name)
+        self.reasons = tuple(str(reason) for reason in reasons)
+        super().__init__(
+            "stored axis {!r} is stale: {}; recompute the axis".format(
+                self.axis_name, "; ".join(self.reasons)
+            )
+        )
+
+
+class StaleOrientationUndo(RuntimeError):
+    """Raised when undo would overwrite edits made after orientation."""
+
+    def __init__(self, operation_id: str, objects: Sequence[str]):
+        self.operation_id = str(operation_id)
+        self.objects = tuple(str(name) for name in objects)
+        super().__init__(
+            "orientation objects changed after commit: {}; undo refused to "
+            "overwrite external changes (use force=1)".format(", ".join(self.objects))
+        )
+
+
 _AXES: Dict[str, AxisResult] = {}
 _MEMBRANES: Dict[str, MembraneResult] = {}
+# Scene ownership is deliberately in-memory. If the plugin is reloaded while old
+# outputs remain in PyMOL, those names are treated as user-owned and never deleted.
+_GEOMETRY_OUTPUT_OWNERS: Dict[str, GeometryOutputOwnership] = {}
+_AXIS_SOURCES: Dict[str, AxisSourceSnapshot] = {}
 _ORIENTATION_UNDO: Dict[str, Optional[Tuple[float, ...]]] = {}
+_ORIENTATION_RECORDS: "OrderedDict[str, OrientationRecord]" = OrderedDict()
+_LAST_ORIENTATION_ID = ""
+_ORIENTATION_RECORD_LIMIT = 32
+
+
+def _geometry_error_result(exc: Exception) -> Dict[str, object]:
+    expected = isinstance(
+        exc,
+        (
+            GeometryOutputCollision,
+            StaleStoredAxis,
+            StaleOrientationUndo,
+            GeometryError,
+            ValueError,
+        ),
+    )
+    result: Dict[str, object] = {
+        "status": "error",
+        "error": str(exc),
+        "changed": False,
+        "scene_changed": False if expected else None,
+        "scene_preserved": expected,
+    }
+    if isinstance(exc, GeometryOutputCollision):
+        result.update(
+            {
+                "error_code": "output_name_collision",
+                "output_kind": exc.kind,
+                "collisions": [dict(item) for item in exc.collisions],
+                "guidance": "choose a different output name; user-owned names are never replaced",
+            }
+        )
+    elif isinstance(exc, StaleStoredAxis):
+        result.update(
+            {
+                "error_code": "stale_stored_axis",
+                "axis_name": exc.axis_name,
+                "stale_reasons": list(exc.reasons),
+                "guidance": "recompute the stored axis after changing its source objects",
+            }
+        )
+    elif isinstance(exc, StaleOrientationUndo):
+        result.update(
+            {
+                "error_code": "stale_orientation_undo",
+                "operation_id": exc.operation_id,
+                "stale_objects": list(exc.objects),
+                "guidance": "inspect the newer edits, or pass force=1 to overwrite them",
+            }
+        )
+    elif isinstance(exc, GeometryError):
+        result.update(
+            {
+                "error_code": "geometry_request_rejected",
+                "guidance": (
+                    "check the selected atoms, axis confidence, and explicit force choice"
+                ),
+            }
+        )
+    elif isinstance(exc, ValueError):
+        result.update(
+            {
+                "error_code": "invalid_geometry_request",
+                "guidance": "check axis source, selections, and command parameters",
+            }
+        )
+    else:
+        result.update(
+            {
+                "error_code": "geometry_internal_error",
+                "guidance": "inspect the traceback and verify the PyMOL scene state",
+            }
+        )
+    return result
+
+
+def _report_geometry_error(exc: Exception) -> Dict[str, object]:
+    result = _geometry_error_result(exc)
+    print(
+        "Geometry error: {} Next: {}.".format(
+            exc, result.get("guidance", "inspect the command inputs")
+        )
+    )
+    if not isinstance(
+        exc,
+        (
+            GeometryOutputCollision,
+            StaleStoredAxis,
+            StaleOrientationUndo,
+            GeometryError,
+            ValueError,
+        ),
+    ):
+        traceback.print_exc()
+    return result
+
+
+def _axis_command_payload(
+    result: AxisResult, name: str, drawn: bool
+) -> Dict[str, object]:
+    ownership = _GEOMETRY_OUTPUT_OWNERS.get(str(name)) if drawn else None
+    payload = result.to_dict()
+    payload.update(
+        {
+            "status": "drawn" if drawn else "computed",
+            "changed": bool(drawn),
+            "scene_changed": bool(drawn),
+            "name": str(name),
+            "drawn": bool(drawn),
+            "output_names": [str(name)] if drawn else [],
+            "ownership_id": ownership.id if ownership is not None else None,
+        }
+    )
+    return payload
+
+
+def _orientation_command_payload(
+    result: AxisResult,
+    matrix: Sequence[float],
+    objects: Sequence[str],
+    operation: Optional[OrientationRecord],
+    roll_constrained: bool,
+    command_name: str,
+) -> Dict[str, object]:
+    committed = operation is not None
+    next_command = (
+        "pp_orientation_undo {}".format(operation.id)
+        if operation is not None
+        else "re-run {} with the same arguments and commit=1".format(command_name)
+    )
+    return {
+        "schema": "pymolplugins.orientation/1.0",
+        "status": "committed" if committed else "preview",
+        "changed": committed,
+        "scene_changed": committed,
+        "axis": result.to_dict(),
+        "matrix": list(matrix),
+        "move_objects": list(objects),
+        "committed": committed,
+        "operation_id": operation.id if operation is not None else None,
+        "committed_fingerprint": (
+            operation.committed_fingerprint if operation is not None else None
+        ),
+        "roll_constrained": bool(roll_constrained),
+        "next_command": next_command,
+    }
+
+
+def _membrane_command_payload(result: MembraneResult) -> Dict[str, object]:
+    ownership = _GEOMETRY_OUTPUT_OWNERS.get(result.name)
+    payload = result.to_dict()
+    payload.update(
+        {
+            "status": "drawn",
+            "changed": True,
+            "scene_changed": True,
+            "output_names": [result.name, "{}__planes".format(result.name)],
+            "ownership_id": ownership.id if ownership is not None else None,
+            "next_command": "delete {}; delete {}__planes".format(
+                result.name, result.name
+            ),
+        }
+    )
+    return payload
 
 
 def _json_sha256(value: object) -> str:
@@ -830,7 +1103,7 @@ def _selection_samples(
     owners = list(_require_cmd().get_object_list(expression) or [])
     result: List[Tuple[Point, str]] = []
     for atom in getattr(model, "atom", ()) or ():
-        owner = str(getattr(atom, "model", "") or "")
+        owner = str(getattr(atom, "model", "") or "").strip()
         if not owner and len(owners) == 1:
             owner = owners[0]
         if owner and owner not in matrices:
@@ -874,6 +1147,436 @@ def _pca_inputs(
     return points, [_ELEMENT_MASSES[element] for _, element in samples], "mass"
 
 
+def _all_scene_names() -> List[str]:
+    api = _require_cmd()
+    try:
+        names = list(api.get_names("all") or [])
+    except TypeError:
+        names = list(api.get_names() or [])
+    try:
+        names.extend(api.get_names("selections") or [])
+    except Exception:
+        pass
+    return list(dict.fromkeys(str(name) for name in names))
+
+
+def _scene_type(name: str) -> str:
+    try:
+        return str(_require_cmd().get_type(name) or "unknown")
+    except Exception:
+        return "unknown"
+
+
+def _name_exists(name: str) -> bool:
+    return str(name) in set(_all_scene_names())
+
+
+def _unused_output_name(
+    prefix: str, avoid: Sequence[str] = ()
+) -> str:
+    base = sanitize_name(prefix, fallback="__pp_geometry_stage")
+    api = _require_cmd()
+    forbidden = {str(name) for name in avoid}
+    if hasattr(api, "get_unused_name"):
+        candidate = str(api.get_unused_name(base))
+        while candidate in forbidden:
+            base = "{}_stage".format(base)
+            candidate = str(api.get_unused_name(base))
+        return candidate
+    candidate = base
+    index = 1
+    existing = set(_all_scene_names())
+    while candidate in existing or candidate in forbidden:
+        candidate = "{}_{}".format(base, index)
+        index += 1
+    return candidate
+
+
+def _preflight_output_bundle(
+    kind: str,
+    names: Sequence[str],
+    expected_types: Mapping[str, str],
+) -> Optional[GeometryOutputOwnership]:
+    final_names = tuple(str(name) for name in names)
+    existing = [name for name in final_names if _name_exists(name)]
+    if not existing:
+        for name in final_names:
+            _GEOMETRY_OUTPUT_OWNERS.pop(name, None)
+        return None
+
+    owners = [_GEOMETRY_OUTPUT_OWNERS.get(name) for name in final_names]
+    owner = owners[0] if owners else None
+    marked_names = (
+        [
+            name
+            for name in final_names
+            if expected_types.get(name) == "object:cgo"
+        ]
+        if owner is not None
+        else []
+    )
+    markers_match = bool(
+        owner
+        and marked_names
+        and all(_output_marker_matches(owner, name) for name in marked_names)
+    )
+    is_owned_bundle = bool(
+        owner
+        and all(item is owner for item in owners)
+        and owner.kind == str(kind)
+        and owner.names == final_names
+        and len(existing) == len(final_names)
+        and all(_scene_type(name) == expected_types[name] for name in final_names)
+        and markers_match
+    )
+    if is_owned_bundle:
+        return owner
+    collisions = [
+        {
+            "name": name,
+            "type": _scene_type(name),
+            "owner": (
+                _GEOMETRY_OUTPUT_OWNERS[name].kind
+                if name in _GEOMETRY_OUTPUT_OWNERS
+                else "user"
+            ),
+        }
+        for name in existing
+    ]
+    raise GeometryOutputCollision(kind, collisions)
+
+
+def _register_output_bundle(
+    kind: str, names: Sequence[str], expected_types: Mapping[str, str]
+) -> GeometryOutputOwnership:
+    final_names = tuple(str(name) for name in names)
+    seed = "{}\0{}\0{}".format(kind, "\0".join(final_names), time.time_ns())
+    ownership_id = "geometry_{}_{}".format(
+        sanitize_name(kind, fallback="output"),
+        hashlib.sha1(seed.encode("utf-8")).hexdigest()[:10],
+    )
+    markers = {}
+    marker_backends = {}
+    for name in final_names:
+        if expected_types.get(name) != "object:cgo":
+            continue
+        marker = "pymolplugins.geometry/1:{}:{}".format(ownership_id, name)
+        if hasattr(_require_cmd(), "set_property") and hasattr(
+            _require_cmd(), "get_property"
+        ):
+            try:
+                _require_cmd().set_property(
+                    "_pymolplugins_geometry_owner",
+                    marker,
+                    object=name,
+                    state=0,
+                    proptype=6,
+                    quiet=1,
+                )
+                if str(
+                    _require_cmd().get_property(
+                        "_pymolplugins_geometry_owner", name, state=0, quiet=1
+                    )
+                    or ""
+                ) == marker:
+                    markers[name] = marker
+                    marker_backends[name] = "property"
+                    continue
+            except Exception:
+                pass
+        try:
+            _require_cmd().set_title(name, 1, marker)
+            if str(_require_cmd().get_title(name, 1) or "") == marker:
+                markers[name] = marker
+                marker_backends[name] = "title"
+        except Exception:
+            # Without a durable scene marker the output remains usable, but a
+            # later invocation will refuse to replace it rather than trusting
+            # stale in-memory ownership after user deletion/recreation.
+            pass
+    ownership = GeometryOutputOwnership(
+        id=ownership_id,
+        kind=str(kind),
+        names=final_names,
+        expected_types=dict(expected_types),
+        markers=markers,
+        marker_backends=marker_backends,
+    )
+    for name in final_names:
+        _GEOMETRY_OUTPUT_OWNERS[name] = ownership
+    return ownership
+
+
+def _output_marker_matches(owner: GeometryOutputOwnership, name: str) -> bool:
+    marker = str(owner.markers.get(name, ""))
+    if not marker:
+        return False
+    try:
+        if owner.marker_backends.get(name) == "property":
+            value = _require_cmd().get_property(
+                "_pymolplugins_geometry_owner", name, state=0, quiet=1
+            )
+        elif owner.marker_backends.get(name) == "title":
+            value = _require_cmd().get_title(name, 1)
+        else:
+            return False
+        return str(value or "") == marker
+    except Exception:
+        return False
+
+
+def _preflight_undrawn_axis_name(name: str) -> None:
+    if not _name_exists(name):
+        return
+    owner = _GEOMETRY_OUTPUT_OWNERS.get(name)
+    raise GeometryOutputCollision(
+        "axis",
+        (
+            {
+                "name": str(name),
+                "type": _scene_type(name),
+                "owner": owner.kind if owner is not None else "user",
+            },
+        ),
+    )
+
+
+def _delete_temporary_names(names: Iterable[str]) -> List[str]:
+    failures = []
+    for name in tuple(names):
+        if not name or not _name_exists(name):
+            continue
+        try:
+            _require_cmd().delete(name)
+        except Exception:
+            failures.append(name)
+    return failures
+
+
+def _install_axis_cgo(obj: Sequence[float], name: str) -> GeometryOutputOwnership:
+    final_name = str(name)
+    expected = {final_name: "object:cgo"}
+    previous = _preflight_output_bundle("axis", (final_name,), expected)
+    temporary = _unused_output_name(
+        "__pp_geometry_axis_stage", (final_name,)
+    )
+    backup = ""
+    new_is_final = False
+    old_is_backup = False
+    try:
+        _require_cmd().load_cgo(list(obj), temporary)
+        if not _name_exists(temporary) or _scene_type(temporary) != "object:cgo":
+            raise RuntimeError("PyMOL did not create the staged axis CGO")
+        if previous is not None:
+            backup = _unused_output_name(
+                "__pp_geometry_axis_backup", (final_name, temporary)
+            )
+            _require_cmd().set_name(final_name, backup)
+            old_is_backup = True
+        _require_cmd().set_name(temporary, final_name)
+        new_is_final = True
+        if backup:
+            _require_cmd().delete(backup)
+            old_is_backup = False
+        return _register_output_bundle("axis", (final_name,), expected)
+    except Exception as exc:
+        rollback_failures = []
+        if new_is_final and _name_exists(final_name):
+            try:
+                _require_cmd().set_name(final_name, temporary)
+                new_is_final = False
+            except Exception:
+                rollback_failures.append(final_name)
+        if old_is_backup and backup and _name_exists(backup):
+            try:
+                _require_cmd().set_name(backup, final_name)
+                old_is_backup = False
+            except Exception:
+                rollback_failures.append(backup)
+        rollback_failures.extend(
+            _delete_temporary_names((temporary, backup if old_is_backup else ""))
+        )
+        detail = (
+            "; rollback failed for: {}".format(", ".join(rollback_failures))
+            if rollback_failures
+            else ""
+        )
+        raise RuntimeError("axis output creation failed: {}{}".format(exc, detail)) from exc
+
+
+def _install_membrane_cgo(
+    obj: Sequence[float], group_name: str
+) -> GeometryOutputOwnership:
+    final_group = str(group_name)
+    final_child = "{}__planes".format(final_group)
+    final_names = (final_group, final_child)
+    expected = {
+        final_group: "object:group",
+        final_child: "object:cgo",
+    }
+    previous = _preflight_output_bundle("membrane", final_names, expected)
+    temporary_child = _unused_output_name(
+        "__pp_geometry_membrane_stage", final_names
+    )
+    temporary_group = ""
+    backup_child = ""
+    child_is_final = False
+    group_is_final = False
+    old_child_is_backup = False
+    try:
+        _require_cmd().load_cgo(list(obj), temporary_child)
+        if not _name_exists(temporary_child) or _scene_type(temporary_child) != "object:cgo":
+            raise RuntimeError("PyMOL did not create the staged membrane CGO")
+        if previous is None:
+            temporary_group = _unused_output_name(
+                "__pp_geometry_membrane_group_stage",
+                final_names + (temporary_child,),
+            )
+            _require_cmd().group(temporary_group, temporary_child, action="add")
+            if not _name_exists(temporary_group) or _scene_type(temporary_group) != "object:group":
+                raise RuntimeError("PyMOL did not create the staged membrane group")
+            _require_cmd().set_name(temporary_child, final_child)
+            child_is_final = True
+            _require_cmd().set_name(temporary_group, final_group)
+            group_is_final = True
+        else:
+            backup_child = _unused_output_name(
+                "__pp_geometry_membrane_backup",
+                final_names + (temporary_child,),
+            )
+            _require_cmd().set_name(final_child, backup_child)
+            old_child_is_backup = True
+            _require_cmd().set_name(temporary_child, final_child)
+            child_is_final = True
+            _require_cmd().group(final_group, final_child, action="add")
+            _require_cmd().delete(backup_child)
+            old_child_is_backup = False
+        return _register_output_bundle("membrane", final_names, expected)
+    except Exception as exc:
+        rollback_failures = []
+        if group_is_final and _name_exists(final_group):
+            try:
+                _require_cmd().set_name(final_group, temporary_group)
+                group_is_final = False
+            except Exception:
+                rollback_failures.append(final_group)
+        if child_is_final and _name_exists(final_child):
+            try:
+                _require_cmd().set_name(final_child, temporary_child)
+                child_is_final = False
+            except Exception:
+                rollback_failures.append(final_child)
+        if old_child_is_backup and backup_child and _name_exists(backup_child):
+            try:
+                _require_cmd().set_name(backup_child, final_child)
+                old_child_is_backup = False
+            except Exception:
+                rollback_failures.append(backup_child)
+        rollback_failures.extend(
+            _delete_temporary_names(
+                (
+                    temporary_group,
+                    temporary_child,
+                    backup_child if old_child_is_backup else "",
+                )
+            )
+        )
+        detail = (
+            "; rollback failed for: {}".format(", ".join(rollback_failures))
+            if rollback_failures
+            else ""
+        )
+        raise RuntimeError(
+            "membrane output creation failed: {}{}".format(exc, detail)
+        ) from exc
+
+
+def _ttt_value(name: str) -> Optional[Tuple[float, ...]]:
+    value = _require_cmd().get_object_ttt(name, quiet=1)
+    return None if value is None else tuple(float(item) for item in value)
+
+
+def _ttt_close(
+    left: Optional[Sequence[float]],
+    right: Optional[Sequence[float]],
+    tolerance: float = 1.0e-6,
+) -> bool:
+    return all(
+        abs(float(a) - float(b)) <= tolerance
+        for a, b in zip(ttt_to_homogeneous(left), ttt_to_homogeneous(right))
+    )
+
+
+def _axis_coordinate_hash(selection: str, atoms: str, state: int) -> str:
+    samples = _selection_samples(selection, atoms, state)
+    return _json_sha256(
+        [
+            {
+                "coord": [round(float(value), 8) for value in coordinate],
+                "element": element,
+            }
+            for coordinate, element in samples
+        ]
+    )
+
+
+def _capture_axis_source(
+    selection: str, atoms: str, state: int
+) -> AxisSourceSnapshot:
+    expression = str(selection)
+    object_names = tuple(
+        dict.fromkeys(_require_cmd().get_object_list("({})".format(expression)) or [])
+    )
+    return AxisSourceSnapshot(
+        selection=expression,
+        atoms=str(atoms),
+        state=int(state),
+        objects=object_names,
+        object_ttt={name: _ttt_value(name) for name in object_names},
+        coordinate_hash=_axis_coordinate_hash(expression, str(atoms), int(state)),
+    )
+
+
+def _stored_axis_stale_reasons(name: str) -> List[str]:
+    result = _AXES[name]
+    snapshot = _AXIS_SOURCES.get(name)
+    if snapshot is None:
+        return ["source snapshot is unavailable"] if result.input_selection else []
+    reasons = []
+    current_objects = tuple(
+        dict.fromkeys(
+            _require_cmd().get_object_list("({})".format(snapshot.selection)) or []
+        )
+    )
+    if set(current_objects) != set(snapshot.objects):
+        reasons.append("source object membership changed")
+    for object_name in snapshot.objects:
+        if object_name not in current_objects:
+            continue
+        try:
+            current_ttt = _ttt_value(object_name)
+        except Exception:
+            reasons.append("source object is unavailable: {}".format(object_name))
+            continue
+        if not _ttt_close(current_ttt, snapshot.object_ttt.get(object_name)):
+            reasons.append("source object transform changed: {}".format(object_name))
+    try:
+        current_hash = _axis_coordinate_hash(
+            snapshot.selection, snapshot.atoms, snapshot.state
+        )
+        if current_hash != snapshot.coordinate_hash:
+            reasons.append("source coordinates changed")
+    except Exception as exc:
+        reasons.append("source coordinates cannot be read: {}".format(exc))
+    return list(dict.fromkeys(reasons))
+
+
+def _validate_stored_axis(name: str) -> None:
+    reasons = _stored_axis_stale_reasons(name)
+    if reasons:
+        raise StaleStoredAxis(name, reasons)
+
+
 def _draw_axis(result: AxisResult, name: str, length: float = 50.0, radius: float = 0.4, color: str = "yellow") -> None:
     from pymol import cgo
 
@@ -882,8 +1585,7 @@ def _draw_axis(result: AxisResult, name: str, length: float = 50.0, radius: floa
     end = add(result.center, scale(direction, length / 2.0))
     rgb = _require_cmd().get_color_tuple(color)
     obj = [cgo.CYLINDER, *start, *end, radius, *rgb, *rgb]
-    _require_cmd().delete(name)
-    _require_cmd().load_cgo(obj, name)
+    _install_axis_cgo(obj, name)
 
 
 def _target_axis(value: object) -> Point:
@@ -1004,8 +1706,66 @@ def _rollback_orientation(
     return failures
 
 
-def _apply_orientation(matrix: Sequence[float], objects: Sequence[str]) -> None:
-    global _ORIENTATION_UNDO
+def _new_orientation_id(objects: Sequence[str]) -> str:
+    seed = "{}\0{}".format("\0".join(objects), time.time_ns())
+    return "orient_{}".format(
+        hashlib.sha1(seed.encode("utf-8")).hexdigest()[:12]
+    )
+
+
+def _orientation_ttt_fingerprint(
+    values: Mapping[str, Optional[Sequence[float]]]
+) -> str:
+    return _json_sha256(
+        {
+            name: [float(item) for item in ttt_to_homogeneous(value)]
+            for name, value in sorted(values.items())
+        }
+    )
+
+
+def _latest_orientation_record() -> Optional[OrientationRecord]:
+    for record in reversed(tuple(_ORIENTATION_RECORDS.values())):
+        if not record.undone:
+            return record
+    return None
+
+
+def _sync_legacy_orientation_undo() -> None:
+    global _LAST_ORIENTATION_ID
+    record = _latest_orientation_record()
+    _ORIENTATION_UNDO.clear()
+    if record is None:
+        _LAST_ORIENTATION_ID = ""
+        return
+    _LAST_ORIENTATION_ID = record.id
+    _ORIENTATION_UNDO.update(record.baseline_ttt)
+
+
+def _store_orientation_record(record: OrientationRecord) -> None:
+    _ORIENTATION_RECORDS[record.id] = record
+    _ORIENTATION_RECORDS.move_to_end(record.id)
+    while len(_ORIENTATION_RECORDS) > _ORIENTATION_RECORD_LIMIT:
+        _ORIENTATION_RECORDS.popitem(last=False)
+    _sync_legacy_orientation_undo()
+
+
+def _orientation_record(operation_id: object = "") -> OrientationRecord:
+    key = str(operation_id).strip()
+    if key:
+        try:
+            return _ORIENTATION_RECORDS[key]
+        except KeyError as exc:
+            raise ValueError("unknown orientation operation: {}".format(key)) from exc
+    record = _latest_orientation_record()
+    if record is None:
+        raise ValueError("no committed orientation to undo")
+    return record
+
+
+def _apply_orientation(
+    matrix: Sequence[float], objects: Sequence[str]
+) -> OrientationRecord:
     unique_objects = tuple(dict.fromkeys(objects))
     if not unique_objects:
         raise ValueError("no move objects resolved")
@@ -1015,7 +1775,6 @@ def _apply_orientation(matrix: Sequence[float], objects: Sequence[str]) -> None:
         baselines[name] = (
             None if baseline is None else tuple(float(value) for value in baseline)
         )
-    previous_undo = dict(_ORIENTATION_UNDO)
     attempted = []
     try:
         for name in unique_objects:
@@ -1026,32 +1785,49 @@ def _apply_orientation(matrix: Sequence[float], objects: Sequence[str]) -> None:
                 list(homogeneous_to_ttt(mat4_multiply(matrix, current))),
                 quiet=1,
             )
+        committed = {name: _ttt_value(name) for name in unique_objects}
+        record = OrientationRecord(
+            id=_new_orientation_id(unique_objects),
+            created_at=time.time(),
+            objects=unique_objects,
+            baseline_ttt=dict(baselines),
+            committed_ttt=committed,
+            committed_fingerprint=_orientation_ttt_fingerprint(committed),
+        )
     except Exception as exc:
         rollback_failures = _rollback_orientation(baselines, attempted)
-        _ORIENTATION_UNDO = previous_undo
         detail = (
             f"; rollback failed for: {', '.join(rollback_failures)}"
             if rollback_failures
             else ""
         )
         raise RuntimeError(f"orientation commit failed: {exc}{detail}") from exc
-    _ORIENTATION_UNDO = baselines
+    _store_orientation_record(record)
+    return record
 
 
-def pp_orientation_undo() -> Dict[str, object]:
+def pp_orientation_undo(
+    operation_id: object = "", force: object = 0
+) -> Dict[str, object]:
+    """Undo one committed orientation without overwriting newer edits by default."""
     try:
-        if not _ORIENTATION_UNDO:
-            raise RuntimeError("no committed orientation to undo")
-        baselines = dict(_ORIENTATION_UNDO)
-        current = {}
-        for name in baselines:
-            value = _require_cmd().get_object_ttt(name, quiet=1)
-            current[name] = (
-                None if value is None else tuple(float(item) for item in value)
+        record = _orientation_record(operation_id)
+        if record.undone:
+            raise ValueError(
+                "orientation operation is already undone: {}".format(record.id)
             )
+        force_value = as_bool(force)
+        current = {name: _ttt_value(name) for name in record.objects}
+        stale = [
+            name
+            for name in record.objects
+            if not _ttt_close(current[name], record.committed_ttt[name])
+        ]
+        if stale and not force_value:
+            raise StaleOrientationUndo(record.id, stale)
         restored = []
         try:
-            for name, value in baselines.items():
+            for name, value in record.baseline_ttt.items():
                 restored.append(name)
                 _set_ttt_baseline(name, value)
         except Exception as exc:
@@ -1062,12 +1838,21 @@ def pp_orientation_undo() -> Dict[str, object]:
                 else ""
             )
             raise RuntimeError(f"orientation undo failed: {exc}{detail}") from exc
-        _ORIENTATION_UNDO.clear()
-        return {"status": "restored", "objects": restored}
+        record.undone = True
+        _sync_legacy_orientation_undo()
+        print("Orientation undone: {}".format(record.id))
+        return {
+            "status": "restored",
+            "changed": True,
+            "operation_id": record.id,
+            "committed_fingerprint": record.committed_fingerprint,
+            "objects": restored,
+            "forced": force_value,
+            "stale_overwritten": stale if force_value else [],
+            "next_command": None,
+        }
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _report_geometry_error(exc)
 
 
 def pp_axis_pca(
@@ -1080,8 +1865,11 @@ def pp_axis_pca(
     weighting="equal",
 ) -> Dict[str, object]:
     try:
+        parsed_state = as_int(state, minimum=1, name="state")
+        key = str(name)
+        draw_value = as_bool(draw)
         points, weights, weighting_mode = _pca_inputs(
-            str(selection), str(atoms), as_int(state, minimum=1, name="state"), weighting
+            str(selection), str(atoms), parsed_state, weighting
         )
         result = pca_axis(points, axis, weights)
         diagnostics = dict(result.diagnostics)
@@ -1096,19 +1884,27 @@ def pp_axis_pca(
                     "atoms": str(atoms),
                     "axis": str(axis),
                     "weighting": weighting_mode,
-                    "state": as_int(state, minimum=1, name="state"),
+                    "state": parsed_state,
+                    "draw": draw_value,
                 },
             }
         )
-        _AXES[str(name)] = result
-        if as_bool(draw):
-            _draw_axis(result, str(name))
-        print(f"PCA axis {name}: confidence={result.confidence:.3f}")
-        return result.to_dict()
+        source_snapshot = _capture_axis_source(
+            str(selection), str(atoms), parsed_state
+        )
+        if draw_value:
+            _draw_axis(result, key)
+        else:
+            _preflight_undrawn_axis_name(key)
+        _AXES[key] = result
+        _AXIS_SOURCES[key] = source_snapshot
+        print(
+            f"PCA axis {name}: confidence={result.confidence:.3f}, "
+            f"status={'drawn' if draw_value else 'computed; scene unchanged'}"
+        )
+        return _axis_command_payload(result, key, draw_value)
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _report_geometry_error(exc)
 
 
 def pp_axis_vector(
@@ -1123,17 +1919,34 @@ def pp_axis_vector(
     draw=1,
 ) -> Dict[str, object]:
     try:
+        parsed_state = as_int(state, minimum=1, name="state")
+        draw_value = as_bool(draw)
+        length_value = as_float(length, minimum=0.1, name="length")
+        radius_value = as_float(radius, minimum=0.001, name="radius")
+        color_value = str(color)
+        source_atoms = ""
+        source_snapshot = None
         if str(center).strip():
+            if str(selection).strip().lower() not in {"", "all"}:
+                raise ValueError(
+                    "selection and an explicit center are mutually exclusive; "
+                    "omit selection or omit center"
+                )
             axis_center = parse_vector(center)
             input_selection = ""
         else:
             points = _selection_coords(
-                str(selection), "ca", as_int(state, minimum=1, name="state")
+                str(selection), "ca", parsed_state
             )
+            source_atoms = "ca"
             if not points:
-                points = _selection_coords(str(selection), "heavy", as_int(state, minimum=1, name="state"))
+                points = _selection_coords(str(selection), "heavy", parsed_state)
+                source_atoms = "heavy"
             axis_center = centroid(points)
             input_selection = str(selection)
+            source_snapshot = _capture_axis_source(
+                input_selection, source_atoms, parsed_state
+            )
         result = vector_axis(
             _target_axis(vector),
             axis_center,
@@ -1147,25 +1960,40 @@ def pp_axis_vector(
                     "vector": list(_target_axis(vector)),
                     "center": list(axis_center),
                     "selection": input_selection,
-                    "state": as_int(state, minimum=1, name="state"),
+                    "state": parsed_state,
+                    "draw": draw_value,
+                    "length": length_value,
+                    "radius": radius_value,
+                    "color": color_value,
                 },
             }
         )
         key = str(name)
-        _AXES[key] = result
-        if as_bool(draw):
+        if draw_value:
             _draw_axis(
                 result,
                 key,
-                as_float(length, minimum=0.1, name="length"),
-                as_float(radius, minimum=0.001, name="radius"),
-                str(color),
+                length_value,
+                radius_value,
+                color_value,
             )
-        return result.to_dict()
+        else:
+            _preflight_undrawn_axis_name(key)
+        _AXES[key] = result
+        if source_snapshot is None:
+            _AXIS_SOURCES.pop(key, None)
+        else:
+            _AXIS_SOURCES[key] = source_snapshot
+        print(
+            "Vector axis {}: {} at center {}".format(
+                key,
+                "drawn" if draw_value else "computed only; scene unchanged",
+                ",".join("{:.3f}".format(value) for value in result.center),
+            )
+        )
+        return _axis_command_payload(result, key, draw_value)
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _report_geometry_error(exc)
 
 
 def pp_axis_two_points(
@@ -1178,28 +2006,44 @@ def pp_axis_two_points(
 ) -> Dict[str, object]:
     try:
         parsed_points = _parse_two_points(points)
+        draw_value = as_bool(draw)
+        length_value = as_float(length, minimum=0.1, name="length")
+        radius_value = as_float(radius, minimum=0.001, name="radius")
+        color_value = str(color)
         result = two_point_axis(parsed_points)
         result = AxisResult(
             **{
                 **result.__dict__,
-                "parameters": {"points": _point_payload(parsed_points)},
+                "parameters": {
+                    "points": _point_payload(parsed_points),
+                    "draw": draw_value,
+                    "length": length_value,
+                    "radius": radius_value,
+                    "color": color_value,
+                },
             }
         )
         key = str(name)
-        _AXES[key] = result
-        if as_bool(draw):
+        if draw_value:
             _draw_axis(
                 result,
                 key,
-                as_float(length, minimum=0.1, name="length"),
-                as_float(radius, minimum=0.001, name="radius"),
-                str(color),
+                length_value,
+                radius_value,
+                color_value,
             )
-        return result.to_dict()
+        else:
+            _preflight_undrawn_axis_name(key)
+        _AXES[key] = result
+        _AXIS_SOURCES.pop(key, None)
+        print(
+            "Two-point axis {}: {}".format(
+                key, "drawn" if draw_value else "computed only; scene unchanged"
+            )
+        )
+        return _axis_command_payload(result, key, draw_value)
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _report_geometry_error(exc)
 
 
 def pp_orient_pca(
@@ -1219,6 +2063,18 @@ def pp_orient_pca(
 ) -> Dict[str, object]:
     try:
         parsed_state = as_int(state, minimum=1, name="state")
+        center_value = as_bool(center)
+        force_value = as_bool(force)
+        commit_value = as_bool(commit)
+        threshold = as_float(
+            min_confidence, minimum=0.0, maximum=1.0, name="min_confidence"
+        )
+        secondary_value = str(secondary_selection).strip()
+        secondary_target_value = str(secondary_target).strip().lower()
+        if not secondary_value and secondary_target_value not in {"", "auto"}:
+            raise ValueError(
+                "secondary_target requires secondary_selection; otherwise roll is undefined"
+            )
         objects = _move_objects(selection, move)
         if not objects:
             raise ValueError("no move objects resolved")
@@ -1226,13 +2082,11 @@ def pp_orient_pca(
             str(selection), str(atoms), parsed_state, weighting
         )
         result = pca_axis(points, axis, weights)
-        threshold = as_float(min_confidence, minimum=0.0, maximum=1.0, name="min_confidence")
-        if result.confidence < threshold and not as_bool(force):
+        if result.confidence < threshold and not force_value:
             raise GeometryError(
                 f"PCA axis confidence {result.confidence:.3f} is below {threshold:.3f}; use force=1"
             )
         secondary_direction = None
-        secondary_value = str(secondary_selection).strip()
         if secondary_value:
             secondary_points = _selection_coords(secondary_value, "ca", parsed_state)
             if not secondary_points:
@@ -1275,66 +2129,273 @@ def pp_orient_pca(
                     "target_axis": list(target_direction),
                     "atoms": str(atoms),
                     "axis": str(axis),
-                    "center_at_origin": as_bool(center),
+                    "center_at_origin": center_value,
                     "weighting": weighting_mode,
                     "secondary_selection": secondary_value,
                     "secondary_target": (
                         "auto" if target_secondary is None else list(target_secondary)
                     ),
+                    "min_confidence": threshold,
+                    "force": force_value,
                     "state": parsed_state,
                 },
             }
         )
-        target_center = (0.0, 0.0, 0.0) if as_bool(center) else result.center
+        target_center = (0.0, 0.0, 0.0) if center_value else result.center
         matrix = compose_about_center(rotation, result.center, target_center)
-        if as_bool(commit):
-            _apply_orientation(matrix, objects)
-        return {
-            "schema": "pymolplugins.orientation/1.0",
-            "axis": result.to_dict(),
-            "matrix": list(matrix),
-            "move_objects": objects,
-            "committed": as_bool(commit),
-            "roll_constrained": roll_constrained,
-        }
+        operation = _apply_orientation(matrix, objects) if commit_value else None
+        if operation is not None:
+            print("Orientation committed: {}".format(operation.id))
+        else:
+            print(
+                "Preview only; nothing changed. Re-run pp_orient_pca with "
+                "the same arguments and commit=1 to apply."
+            )
+        return _orientation_command_payload(
+            result,
+            matrix,
+            objects,
+            operation,
+            roll_constrained,
+            "pp_orient_pca",
+        )
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _report_geometry_error(exc)
 
 
-def _subunit_clouds(selection: str, subunits: object, state: int) -> Dict[str, List[Point]]:
+def _subunit_identity_label(identity: Tuple[str, str, str]) -> str:
+    owner, segi, chain = identity
+    fields = ["object={}".format(owner)]
+    if segi:
+        fields.append("segi={}".format(segi))
+    fields.append("chain={}".format(chain or "<blank>"))
+    return "|".join(fields)
+
+
+def _subunit_ca_records(expression: str, state: int) -> List[_SubunitCARecord]:
+    model = _require_cmd().get_model("({}) and name CA".format(expression), state)
+    owners = list(
+        dict.fromkeys(
+            _require_cmd().get_object_list("({})".format(expression)) or []
+        )
+    )
+    matrices: Dict[str, Tuple[float, ...]] = {}
+    records = []
+    for atom in getattr(model, "atom", ()) or ():
+        if str(getattr(atom, "name", "") or "").strip().upper() != "CA":
+            continue
+        owner = str(getattr(atom, "model", "") or "").strip()
+        if not owner and len(owners) == 1:
+            owner = str(owners[0]).strip()
+        if not owner:
+            raise GeometryError(
+                "CA atom identity is missing its source object; narrow the selection"
+            )
+        if owner not in matrices:
+            try:
+                matrix = _require_cmd().get_object_matrix(
+                    owner, state, incl_ttt=1
+                )
+            except Exception:
+                matrix = None
+            if matrix is None:
+                matrix = ttt_to_homogeneous(
+                    _require_cmd().get_object_ttt(owner, quiet=1)
+                )
+            matrices[owner] = tuple(float(value) for value in matrix)
+        coordinate = tuple(float(value) for value in atom.coord)
+        if len(coordinate) != 3:
+            raise GeometryError("CA atom does not have a 3D coordinate")
+        records.append(
+            _SubunitCARecord(
+                object=owner,
+                segi=str(getattr(atom, "segi", "") or "").strip(),
+                chain=str(getattr(atom, "chain", "") or "").strip(),
+                resi=str(getattr(atom, "resi", "") or "").strip(),
+                resn=str(getattr(atom, "resn", "") or "").strip().upper(),
+                alt=str(getattr(atom, "alt", "") or "").strip(),
+                index=int(getattr(atom, "index", 0) or 0),
+                coord=apply_matrix(matrices[owner], coordinate),
+            )
+        )
+    return records
+
+
+def _residue_order(record: _SubunitCARecord) -> Tuple[object, ...]:
+    number, insertion = parse_residue_identifier(record.resi)
+    if number is None:
+        return (1, record.resi, record.resn, record.index)
+    return (0, number, insertion, record.resi, record.resn, record.index)
+
+
+def _unique_c2_residues(
+    label: str, records: Sequence[_SubunitCARecord]
+) -> Dict[str, _SubunitCARecord]:
+    result = {}
+    duplicates = []
+    for record in records:
+        if not record.resi:
+            raise GeometryError(
+                "C2 residue correspondence requires non-empty residue IDs in {}".format(
+                    label
+                )
+            )
+        if not record.resn:
+            raise GeometryError(
+                "C2 residue correspondence requires non-empty residue names in {}".format(
+                    label
+                )
+            )
+        if record.resi in result:
+            duplicates.append(record.resi)
+        result[record.resi] = record
+    if duplicates:
+        raise GeometryError(
+            "C2 subunit {} has duplicate CA residue identities: {}".format(
+                label, ", ".join(sorted(set(duplicates)))
+            )
+        )
+    return result
+
+
+def _paired_c2_clouds(
+    grouped: Mapping[str, Sequence[_SubunitCARecord]], labels: Sequence[str]
+) -> Tuple[Dict[str, List[Point]], Dict[str, object]]:
+    first_label, second_label = labels
+    first = _unique_c2_residues(first_label, grouped[first_label])
+    second = _unique_c2_residues(second_label, grouped[second_label])
+    missing_first = set(second).difference(first)
+    missing_second = set(first).difference(second)
+    if missing_first or missing_second:
+        raise GeometryError(
+            "C2 residue correspondence mismatch: {} missing [{}]; {} missing [{}]".format(
+                first_label,
+                ", ".join(sorted(missing_first)) or "none",
+                second_label,
+                ", ".join(sorted(missing_second)) or "none",
+            )
+        )
+    inconsistent = [
+        resi
+        for resi in first
+        if first[resi].resn != second[resi].resn
+    ]
+    if inconsistent:
+        rendered = ", ".join(
+            "{}({}/{})".format(
+                resi, first[resi].resn or "?", second[resi].resn or "?"
+            )
+            for resi in sorted(inconsistent)
+        )
+        raise GeometryError(
+            "C2 residue correspondence has inconsistent residue names: {}".format(
+                rendered
+            )
+        )
+    ordered = sorted(first, key=lambda resi: _residue_order(first[resi]))
+    clouds = {
+        first_label: [first[resi].coord for resi in ordered],
+        second_label: [second[resi].coord for resi in ordered],
+    }
+    correspondence_payload = [
+        {"resi": resi, "resn": first[resi].resn} for resi in ordered
+    ]
+    return clouds, {
+        "c2_correspondence": "CA by exact resi and resn",
+        "c2_correspondence_count": len(ordered),
+        "c2_correspondence_hash": _json_sha256(correspondence_payload),
+    }
+
+
+def _subunit_clouds(
+    selection: str, subunits: object, state: int
+) -> Dict[str, List[Point]]:
     labels = split_names(subunits)
+    if len(set(labels)) != len(labels):
+        raise GeometryError("explicit subunit selections must be unique")
+    grouped: "OrderedDict[str, List[_SubunitCARecord]]" = OrderedDict()
+    resolved_identities = []
     if labels:
-        clouds = {label: _selection_coords(f"({selection}) and ({label})", "ca", state) for label in labels}
+        for label in labels:
+            records = _subunit_ca_records(
+                "({}) and ({})".format(selection, label), state
+            )
+            if not records:
+                raise GeometryError(
+                    "explicit subunit {!r} contains no CA atoms".format(label)
+                )
+            grouped[label] = records
+            identities = sorted(
+                {
+                    (record.object, record.segi, record.chain)
+                    for record in records
+                }
+            )
+            resolved_identities.append(
+                {
+                    "label": label,
+                    "members": [list(identity) for identity in identities],
+                    "ca_count": len(records),
+                }
+            )
+        identity_mode = "explicit_selection"
     else:
-        # Group directly from one atom stream. This preserves a real blank
-        # chain and multi-character mmCIF chain IDs without constructing a
-        # fragile ``chain`` selection expression.
-        model = _require_cmd().get_model(f"({selection}) and name CA", state)
-        owners = list(_require_cmd().get_object_list(selection) or [])
-        matrices: Dict[str, Tuple[float, ...]] = {}
-        clouds = {}
-        for atom in getattr(model, "atom", ()) or ():
-            chain = str(getattr(atom, "chain", "") or "")
-            owner = str(getattr(atom, "model", "") or "")
-            if not owner and len(owners) == 1:
-                owner = owners[0]
-            if owner and owner not in matrices:
-                try:
-                    matrix = _require_cmd().get_object_matrix(owner, state, incl_ttt=1)
-                except Exception:
-                    matrix = None
-                if matrix is None:
-                    matrix = ttt_to_homogeneous(
-                        _require_cmd().get_object_ttt(owner, quiet=1)
-                    )
-                matrices[owner] = tuple(float(value) for value in matrix)
-            coordinate = tuple(float(value) for value in atom.coord)
-            if owner:
-                coordinate = apply_matrix(matrices[owner], coordinate)
-            clouds.setdefault(chain or "<blank>", []).append(coordinate)
-    return {label: points for label, points in clouds.items() if points}
+        automatic = _subunit_ca_records(selection, state)
+        if not automatic:
+            raise GeometryError("selection contains no CA atoms")
+        by_identity: "OrderedDict[Tuple[str, str, str], List[_SubunitCARecord]]" = (
+            OrderedDict()
+        )
+        for record in automatic:
+            identity = (record.object, record.segi, record.chain)
+            by_identity.setdefault(identity, []).append(record)
+        for identity in sorted(by_identity):
+            label = _subunit_identity_label(identity)
+            records = by_identity[identity]
+            grouped[label] = records
+            resolved_identities.append(
+                {
+                    "label": label,
+                    "object": identity[0],
+                    "segi": identity[1],
+                    "chain": identity[2],
+                    "ca_count": len(records),
+                }
+            )
+        identity_mode = "object+segi+chain"
+
+    ordered_grouped = {
+        label: sorted(records, key=_residue_order)
+        for label, records in grouped.items()
+    }
+    correspondence = {}
+    if len(ordered_grouped) == 2:
+        clouds, correspondence = _paired_c2_clouds(
+            ordered_grouped, list(ordered_grouped)
+        )
+    else:
+        clouds = {
+            label: [record.coord for record in records]
+            for label, records in ordered_grouped.items()
+        }
+    diagnostics = {
+        "subunit_identity_mode": identity_mode,
+        "resolved_subunit_identities": resolved_identities,
+        **correspondence,
+    }
+    return _SubunitCloudMap(clouds, diagnostics=diagnostics)
+
+
+def _command_cyclic_axis(
+    clouds: Mapping[str, Sequence[Sequence[float]]]
+) -> AxisResult:
+    result = cyclic_axis(clouds)
+    resolution = dict(getattr(clouds, "resolution_diagnostics", {}) or {})
+    if not resolution:
+        return result
+    diagnostics = dict(result.diagnostics)
+    diagnostics.update(resolution)
+    return AxisResult(**{**result.__dict__, "diagnostics": diagnostics})
 
 
 def pp_axis_cyclic(
@@ -1348,24 +2409,31 @@ def pp_axis_cyclic(
     force=0,
 ) -> Dict[str, object]:
     try:
-        clouds = _subunit_clouds(selection, subunits, as_int(state, minimum=1, name="state"))
-        auto_order = str(order).strip().lower() == "auto"
-        if not auto_order and as_int(order, minimum=2, name="order") != len(clouds):
-            raise ValueError(f"requested order {order} but resolved {len(clouds)} subunits")
-        result = cyclic_axis(clouds)
+        parsed_state = as_int(state, minimum=1, name="state")
+        key = str(name)
+        draw_value = as_bool(draw)
+        force_value = as_bool(force)
         threshold = as_float(
             min_confidence, minimum=0.0, maximum=1.0, name="min_confidence"
         )
+        auto_order = str(order).strip().lower() == "auto"
+        requested_order = (
+            None if auto_order else as_int(order, minimum=2, name="order")
+        )
+        clouds = _subunit_clouds(selection, subunits, parsed_state)
+        if requested_order is not None and requested_order != len(clouds):
+            raise ValueError(f"requested order {order} but resolved {len(clouds)} subunits")
+        result = _command_cyclic_axis(clouds)
         classification = result.diagnostics.get("classification", "cyclic")
         explicit_subunits = bool(split_names(subunits)) or not auto_order
-        if classification != "cyclic" and not as_bool(force):
+        if classification != "cyclic" and not force_value:
             raise GeometryError(
                 f"resolved subunits are classified as {classification}; use force=1"
             )
         if (
             result.confidence < threshold
             and not explicit_subunits
-            and not as_bool(force)
+            and not force_value
         ):
             raise GeometryError(
                 f"automatic cyclic-axis confidence {result.confidence:.3f} is below "
@@ -1386,25 +2454,36 @@ def pp_axis_cyclic(
                 "parameters": {
                     "selection": str(selection),
                     "subunits": split_names(subunits),
-                    "order": "auto" if auto_order else int(order),
-                    "state": as_int(state, minimum=1, name="state"),
+                    "resolved_subunits": list(clouds),
+                    "subunit_identity_mode": result.diagnostics.get(
+                        "subunit_identity_mode", "coordinate_cloud"
+                    ),
+                    "order": "auto" if auto_order else requested_order,
+                    "state": parsed_state,
                     "min_confidence": threshold,
-                    "force": as_bool(force),
+                    "force": force_value,
+                    "draw": draw_value,
                 },
             }
         )
-        _AXES[str(name)] = result
-        if as_bool(draw):
-            _draw_axis(result, str(name))
+        source_snapshot = _capture_axis_source(
+            str(selection), "ca", parsed_state
+        )
+        if draw_value:
+            _draw_axis(result, key)
+        else:
+            _preflight_undrawn_axis_name(key)
+        _AXES[key] = result
+        _AXIS_SOURCES[key] = source_snapshot
         print(
             f"Cyclic axis {name}: C{result.diagnostics.get('order')}, "
-            f"confidence={result.confidence:.3f}, class={result.diagnostics.get('classification', 'cyclic')}"
+            f"confidence={result.confidence:.3f}, "
+            f"class={result.diagnostics.get('classification', 'cyclic')}, "
+            f"status={'drawn' if draw_value else 'computed; scene unchanged'}"
         )
-        return result.to_dict()
+        return _axis_command_payload(result, key, draw_value)
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _report_geometry_error(exc)
 
 
 def pp_orient_cyclic(
@@ -1420,16 +2499,19 @@ def pp_orient_cyclic(
 ) -> Dict[str, object]:
     try:
         parsed_state = as_int(state, minimum=1, name="state")
+        center_value = as_bool(center)
+        force_value = as_bool(force)
+        commit_value = as_bool(commit)
+        threshold = as_float(
+            min_confidence, minimum=0.0, maximum=1.0, name="min_confidence"
+        )
         clouds = _subunit_clouds(selection, subunits, parsed_state)
         objects = _move_objects(selection, move)
         if not objects:
             raise ValueError("no move objects resolved")
-        result = cyclic_axis(clouds)
-        threshold = as_float(
-            min_confidence, minimum=0.0, maximum=1.0, name="min_confidence"
-        )
+        result = _command_cyclic_axis(clouds)
         classification = result.diagnostics.get("classification", "cyclic")
-        if not as_bool(force) and (
+        if not force_value and (
             result.confidence < threshold or classification != "cyclic"
         ):
             raise GeometryError(
@@ -1452,32 +2534,40 @@ def pp_orient_cyclic(
                 "parameters": {
                     "selection": str(selection),
                     "subunits": split_names(subunits),
+                    "resolved_subunits": list(clouds),
+                    "subunit_identity_mode": result.diagnostics.get(
+                        "subunit_identity_mode", "coordinate_cloud"
+                    ),
                     "move": list(objects),
                     "target_axis": list(target_direction),
-                    "center_at_origin": as_bool(center),
+                    "center_at_origin": center_value,
                     "min_confidence": threshold,
-                    "force": as_bool(force),
+                    "force": force_value,
                     "state": parsed_state,
                 },
             }
         )
         rotation = rotation_from_to(result.direction, target_direction)
-        target_center = (0.0, 0.0, 0.0) if as_bool(center) else result.center
+        target_center = (0.0, 0.0, 0.0) if center_value else result.center
         matrix = compose_about_center(rotation, result.center, target_center)
-        if as_bool(commit):
-            _apply_orientation(matrix, objects)
-        return {
-            "schema": "pymolplugins.orientation/1.0",
-            "axis": result.to_dict(),
-            "matrix": list(matrix),
-            "move_objects": objects,
-            "committed": as_bool(commit),
-            "roll_constrained": False,
-        }
+        operation = _apply_orientation(matrix, objects) if commit_value else None
+        if operation is not None:
+            print("Orientation committed: {}".format(operation.id))
+        else:
+            print(
+                "Preview only; nothing changed. Re-run pp_orient_cyclic with "
+                "the same arguments and commit=1 to apply."
+            )
+        return _orientation_command_payload(
+            result,
+            matrix,
+            objects,
+            operation,
+            False,
+            "pp_orient_cyclic",
+        )
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _report_geometry_error(exc)
 
 
 def _auto_extent(points: Sequence[Point], center: Point, normal: Point, padding: float) -> Tuple[float, float]:
@@ -1525,7 +2615,10 @@ def build_membrane_slab(
         height=slab_height,
         plane_centers=plane_centers,
         source=source or axis_result.source,
-        diagnostics={"axis_confidence": axis_result.confidence},
+        diagnostics={
+            "axis_confidence": axis_result.confidence,
+            "axis": dict(axis_result.diagnostics),
+        },
         input_hash=_json_sha256(
             {
                 "points": _point_payload(clean),
@@ -1559,10 +2652,7 @@ def _draw_membrane(result: MembraneResult, color: str, transparency: float) -> N
         for index in range(4):
             obj.extend([cgo.VERTEX, *corners[index], cgo.VERTEX, *corners[(index + 1) % 4]])
         obj.append(cgo.END)
-    object_name = f"{result.name}__planes"
-    _require_cmd().delete(object_name)
-    _require_cmd().load_cgo(obj, object_name)
-    _require_cmd().group(result.name, object_name, action="add")
+    _install_membrane_cgo(obj, result.name)
 
 
 def _resolve_slab_axis(
@@ -1576,23 +2666,51 @@ def _resolve_slab_axis(
 ) -> Tuple[AxisResult, str]:
     raw_source = str(axis_source).strip()
     source = raw_source.lower()
+    force_value = as_bool(force)
+    requested_subunits = split_names(subunits)
+    if requested_subunits and source != "cyclic":
+        raise ValueError(
+            "subunits is only valid with axis_source=cyclic; remove it for {}".format(
+                raw_source or "the selected axis source"
+            )
+        )
     if source == "pca":
-        return pca_axis(points, "long"), source
+        mode = str(axis).strip() or "long"
+        result = pca_axis(points, mode)
+        if result.confidence < 0.05 and not force_value:
+            raise GeometryError(
+                "PCA axis confidence {:.3f} is below 0.050; choose a better "
+                "axis/selection or use force=1".format(result.confidence)
+            )
+        return result, source
     if source == "cyclic":
-        result = cyclic_axis(_subunit_clouds(selection, subunits, state))
+        if str(axis).strip():
+            raise ValueError(
+                "axis is not used with axis_source=cyclic; omit axis or choose "
+                "axis_source=vector"
+            )
+        result = _command_cyclic_axis(
+            _subunit_clouds(selection, subunits, state)
+        )
         if (
             result.diagnostics.get("classification", "cyclic") != "cyclic"
             or result.confidence < 0.5
-        ) and not as_bool(force):
+        ) and not force_value:
             raise GeometryError(
                 "resolved cyclic axis is low-confidence or non-cyclic; use force=1 to draw anyway"
             )
         return result, source
     if source == "vector":
+        if force_value:
+            raise ValueError("force is only valid for PCA or cyclic axis inference")
         return vector_axis(_target_axis(axis or "z"), centroid(points)), source
     if source == "two_points":
+        if force_value:
+            raise ValueError("force is only valid for PCA or cyclic axis inference")
         return two_point_axis(_parse_two_points(axis)), source
     if source == "anvil":
+        if force_value:
+            raise ValueError("force is only valid for PCA or cyclic axis inference")
         path = os.path.abspath(os.path.expanduser(str(axis).strip()))
         if not str(axis).strip() or not os.path.isfile(path):
             raise ValueError("axis_source=anvil requires axis=<existing ANVIL output PDB>")
@@ -1600,6 +2718,13 @@ def _resolve_slab_axis(
             result, _ = parse_anvil_pdb(handle.read())
         return result, source
     if raw_source in _AXES:
+        if str(axis).strip():
+            raise ValueError(
+                "axis is not used when axis_source names a stored axis"
+            )
+        if force_value:
+            raise ValueError("force cannot bypass stored-axis stale checks")
+        _validate_stored_axis(raw_source)
         return _AXES[raw_source], raw_source
     raise ValueError(
         "axis_source must be pca, cyclic, vector, two_points, anvil, or a stored axis name"
@@ -1630,11 +2755,25 @@ def pp_membrane_slab(
 ) -> Dict[str, object]:
     try:
         parsed_state = as_int(state, minimum=1, name="state")
+        force_value = as_bool(force)
+        color_value = str(color)
+        transparency_value = as_float(
+            transparency, minimum=0.0, maximum=1.0, name="transparency"
+        )
+        explicit_center = (
+            parse_vector(center) if str(center).strip() else None
+        )
         points = _selection_coords(selection, "ca", parsed_state)
         if not points:
             points = _selection_coords(selection, "heavy", parsed_state)
         axis_result, source = _resolve_slab_axis(
-            axis_source, axis, points, str(selection), subunits, parsed_state, force
+            axis_source,
+            axis,
+            points,
+            str(selection),
+            subunits,
+            parsed_state,
+            force_value,
         )
         result = build_membrane_slab(
             points,
@@ -1644,24 +2783,47 @@ def pp_membrane_slab(
             width=_optional_extent(width, "width"),
             height=_optional_extent(height, "height"),
             padding=padding,
-            center=parse_vector(center) if str(center).strip() else None,
+            center=explicit_center,
             source=source,
         )
-        _MEMBRANES[result.name] = result
+        result = MembraneResult(
+            **{
+                **result.__dict__,
+                "parameters": {
+                    **dict(result.parameters),
+                    "selection": str(selection),
+                    "axis_source": source,
+                    "axis": (
+                        axis_result.parameters.get("axis", str(axis).strip() or "long")
+                        if source == "pca"
+                        else str(axis).strip() or ("z" if source == "vector" else "")
+                    ),
+                    "subunits": split_names(subunits),
+                    "center": (
+                        list(explicit_center)
+                        if explicit_center is not None
+                        else "axis_center"
+                    ),
+                    "color": color_value,
+                    "transparency": transparency_value,
+                    "force": force_value,
+                    "state": parsed_state,
+                },
+            }
+        )
         _draw_membrane(
             result,
-            str(color),
-            as_float(transparency, minimum=0.0, maximum=1.0, name="transparency"),
+            color_value,
+            transparency_value,
         )
+        _MEMBRANES[result.name] = result
         print(
             f"Membrane slab {result.name}: thickness={result.thickness:.2f}, "
             f"size={result.width:.2f}x{result.height:.2f}"
         )
-        return result.to_dict()
+        return _membrane_command_payload(result)
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _report_geometry_error(exc)
 
 
 def pp_membrane_from_anvil(
@@ -1681,9 +2843,27 @@ def pp_membrane_from_anvil(
     """Run configured ANVIL or parse output, then draw planes in the input frame."""
     try:
         parsed_state = as_int(state, minimum=1, name="state")
+        color_value = str(color)
+        transparency_value = as_float(
+            transparency, minimum=0.0, maximum=1.0, name="transparency"
+        )
+        arguments_value = str(arguments)
+        timeout_value = as_float(timeout, minimum=0.1, name="timeout")
         configured = str(executable).strip() or os.environ.get(
             "PYMOLPLUGINS_ANVIL_EXECUTABLE", ""
         ).strip()
+        selection_value = str(selection).strip() or "all"
+        if configured and selection_value != "all":
+            raise ValueError(
+                "selection is only used when parsing precomputed ANVIL output; "
+                "executable mode uses input_or_selection as the source selection"
+            )
+        if not configured and (
+            arguments_value != "{input}" or abs(timeout_value - 120.0) > 1.0e-12
+        ):
+            raise ValueError(
+                "arguments and timeout are only valid when executable is configured"
+            )
         runner_provenance: Dict[str, object] = {}
         if configured:
             source_selection = str(input_or_selection).strip()
@@ -1699,8 +2879,8 @@ def pp_membrane_from_anvil(
             output_text, runner_provenance = run_anvil_executable(
                 configured,
                 input_pdb,
-                arguments=str(arguments),
-                timeout=as_float(timeout, minimum=0.1, name="timeout"),
+                arguments=arguments_value,
+                timeout=timeout_value,
             )
             axis_result, thickness = _reframe_anvil_result(input_pdb, output_text)
         else:
@@ -1711,7 +2891,7 @@ def pp_membrane_from_anvil(
                 )
             with open(path, "r", encoding="utf-8", errors="replace") as handle:
                 output_text = handle.read()
-            source_selection = str(selection)
+            source_selection = selection_value
             input_pdb = _require_cmd().get_pdbstr(
                 f"({source_selection}) and name CA", state=parsed_state
             )
@@ -1761,31 +2941,31 @@ def pp_membrane_from_anvil(
                 "input_or_selection": str(input_or_selection),
                 "selection": source_selection,
                 "mode": "executable" if configured else "precomputed_output",
-                "arguments": str(arguments) if configured else None,
-                "timeout": (
-                    as_float(timeout, minimum=0.1, name="timeout")
-                    if configured
-                    else None
-                ),
+                "arguments": arguments_value if configured else None,
+                "timeout": timeout_value if configured else None,
                 "state": parsed_state,
                 "width": slab_width,
                 "height": slab_height,
                 "padding": pad,
+                "color": color_value,
+                "transparency": transparency_value,
             },
             backend=backend,
             warnings=axis_result.warnings,
         )
-        _MEMBRANES[result.name] = result
         _draw_membrane(
             result,
-            str(color),
-            as_float(transparency, minimum=0.0, maximum=1.0, name="transparency"),
+            color_value,
+            transparency_value,
         )
-        return result.to_dict()
+        _MEMBRANES[result.name] = result
+        print(
+            f"Membrane slab {result.name}: thickness={result.thickness:.2f}, "
+            f"size={result.width:.2f}x{result.height:.2f}, source=anvil"
+        )
+        return _membrane_command_payload(result)
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _report_geometry_error(exc)
 
 
 def pp_geometry_export(name: str, filename: str = "") -> Optional[str]:
@@ -1793,6 +2973,7 @@ def pp_geometry_export(name: str, filename: str = "") -> Optional[str]:
     try:
         key = str(name)
         if key in _AXES:
+            _validate_stored_axis(key)
             payload = _AXES[key].to_dict()
         elif key in _MEMBRANES:
             payload = _MEMBRANES[key].to_dict()

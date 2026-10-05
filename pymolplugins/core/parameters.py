@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import re
+import inspect
 from collections.abc import Iterable
 from functools import wraps
 from typing import Any, Callable, List, Optional
@@ -17,6 +18,69 @@ from typing import Any, Callable, List, Optional
 _TRUE_TOKENS = frozenset(("1", "true", "on", "yes", "y", "t"))
 _FALSE_TOKENS = frozenset(("0", "false", "off", "no", "n", "f"))
 _CONSOLE_ADAPTER_MARKER = "_pymolplugins_console_adapter"
+
+
+def _literal_fields(text: str):
+    """Split command arguments, treating quoted text before bracket nesting."""
+    parts, stack = [], []
+    quote, start, index = "", 0, 0
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if text.startswith(quote, index):
+                index += len(quote)
+                quote = ""
+                continue
+        elif char in "\"'":
+            quote = "'''" if text.startswith("'''", index) else char
+            index += len(quote)
+            continue
+        elif char in pairs:
+            stack.append(pairs[char])
+        elif char in ")]}":
+            if not stack or stack.pop() != char:
+                raise ValueError("Unmatched bracket in command arguments")
+        elif not stack and char in ",;":
+            parts.append(text[start:index].strip())
+            if char == ";":
+                return parts, text[index + 1:].strip()
+            start = index + 1
+        index += 1
+    if quote or stack:
+        raise ValueError("Unclosed quote or bracket in command arguments")
+    if text[start:].strip() or parts:
+        parts.append(text[start:].strip())
+    return parts, ""
+
+
+def _literal_console_command(command_api, function):
+    adapted = console_command(function)
+    signature = inspect.signature(function)
+
+    def literal(text=""):
+        parts, following = _literal_fields(text)
+        args, kwargs = [], {}
+        for part in parts:
+            named = re.match(r"^([A-Za-z_]\w*)\s*=(.*)$", part, re.DOTALL)
+            if named:
+                key, value = named.groups()
+                if key in kwargs:
+                    raise TypeError("Repeated argument: " + key)
+                kwargs[key] = value.strip()
+            else:
+                args.append(part if part else None)
+        bound = signature.bind(*args, **kwargs)
+        result = adapted(*bound.args, **bound.kwargs)
+        if following:
+            command_api.do(following)
+        return result
+
+    literal.__name__ = function.__name__
+    literal.__doc__ = function.__doc__
+    setattr(literal, _CONSOLE_ADAPTER_MARKER, True)
+    literal._pymolplugins_literal_target = function
+    return literal
 
 
 def console_text(value: str) -> str:
@@ -66,10 +130,18 @@ def console_command(function: Callable[..., Any]) -> Callable[..., Any]:
 
 
 def extend_command(
-    command_api: Any, name: str, function: Callable[..., Any]
+    command_api: Any, name: str, function: Callable[..., Any], *, literal: bool = False
 ) -> Callable[..., Any]:
     """Register a canonical PyMOL command through :func:`console_command`."""
 
+    if literal:
+        function._pymolplugins_literal_arguments = True
+    if getattr(function, "_pymolplugins_literal_arguments", False):
+        adapted = _literal_console_command(command_api, function)
+        command_api.extend(name, adapted)
+        # PyMOL parsing.LITERAL: preserve the complete quoted regex and template.
+        command_api.keyword[name][4] = 20
+        return adapted
     adapted = console_command(function)
     command_api.extend(name, adapted)
     return adapted

@@ -17,6 +17,18 @@ class PlipBackendError(RuntimeError):
     pass
 
 
+class PlipRequestError(PlipBackendError):
+    """The PLIP request failed host-independent validation."""
+
+
+class PlipUnavailableError(PlipBackendError):
+    """PLIP is not importable in this worker environment."""
+
+
+class PlipScientificContractError(PlipBackendError):
+    """PLIP produced data outside the canonical interaction contract."""
+
+
 class PlipBackend:
     def __init__(self):
         self._error = None
@@ -38,15 +50,23 @@ class PlipBackend:
             "available": self._classes is not None,
             "version": self._version,
             "error": str(self._error) if self._error else None,
+            "action": (
+                None
+                if self._classes is not None
+                else (
+                    "Install or activate PLIP in this worker environment, then "
+                    "restart the worker."
+                )
+            ),
         }
 
     def analyze(self, request: Mapping[str, object]) -> Dict[str, object]:
         try:
             parsed = validate_plip_request(request)
         except PlipProtocolError as exc:
-            raise PlipBackendError(f"invalid PLIP request: {exc}") from exc
+            raise PlipRequestError(f"invalid PLIP request: {exc}") from exc
         if self._classes is None:
-            raise PlipBackendError(f"PLIP is unavailable: {self._error}")
+            raise PlipUnavailableError(f"PLIP is unavailable: {self._error}")
         with self._lock:
             return self._analyze_validated(parsed)
 
@@ -75,6 +95,6 @@ class PlipBackend:
             )
             return interaction_result_from_plip(parsed, raw).to_dict()
         except PlipProtocolError as exc:
-            raise PlipBackendError(f"invalid PLIP result: {exc}") from exc
+            raise PlipScientificContractError(f"invalid PLIP result: {exc}") from exc
         except Exception as exc:
             raise PlipBackendError(f"PLIP analysis failed: {exc}") from exc

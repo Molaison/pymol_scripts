@@ -6,9 +6,12 @@ silently used as the source of truth.
 """
 
 from dataclasses import dataclass, field
+from difflib import get_close_matches
 import hashlib
+import json
 import os
 import re
+from string import Formatter
 import sys
 import traceback
 from collections.abc import MutableMapping
@@ -49,9 +52,140 @@ except ImportError:
         NavigationSession,
     )
 
+from pymolplugins.targets.commands import _execute_checked as _execute_checked_command
+
 
 STRUCTURE_PATTERN = r"^.+\.(?:pdb|cif)(?:\.gz)?$"
 NAVIGATION_KEYS = ("right", "left", "CTRL-right", "CTRL-left")
+_HOOK_FIELDS = frozenset(
+    {
+        "entry",
+        "group",
+        "objects",
+        "object",
+        "window",
+        "window_entries",
+        "index",
+        "position",
+        "batch",
+        "batch_position",
+        "count",
+    }
+)
+
+
+def _named_bool(value: object, name: str) -> bool:
+    """Parse one console boolean while retaining the public field name."""
+
+    try:
+        return as_bool(value)
+    except ValueError as exc:
+        raise NavigationError(f"{name}: {exc}") from None
+
+
+def _one_line(value: object) -> str:
+    return " ".join(str(value).split()).strip()
+
+
+def _with_suggestions(message: str, query: str, candidates: Iterable[str]) -> str:
+    """Append bounded, case-insensitive suggestions without auto-selecting."""
+
+    canonical: Dict[str, str] = {}
+    for candidate in candidates:
+        text = str(candidate)
+        canonical.setdefault(text.casefold(), text)
+    matched = get_close_matches(
+        str(query).casefold(), list(canonical), n=3, cutoff=0.55
+    )
+    if not matched:
+        return message
+    return message + "; did you mean: " + ", ".join(
+        canonical[value] for value in matched
+    )
+
+
+def _summarize_names(names: Iterable[str], limit: int = 4) -> str:
+    values = list(dict.fromkeys(str(name) for name in names if name))
+    if not values:
+        return "(none)"
+    if len(values) <= limit:
+        return ", ".join(values)
+    return ", ".join(values[:limit]) + f", ... (+{len(values) - limit})"
+
+
+def _error_response(
+    command: str,
+    exc: Exception,
+    next_step: str,
+    *,
+    status: str = "error",
+    include_traceback: bool = False,
+    emit: bool = True,
+    **fields: object,
+) -> Dict[str, object]:
+    """Print one actionable first line and return the matching result fields."""
+
+    detail = _one_line(exc) or exc.__class__.__name__
+    action = _one_line(next_step)
+    punctuation = "" if detail.endswith((".", "!", "?")) else "."
+    if emit:
+        print(f"{command} error: {detail}{punctuation} Next: {action}")
+    if include_traceback and emit:
+        traceback.print_exc()
+    result: Dict[str, object] = {"status": status, "error": str(exc)}
+    result.update(fields)
+    return result
+
+
+def _validate_hook_template(template: str) -> None:
+    """Reject unknown hook placeholders before registering scene work."""
+
+    try:
+        parsed = list(Formatter().parse(template))
+    except ValueError as exc:
+        raise NavigationError(f"invalid hook template: {exc}") from None
+    for _literal, field_name, format_spec, _conversion in parsed:
+        if field_name is None:
+            continue
+        if not field_name:
+            raise NavigationError("hook placeholders must be named")
+        if field_name not in _HOOK_FIELDS and not re.fullmatch(
+            r"object_\d+", field_name
+        ):
+            accepted = ", ".join(sorted(_HOOK_FIELDS))
+            raise NavigationError(
+                f"unknown hook placeholder {{{field_name}}}; use one of: {accepted}"
+            )
+        if "{" in format_spec or "}" in format_spec:
+            raise NavigationError("nested hook format fields are not supported")
+
+
+class NavigationStaleError(NavigationError):
+    """Raised before mutation when a group session no longer matches the scene."""
+
+    def __init__(self, changes: Dict[str, Dict[str, object]]):
+        self.changes = changes
+        groups = ", ".join(sorted(changes))
+        super().__init__(
+            "navigation group membership changed since start: %s; "
+            "stop/restart the session before navigating" % groups
+        )
+
+
+class NavigationHookError(RuntimeError):
+    """One checked navigation hook failed before the hook chain completed."""
+
+
+class NavigationTransitionError(RuntimeError):
+    """A scene transition failed, optionally together with its rollback."""
+
+    def __init__(self, cause: Exception, rollback_error: Optional[Exception] = None):
+        self.cause = cause
+        self.rollback_error = rollback_error
+        message = str(cause)
+        if rollback_error is not None:
+            message += "; navigation rollback also failed: %s" % rollback_error
+        super().__init__(message)
 
 
 def _require_cmd():
@@ -177,9 +311,16 @@ def _discover_root_groups(
 ) -> List[str]:
     if explicit:
         groups = []
+        available_groups = sorted(
+            candidate for candidate in _get_names("all") if _is_group(candidate)
+        )
         for name in explicit:
             if not _is_group(name):
-                raise NavigationError(f"not a PyMOL group: {name}")
+                raise NavigationError(
+                    _with_suggestions(
+                        f"not a PyMOL group: {name}", name, available_groups
+                    )
+                )
             if name not in groups:
                 groups.append(name)
         for outer in groups:
@@ -237,10 +378,15 @@ def _build_entries(source: str, entries: object, path: str, pattern: str) -> Lis
         return result
     if source == "objects":
         names = explicit or sorted(name for name in _get_names("all") if _is_leaf(name))
+        available_leaves = sorted(name for name in _get_names("all") if _is_leaf(name))
         result = []
         for name in names:
             if not _is_leaf(name):
-                raise NavigationError(f"not a leaf PyMOL object: {name}")
+                raise NavigationError(
+                    _with_suggestions(
+                        f"not a leaf PyMOL object: {name}", name, available_leaves
+                    )
+                )
             result.append(
                 NavigationEntry(
                     id=f"object:{name}",
@@ -303,12 +449,17 @@ class NavigationController:
     session: NavigationSession
     zoom_policy: str = "current"
     managed_names: Set[str] = field(default_factory=set)
+    retired_file_names: Set[str] = field(default_factory=set)
     loaded_entry_names: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
     original_enabled: Dict[str, bool] = field(default_factory=dict)
     hooks: List[Tuple[str, int]] = field(default_factory=list)
     keys_bound: bool = False
     previous_key_mappings: Dict[str, Tuple[bool, object]] = field(default_factory=dict)
     installed_key_mappings: Dict[str, object] = field(default_factory=dict)
+    degraded: bool = False
+    degraded_reason: str = ""
+    degraded_errors: Dict[str, List[str]] = field(default_factory=dict)
+    membership_changes: Dict[str, Dict[str, object]] = field(default_factory=dict)
     # During an explicit session replacement, already-loaded files owned by the
     # previous controller can be adopted by the new controller.  The source-path
     # check prevents an unrelated pre-existing object with the same generated
@@ -368,16 +519,32 @@ class NavigationController:
                     newly_loaded.extend(
                         name for name in resolved if name not in self.adopted_names
                     )
-        except Exception:
+        except Exception as load_exc:
+            cleanup_failures: List[str] = []
             for name in newly_loaded:
+                delete_error: Optional[Exception] = None
                 try:
                     _require_cmd().delete(name)
-                except Exception:
-                    pass
-                self.managed_names.discard(name)
-            for entry_id, names in list(self.loaded_entry_names.items()):
-                if any(name in newly_loaded for name in names):
-                    self.loaded_entry_names.pop(entry_id, None)
+                except Exception as exc:
+                    delete_error = exc
+                if name in set(_get_names("all")):
+                    cleanup_failures.append(
+                        "%s: %s"
+                        % (
+                            name,
+                            delete_error
+                            or "object still exists after cmd.delete",
+                        )
+                    )
+                    # Retain both ownership and entry mapping.  A transition
+                    # rollback or later pp_nav_stop must still know this name.
+                    continue
+                self._forget_managed_name(name, loaded=True)
+            if cleanup_failures:
+                raise NavigationError(
+                    "%s; file-load cleanup failed: %s"
+                    % (load_exc, "; ".join(cleanup_failures))
+                ) from load_exc
             raise
 
         keep_ids = {entry.id for entry in keep_entries}
@@ -389,9 +556,54 @@ class NavigationController:
                 self.managed_names.discard(name)
             self.loaded_entry_names.pop(entry_id, None)
 
-    def apply_scene(self) -> Dict[str, object]:
+    def _group_membership_changes(self) -> Dict[str, Dict[str, object]]:
+        if self.source != "groups":
+            return {}
+        parents = _group_parent_snapshot()
+        changes: Dict[str, Dict[str, object]] = {}
+        for entry in self.session.entries:
+            group = entry.group_name
+            expected = set(entry.object_names)
+            group_missing = not _is_group(group)
+            current = set() if group_missing else set(_expand_group(group, parents))
+            added = sorted(current.difference(expected))
+            removed = sorted(expected.difference(current))
+            if group_missing or added or removed:
+                changes[group] = {
+                    "added": added,
+                    "removed": removed,
+                    "group_missing": group_missing,
+                }
+        return changes
+
+    def validate_runtime(self) -> None:
+        """Refuse transitions from degraded or stale controller state."""
+
+        if self.degraded:
+            raise NavigationError(
+                "navigation session is degraded after a failed recovery; "
+                "retry pp_nav_stop or use pp_nav_stop force=1"
+            )
+        changes = self._group_membership_changes()
+        self.membership_changes = changes
+        if changes:
+            raise NavigationStaleError(changes)
+
+    def apply_scene(
+        self,
+        *,
+        run_hooks: bool = True,
+        validate_runtime: bool = True,
+        allow_degraded: bool = False,
+    ) -> Dict[str, object]:
+        if validate_runtime:
+            self.validate_runtime()
+        elif self.degraded and not allow_degraded:
+            raise NavigationError(
+                "navigation session is degraded after a failed recovery"
+            )
         self.ensure_resident()
-        for name in sorted(self.managed_names):
+        for name in sorted(self.managed_names.union(self.retired_file_names)):
             if name in _get_names("all"):
                 _require_cmd().disable(name)
         visible_names: List[str] = []
@@ -400,13 +612,47 @@ class NavigationController:
                 if name not in visible_names:
                     visible_names.append(name)
                 _require_cmd().enable(name)
-        self._run_hooks()
+        existing_after = set(_get_names("all"))
+        self.retired_file_names.intersection_update(existing_after)
+        missing = sorted(self.managed_names.difference(existing_after))
+        if missing:
+            raise NavigationError(
+                "managed navigation objects disappeared during scene apply: "
+                + ", ".join(missing)
+            )
+        enabled_after = set(_get_names("all", 1))
+        expected_enabled = set(visible_names)
+        mismatched = sorted(
+            name
+            for name in self.managed_names
+            if (name in enabled_after) != (name in expected_enabled)
+        )
+        if mismatched:
+            raise NavigationError(
+                "PyMOL did not apply managed navigation visibility for: "
+                + ", ".join(mismatched)
+            )
+        visible_retired = sorted(
+            self.retired_file_names.intersection(enabled_after)
+        )
+        if visible_retired:
+            raise NavigationError(
+                "retired navigation file objects could not be hidden: "
+                + ", ".join(visible_retired)
+            )
+        if run_hooks:
+            self._run_hooks()
         self._zoom()
         status = self.status()
+        current_labels = [
+            entry.display_name for entry in self.session.current_entries()
+        ]
         print(
             f"Navigation: {status['position']}/{status['count']} | "
             f"batch {status['batch_position']}/{status['batch_count']} | "
-            f"visible={', '.join(status['visible_names'])}"
+            f"current={_summarize_names(current_labels)} | "
+            f"visible_objects={len(status['visible_names'])} | "
+            f"pins={len(status['pinned_entry_ids'])}"
         )
         return status
 
@@ -435,17 +681,20 @@ class NavigationController:
         context.update(
             {f"object_{index}": name for index, name in enumerate(window_names)}
         )
-        for template, offset in self.hooks:
+        for hook_index, (template, offset) in enumerate(self.hooks, start=1):
             try:
                 hook_context = dict(context)
                 if window_names:
                     hook_context["object"] = window_names[
                         min(max(offset, 0), len(window_names) - 1)
                     ]
-                _require_cmd().do(template.format(**hook_context))
+                rendered = template.format(**hook_context)
+                _execute_checked_command(_require_cmd(), rendered)
             except Exception as exc:
-                print(f"Navigation hook failed '{template}': {exc}")
-                traceback.print_exc()
+                raise NavigationHookError(
+                    "navigation hook %d failed %r: %s"
+                    % (hook_index, template, exc)
+                ) from exc
 
     def _zoom(self) -> None:
         if self.zoom_policy == "none":
@@ -464,13 +713,61 @@ class NavigationController:
             print(f"Navigation zoom warning: {exc}")
 
     def transition(self, method: str, *args) -> Dict[str, object]:
-        previous = self.session.cursor
+        self.validate_runtime()
+        previous_cursor = self.session.cursor
+        previous_pins = set(self.session.pinned_entry_ids)
         try:
             getattr(self.session, method)(*args)
-            return self.apply_scene()
         except Exception:
-            self.session.cursor = previous
+            self.session.cursor = previous_cursor
+            self.session.pinned_entry_ids = previous_pins
             raise
+
+        changed = (
+            self.session.cursor != previous_cursor
+            or self.session.pinned_entry_ids != previous_pins
+        )
+        if not changed:
+            status = self.status()
+            outcome = (
+                "boundary"
+                if method in {"next", "previous", "next_batch", "previous_batch"}
+                else "no_change"
+            )
+            status.update(
+                {
+                    "status": outcome,
+                    "no_change": True,
+                    "transition": method,
+                }
+            )
+            print(
+                "Navigation: %s made no change at position %s/%s"
+                % (method, status["position"], status["count"])
+            )
+            return status
+
+        try:
+            return self.apply_scene(validate_runtime=False)
+        except Exception as exc:
+            self.session.cursor = previous_cursor
+            self.session.pinned_entry_ids = previous_pins
+            rollback_error: Optional[Exception] = None
+            try:
+                self.apply_scene(
+                    run_hooks=False,
+                    validate_runtime=False,
+                    allow_degraded=True,
+                )
+            except Exception as rollback_exc:
+                rollback_error = rollback_exc
+                self.degraded = True
+                self.degraded_reason = "transition_rollback_failed"
+                self.degraded_errors = {
+                    "transition": [str(exc)],
+                    "rollback": [str(rollback_exc)],
+                }
+            raise NavigationTransitionError(exc, rollback_error) from exc
 
     def status(self) -> Dict[str, object]:
         status = self.session.status()
@@ -479,6 +776,8 @@ class NavigationController:
                 "source": self.source,
                 "zoom_policy": self.zoom_policy,
                 "managed_names": sorted(self.managed_names),
+                "cleanup_pending": bool(self.retired_file_names),
+                "retired_file_names": sorted(self.retired_file_names),
                 "visible_names": [
                     name
                     for entry in self.session.visible_entries()
@@ -489,25 +788,115 @@ class NavigationController:
                     for command, offset in self.hooks
                 ],
                 "keys_bound": self.keys_bound,
+                "degraded": self.degraded,
+                "degraded_reason": self.degraded_reason,
+                "degraded_errors": {
+                    key: list(values) for key, values in self.degraded_errors.items()
+                },
+                "membership_stale": bool(self.membership_changes),
+                "membership_changes": {
+                    group: dict(change)
+                    for group, change in self.membership_changes.items()
+                },
             }
         )
         return status
 
-    def stop(self, keep_loaded: bool = False) -> None:
+    def _forget_managed_name(self, name: str, *, loaded: bool) -> None:
+        self.managed_names.discard(name)
+        self.original_enabled.pop(name, None)
+        if not loaded:
+            return
+        for entry_id, names in list(self.loaded_entry_names.items()):
+            remaining = tuple(value for value in names if value != name)
+            if remaining:
+                self.loaded_entry_names[entry_id] = remaining
+            else:
+                self.loaded_entry_names.pop(entry_id, None)
+
+    def stop(self, keep_loaded: bool = False) -> Dict[str, List[str]]:
+        """Best-effort ownership release, retaining failures for a later retry."""
+
+        errors: Dict[str, List[str]] = {"cleanup": [], "visibility": []}
+        attempted_retired: Dict[str, Exception] = {}
+        existing_before = set(_get_names("all"))
+        for name in sorted(self.retired_file_names.intersection(existing_before)):
+            try:
+                _require_cmd().delete(name)
+            except Exception as exc:
+                attempted_retired[name] = exc
+        existing_after = set(_get_names("all"))
+        for name in sorted(tuple(self.retired_file_names)):
+            if name not in existing_after:
+                self.retired_file_names.discard(name)
+                continue
+            errors["cleanup"].append(
+                "%s: %s"
+                % (
+                    name,
+                    attempted_retired.get(name)
+                    or "retired object still exists after cmd.delete",
+                )
+            )
         if self.source == "files" and not keep_loaded:
-            for name in sorted(self.managed_names):
+            attempted: Dict[str, Exception] = {}
+            existing_before = set(_get_names("all"))
+            for name in sorted(self.managed_names.intersection(existing_before)):
                 try:
                     _require_cmd().delete(name)
-                except Exception:
-                    traceback.print_exc()
+                except Exception as exc:
+                    attempted[name] = exc
+            existing_after = set(_get_names("all"))
+            for name in sorted(tuple(self.managed_names)):
+                if name not in existing_after:
+                    self._forget_managed_name(name, loaded=True)
+                    continue
+                detail = attempted.get(name)
+                errors["cleanup"].append(
+                    "%s: %s"
+                    % (
+                        name,
+                        detail or "object still exists after cmd.delete",
+                    )
+                )
+        elif self.source == "files":
+            for name in tuple(self.managed_names):
+                self._forget_managed_name(name, loaded=True)
         else:
-            for name, was_enabled in self.original_enabled.items():
+            attempted_visibility: Dict[str, Exception] = {}
+            existing_before = set(_get_names("all"))
+            for name in sorted(self.managed_names.intersection(existing_before)):
+                was_enabled = bool(self.original_enabled.get(name, False))
                 try:
-                    (_require_cmd().enable if was_enabled else _require_cmd().disable)(name)
-                except Exception:
-                    traceback.print_exc()
-        self.managed_names.clear()
-        self.loaded_entry_names.clear()
+                    (_require_cmd().enable if was_enabled else _require_cmd().disable)(
+                        name
+                    )
+                except Exception as exc:
+                    attempted_visibility[name] = exc
+            existing_after = set(_get_names("all"))
+            enabled_after = set(_get_names("all", 1))
+            for name in sorted(tuple(self.managed_names)):
+                if name not in existing_after:
+                    self._forget_managed_name(name, loaded=False)
+                    continue
+                was_enabled = bool(self.original_enabled.get(name, False))
+                if (name in enabled_after) == was_enabled:
+                    self._forget_managed_name(name, loaded=False)
+                    continue
+                detail = attempted_visibility.get(name)
+                errors["visibility"].append(
+                    "%s: %s"
+                    % (
+                        name,
+                        detail
+                        or "visibility did not change to %s"
+                        % ("enabled" if was_enabled else "disabled"),
+                    )
+                )
+        if not self.managed_names and not self.retired_file_names:
+            self.loaded_entry_names.clear()
+            self.original_enabled.clear()
+        return errors
 
 
 _CONTROLLER: Optional[NavigationController] = None
@@ -530,7 +919,7 @@ class _ReplacementSnapshot:
 
 def _controller() -> NavigationController:
     if _CONTROLLER is None:
-        raise RuntimeError("no navigation session; run pp_nav_start first")
+        raise NavigationError("no navigation session is active")
     return _CONTROLLER
 
 
@@ -588,10 +977,8 @@ def _restore_keys(
 def _unbind_keys(controller: NavigationController) -> None:
     if not controller.keys_bound:
         return
-    try:
-        _restore_keys(controller)
-    finally:
-        controller.keys_bound = False
+    _restore_keys(controller)
+    controller.keys_bound = False
 
 
 def _file_sources(controller: NavigationController) -> Dict[str, str]:
@@ -693,7 +1080,10 @@ def _discard_failed_controller(
     """Remove only outputs made by a failed replacement attempt."""
     _unbind_keys(controller)
     if controller.source != "files":
-        controller.stop(keep_loaded=False)
+        stopped = controller.stop(keep_loaded=False)
+        failures = stopped["cleanup"] + stopped["visibility"]
+        if failures:
+            raise RuntimeError("; ".join(failures))
         return
     for name in sorted(controller.managed_names.difference(protected_names)):
         if name in set(_get_names("all")):
@@ -705,21 +1095,38 @@ def _discard_failed_controller(
 
 def _finalize_replacement(
     snapshot: _ReplacementSnapshot, controller: NavigationController
-) -> None:
+) -> Dict[str, str]:
     """Transfer shared file ownership and retire unused old file objects."""
     old = snapshot.controller
+    failures: Dict[str, str] = {}
     if old.source == "files":
         retained = set(controller.managed_names)
+        attempted: Dict[str, Exception] = {}
         for name in sorted(snapshot.owned_names.difference(retained)):
             try:
                 if name in set(_get_names("all")):
                     _require_cmd().delete(name)
-            except Exception:
-                traceback.print_exc()
+            except Exception as exc:
+                attempted[name] = exc
+        remaining = sorted(
+            snapshot.owned_names.difference(retained).intersection(
+                set(_get_names("all"))
+            )
+        )
+        if remaining:
+            controller.retired_file_names.update(remaining)
+            failures = {
+                name: str(
+                    attempted.get(name)
+                    or "object still exists after cmd.delete"
+                )
+                for name in remaining
+            }
     old.managed_names.clear()
     old.loaded_entry_names.clear()
     controller.adoptable_file_sources.clear()
     controller.adopted_names.clear()
+    return failures
 
 
 def pp_nav_start(
@@ -740,10 +1147,11 @@ def pp_nav_start(
     previous_controller = _CONTROLLER
     controller: Optional[NavigationController] = None
     replacement: Optional[_ReplacementSnapshot] = None
+    mutation_started = False
     try:
-        replace_value = as_bool(replace)
-        bind_value = as_bool(bind_keys)
-        wrap_value = as_bool(wrap)
+        replace_value = _named_bool(replace, "replace")
+        bind_value = _named_bool(bind_keys, "bind_keys")
+        wrap_value = _named_bool(wrap, "wrap")
         zoom_value = str(zoom_policy).strip().lower()
         if zoom_value not in {"current", "current_and_pins", "none"}:
             raise NavigationError(
@@ -770,6 +1178,7 @@ def pp_nav_start(
         # non-destructive: the old controller and its file objects remain
         # available until the new controller completes its first apply.
         if previous_controller is not None:
+            mutation_started = True
             replacement = _suspend_for_replacement(previous_controller)
         controller = NavigationController(
             source=canonical_source,
@@ -779,48 +1188,187 @@ def pp_nav_start(
                 dict(replacement.owned_file_sources) if replacement else {}
             ),
         )
+        mutation_started = True
         _CONTROLLER = controller
         if bind_value:
             _bind_keys(controller)
         result = controller.apply_scene()
         if replacement is not None:
-            _finalize_replacement(replacement, controller)
+            retirement_failures = _finalize_replacement(replacement, controller)
+            if retirement_failures:
+                result.update(
+                    {
+                        "cleanup_pending": True,
+                        "retired_file_names": sorted(retirement_failures),
+                        "cleanup_errors": retirement_failures,
+                        "cleanup_next": (
+                            "run pp_nav_stop to retry deletion of retired file objects"
+                        ),
+                    }
+                )
+                print(
+                    "Navigation replacement active; cleanup pending for %s. "
+                    "Next: run pp_nav_stop to retry"
+                    % _summarize_names(sorted(retirement_failures))
+                )
         return result
     except Exception as exc:
+        cleanup_error: Optional[Exception] = None
         if controller is not None:
             try:
                 _discard_failed_controller(
                     controller,
                     replacement.owned_names if replacement is not None else set(),
                 )
-            except Exception:
+            except Exception as cleanup_exc:
+                cleanup_error = cleanup_exc
                 traceback.print_exc()
         if replacement is not None:
             _CONTROLLER = replacement.controller
             try:
                 _restore_replaced_controller(replacement)
             except Exception as rollback_exc:
-                traceback.print_exc()
-                print(f"Navigation replacement rollback failed: {rollback_exc}")
-                return {
-                    "status": "error",
-                    "error": str(exc),
+                failure_fields: Dict[str, object] = {
                     "rollback_error": str(rollback_exc),
+                    "scene_preserved": False,
                 }
+                if cleanup_error is not None:
+                    failure_fields["cleanup_error"] = str(cleanup_error)
+                return _error_response(
+                    "pp_nav_start",
+                    exc,
+                    "run pp_nav_stop force=1 only if the old session cannot be repaired",
+                    include_traceback=True,
+                    **failure_fields,
+                )
         elif controller is not None and _CONTROLLER is controller:
-            _CONTROLLER = None
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+            if cleanup_error is None:
+                _CONTROLLER = None
+            else:
+                # Keep retryable ownership instead of forgetting objects or a
+                # shortcut lease that the failed start could not release.
+                controller.degraded = True
+                controller.degraded_reason = "start_cleanup_failed"
+                controller.degraded_errors = {
+                    "cleanup": [str(cleanup_error)]
+                }
+        expected_input = (
+            not mutation_started and isinstance(exc, (NavigationError, ValueError))
+        )
+        retryable_cleanup = cleanup_error is not None and replacement is None
+        failure_fields = {
+            "scene_preserved": True if expected_input else cleanup_error is None
+        }
+        if cleanup_error is not None:
+            failure_fields["cleanup_error"] = str(cleanup_error)
+        return _error_response(
+            "pp_nav_start",
+            exc,
+            (
+                "correct the reported option and rerun pp_nav_start; the prior "
+                "navigation state was left unchanged"
+                if expected_input
+                else (
+                    "run pp_nav_stop to retry cleanup; use force=1 only to abandon ownership"
+                    if retryable_cleanup
+                    else (
+                        "inspect cleanup_error and remove the reported replacement outputs before retrying"
+                        if cleanup_error is not None
+                        else "inspect the traceback, fix the PyMOL operation, and retry"
+                    )
+                )
+            ),
+            include_traceback=not expected_input,
+            degraded=retryable_cleanup,
+            **failure_fields,
+        )
 
 
 def _command_transition(method: str, *args) -> Dict[str, object]:
+    command_name = {
+        "next": "pp_nav_next",
+        "previous": "pp_nav_prev",
+        "next_batch": "pp_nav_next_batch",
+        "previous_batch": "pp_nav_prev_batch",
+        "goto": "pp_nav_goto",
+        "pin": "pp_nav_pin",
+        "unpin": "pp_nav_unpin",
+        "clear_pins": "pp_nav_clear_pins",
+    }.get(method, "pp_nav")
     try:
         return _controller().transition(method, *args)
+    except NavigationStaleError as exc:
+        controller = _controller()
+        result = controller.status()
+        result.update(
+            _error_response(
+                command_name,
+                exc,
+                "run pp_nav_stop, then restart navigation to accept the new group membership",
+                status="stale",
+                membership_changes=exc.changes,
+                scene_preserved=True,
+            )
+        )
+        return result
+    except NavigationTransitionError as exc:
+        controller = _controller()
+        result = controller.status()
+        scene_preserved = exc.rollback_error is None
+        result.update(
+            _error_response(
+                command_name,
+                exc.cause,
+                (
+                    "repair the reported hook/operation and retry"
+                    if scene_preserved
+                    else "run pp_nav_stop to retry cleanup; use force=1 only to abandon ownership"
+                ),
+                include_traceback=(
+                    exc.rollback_error is not None
+                    or not isinstance(exc.cause, NavigationHookError)
+                ),
+                rollback=("restored" if scene_preserved else "failed"),
+                scene_preserved=scene_preserved,
+            )
+        )
+        if isinstance(exc.cause, NavigationHookError):
+            result.update(
+                {
+                    "hook_policy": "stop",
+                    "rollback_scope": "navigation_scene_only",
+                    "side_effect_warning": (
+                        "hook mutations completed before the failure are not "
+                        "generically reversible"
+                    ),
+                }
+            )
+        if exc.rollback_error is not None:
+            result["rollback_error"] = str(exc.rollback_error)
+        return result
+    except NavigationError as exc:
+        result = _CONTROLLER.status() if _CONTROLLER is not None else {}
+        result.update(
+            _error_response(
+                command_name,
+                exc,
+                (
+                    "run pp_nav_start first"
+                    if _CONTROLLER is None
+                    else "correct the request or run pp_nav_stop to recover the active session"
+                ),
+                scene_preserved=True,
+            )
+        )
+        return result
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _error_response(
+            command_name,
+            exc,
+            "inspect the traceback before retrying or stopping the session",
+            include_traceback=True,
+            scene_preserved=False,
+        )
 
 
 def pp_nav_next() -> Dict[str, object]:
@@ -842,95 +1390,192 @@ def pp_nav_prev_batch() -> Dict[str, object]:
 def pp_nav_goto(index: object) -> Dict[str, object]:
     try:
         numeric = as_int(index, minimum=1, name="index") - 1
-        return _controller().transition("goto", numeric)
-    except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+    except ValueError as exc:
+        return _error_response(
+            "pp_nav_goto",
+            exc,
+            "use a one-based integer position shown by pp_nav_status",
+            scene_preserved=True,
+        )
+    return _command_transition("goto", numeric)
 
 
 def _resolve_entry_id(value: object) -> Optional[str]:
     text = str(value or "").strip()
     if not text:
         return None
+    candidates: List[str] = []
     for entry in _controller().session.entries:
+        candidates.extend(
+            alias
+            for alias in (entry.id, entry.display_name, entry.group_name, *entry.object_names)
+            if alias
+        )
         if text in {entry.id, entry.display_name, entry.group_name} or text in entry.object_names:
             return entry.id
-    raise NavigationError(f"unknown navigation entry: {text}")
+    raise NavigationError(
+        _with_suggestions(
+            f"unknown navigation entry: {text}", text, candidates
+        )
+    )
 
 
 def pp_nav_pin(entry: object = "") -> Dict[str, object]:
     try:
-        _controller().session.pin(_resolve_entry_id(entry))
-        return _controller().apply_scene()
+        entry_id = _resolve_entry_id(entry)
+    except NavigationError as exc:
+        return _error_response(
+            "pp_nav_pin",
+            exc,
+            "use an entry, group, or object name listed by pp_nav_status",
+            scene_preserved=True,
+        )
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _error_response(
+            "pp_nav_pin",
+            exc,
+            "inspect the traceback before retrying",
+            include_traceback=True,
+            scene_preserved=False,
+        )
+    return _command_transition("pin", entry_id)
 
 
 def pp_nav_unpin(entry: object = "") -> Dict[str, object]:
     try:
-        _controller().session.unpin(_resolve_entry_id(entry))
-        return _controller().apply_scene()
+        entry_id = _resolve_entry_id(entry)
+    except NavigationError as exc:
+        return _error_response(
+            "pp_nav_unpin",
+            exc,
+            "use a pinned entry listed by pp_nav_status",
+            scene_preserved=True,
+        )
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _error_response(
+            "pp_nav_unpin",
+            exc,
+            "inspect the traceback before retrying",
+            include_traceback=True,
+            scene_preserved=False,
+        )
+    return _command_transition("unpin", entry_id)
 
 
 def pp_nav_register_hook(command: str, offset: object = 0) -> Dict[str, object]:
     try:
         template = str(command).strip()
         if not template:
-            raise ValueError("command is required")
+            raise NavigationError("command is required")
+        _validate_hook_template(template)
         entry = (template, as_int(offset, minimum=0, name="offset"))
-        if entry not in _controller().hooks:
-            _controller().hooks.append(entry)
-        return pp_nav_status(quiet=1)
+        controller = _controller()
+        if entry in controller.hooks:
+            result = controller.status()
+            result.update(
+                {
+                    "status": "no_change",
+                    "no_change": True,
+                    "hook": {"command": template, "offset": entry[1]},
+                }
+            )
+            print("Navigation hook already registered; no change")
+            return result
+        controller.hooks.append(entry)
+        result = controller.status()
+        result.update(
+            {
+                "status": "registered",
+                "hook": {"command": template, "offset": entry[1]},
+            }
+        )
+        print(f"Navigation hook registered: {template!r} (offset={entry[1]})")
+        return result
+    except (NavigationError, ValueError) as exc:
+        return _error_response(
+            "pp_nav_register_hook",
+            exc,
+            "use a non-empty command and a documented placeholder such as {object}",
+            scene_preserved=True,
+        )
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _error_response(
+            "pp_nav_register_hook",
+            exc,
+            "inspect the traceback before retrying",
+            include_traceback=True,
+            scene_preserved=False,
+        )
 
 
 def pp_nav_unregister_hook(command: str, offset: object = "") -> Dict[str, object]:
     try:
         template = str(command).strip()
         if not template:
-            raise ValueError("command is required")
+            raise NavigationError("command is required")
         controller = _controller()
+        previous = list(controller.hooks)
         if str(offset).strip() == "":
             controller.hooks = [entry for entry in controller.hooks if entry[0] != template]
         else:
             target = (template, as_int(offset, minimum=0, name="offset"))
             controller.hooks = [entry for entry in controller.hooks if entry != target]
-        return pp_nav_status(quiet=1)
+        if controller.hooks == previous:
+            raise NavigationError(f"hook is not registered: {template}")
+        result = controller.status()
+        result.update({"status": "unregistered"})
+        print(f"Navigation hook unregistered: {template!r}")
+        return result
+    except (NavigationError, ValueError) as exc:
+        return _error_response(
+            "pp_nav_unregister_hook",
+            exc,
+            "copy the exact command and optional offset from pp_nav_status",
+            scene_preserved=True,
+        )
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _error_response(
+            "pp_nav_unregister_hook",
+            exc,
+            "inspect the traceback before retrying",
+            include_traceback=True,
+            scene_preserved=False,
+        )
 
 
 def pp_nav_clear_hooks() -> Dict[str, object]:
     try:
-        _controller().hooks.clear()
-        return pp_nav_status(quiet=1)
+        controller = _controller()
+        if not controller.hooks:
+            result = controller.status()
+            result.update({"status": "no_change", "no_change": True})
+            print("Navigation hooks are already empty; no change")
+            return result
+        removed = len(controller.hooks)
+        controller.hooks.clear()
+        result = controller.status()
+        result.update({"status": "cleared", "removed": removed})
+        print(f"Navigation hooks cleared: {removed}")
+        return result
+    except NavigationError as exc:
+        return _error_response(
+            "pp_nav_clear_hooks",
+            exc,
+            "run pp_nav_start first, then retry",
+            scene_preserved=True,
+        )
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _error_response(
+            "pp_nav_clear_hooks",
+            exc,
+            "inspect the traceback before retrying",
+            include_traceback=True,
+            scene_preserved=False,
+        )
 
 
 def pp_nav_clear_pins() -> Dict[str, object]:
-    try:
-        controller = _controller()
-        controller.session.pinned_entry_ids.clear()
-        return controller.apply_scene()
-    except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+    return _command_transition("clear_pins")
 
 
 def legacy_switch_commands() -> List[Tuple[str, int]]:
@@ -945,7 +1590,8 @@ def legacy_register_switch_command(
     try:
         template = str(command).strip()
         if not template:
-            raise ValueError("command is required")
+            raise NavigationError("command is required")
+        _validate_hook_template(template)
         entry = (template, as_int(offset, minimum=0, name="offset"))
         if entry not in _LEGACY_SWITCH_COMMANDS:
             _LEGACY_SWITCH_COMMANDS.append(entry)
@@ -959,9 +1605,12 @@ def legacy_register_switch_command(
             ],
         }
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _error_response(
+            "register_switch_cmd",
+            exc,
+            "use a non-empty command and a documented placeholder such as {object}",
+            scene_preserved=True,
+        )
 
 
 def legacy_unregister_switch_command(
@@ -971,7 +1620,7 @@ def legacy_unregister_switch_command(
     try:
         template = str(command).strip()
         if not template:
-            raise ValueError("command is required")
+            raise NavigationError("command is required")
         if str(offset).strip() == "":
             _LEGACY_SWITCH_COMMANDS[:] = [
                 entry for entry in _LEGACY_SWITCH_COMMANDS if entry[0] != template
@@ -991,9 +1640,12 @@ def legacy_unregister_switch_command(
             ],
         }
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _error_response(
+            "unregister_switch_cmd",
+            exc,
+            "copy the exact command and optional offset from the configured hook list",
+            scene_preserved=True,
+        )
 
 
 def legacy_clear_switch_commands() -> Dict[str, object]:
@@ -1019,6 +1671,15 @@ def legacy_apply_switch_commands() -> Dict[str, object]:
 def pp_nav_context(quiet: object = 0) -> Dict[str, object]:
     """Return the structured current entry/window context for integrations."""
     try:
+        quiet_value = _named_bool(quiet, "quiet")
+    except Exception as exc:
+        return _error_response(
+            "pp_nav_context",
+            exc,
+            "use quiet=0 or quiet=1",
+            scene_preserved=True,
+        )
+    try:
         controller = _controller()
         current = controller.session.entries[controller.session.cursor]
         window_entries = controller.session.current_entries()
@@ -1042,14 +1703,26 @@ def pp_nav_context(quiet: object = 0) -> Dict[str, object]:
                 for entry in window_entries
             ],
         }
-        if not as_bool(quiet):
+        if not quiet_value:
             print(result)
+        return result
+    except NavigationError as exc:
+        result = {"status": "inactive", "error": str(exc)}
+        if not quiet_value:
+            print(
+                "pp_nav_context inactive: %s. Next: run pp_nav_start first"
+                % _one_line(exc)
+            )
         return result
     except Exception as exc:
-        result = {"status": "inactive", "error": str(exc)}
-        if not as_bool(quiet):
-            print(result)
-        return result
+        return _error_response(
+            "pp_nav_context",
+            exc,
+            "inspect the traceback before retrying",
+            include_traceback=True,
+            emit=not quiet_value,
+            scene_preserved=False,
+        )
 
 
 def pp_nav_sync_from_scene() -> Dict[str, object]:
@@ -1067,42 +1740,139 @@ def pp_nav_sync_from_scene() -> Dict[str, object]:
             raise NavigationError("enabled scene does not identify a managed non-pinned entry")
         if len(candidates) > controller.session.window_size:
             raise NavigationError("enabled scene is ambiguous; too many managed entries are visible")
-        controller.session.goto(min(candidates))
-        return controller.apply_scene()
+    except (NavigationError, ValueError) as exc:
+        return _error_response(
+            "pp_nav_sync_from_scene",
+            exc,
+            "enable one managed non-pinned window, or use pp_nav_goto explicitly",
+            scene_preserved=True,
+        )
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _error_response(
+            "pp_nav_sync_from_scene",
+            exc,
+            "inspect the traceback before retrying",
+            include_traceback=True,
+            scene_preserved=False,
+        )
+    return _command_transition("goto", min(candidates))
 
 
 def pp_nav_status(quiet: object = 0) -> Dict[str, object]:
     try:
+        quiet_value = _named_bool(quiet, "quiet")
+    except Exception as exc:
+        return _error_response(
+            "pp_nav_status",
+            exc,
+            "use quiet=0 or quiet=1",
+            scene_preserved=True,
+        )
+    try:
         status = _controller().status()
-        if not as_bool(quiet):
+        if not quiet_value:
             print(status)
         return status
-    except Exception as exc:
+    except NavigationError as exc:
         result = {"status": "inactive", "error": str(exc)}
-        if not as_bool(quiet):
-            print(result)
+        if not quiet_value:
+            print(
+                "pp_nav_status inactive: %s. Next: run pp_nav_start first"
+                % _one_line(exc)
+            )
         return result
+    except Exception as exc:
+        return _error_response(
+            "pp_nav_status",
+            exc,
+            "inspect the traceback before retrying",
+            include_traceback=True,
+            emit=not quiet_value,
+            scene_preserved=False,
+        )
 
 
-def pp_nav_stop(keep_loaded: object = 0) -> Dict[str, object]:
+def pp_nav_stop(keep_loaded: object = 0, force: object = 0) -> Dict[str, object]:
     global _CONTROLLER
+    try:
+        keep_loaded_value = _named_bool(keep_loaded, "keep_loaded")
+        force_value = _named_bool(force, "force")
+    except Exception as exc:
+        return _error_response(
+            "pp_nav_stop",
+            exc,
+            "use keep_loaded=0|1 and force=0|1; the active session was left unchanged",
+            scene_preserved=True,
+        )
     if _CONTROLLER is None:
         return {"status": "inactive"}
     controller = _CONTROLLER
+    errors: Dict[str, List[str]] = {
+        "keys": [],
+        "cleanup": [],
+        "visibility": [],
+    }
     try:
         _unbind_keys(controller)
-        controller.stop(keep_loaded=as_bool(keep_loaded))
-        return {"status": "stopped", "source": controller.source}
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
-    finally:
+        errors["keys"].append(str(exc))
+    try:
+        released = controller.stop(keep_loaded=keep_loaded_value)
+        errors["cleanup"].extend(released.get("cleanup", []))
+        errors["visibility"].extend(released.get("visibility", []))
+    except Exception as exc:
+        errors["cleanup"].append("unexpected ownership cleanup failure: %s" % exc)
+
+    has_errors = any(errors.values())
+    if not has_errors:
+        controller.degraded = False
+        controller.degraded_reason = ""
+        controller.degraded_errors = {}
         _CONTROLLER = None
+        return {
+            "status": "stopped",
+            "source": controller.source,
+            "forced": False,
+            "errors": errors,
+        }
+
+    controller.degraded = True
+    controller.degraded_reason = "stop_failed"
+    controller.degraded_errors = {
+        key: list(values) for key, values in errors.items() if values
+    }
+    result: Dict[str, object] = {
+        "status": "forced_stopped" if force_value else "degraded",
+        "source": controller.source,
+        "forced": force_value,
+        "errors": errors,
+        "remaining_managed_names": sorted(
+            controller.managed_names.union(controller.retired_file_names)
+        ),
+        "retired_file_names": sorted(controller.retired_file_names),
+        "cleanup_pending": bool(controller.retired_file_names),
+        "keys_bound": controller.keys_bound,
+        "retry": (
+            None
+            if force_value
+            else "repair the reported condition and run pp_nav_stop again; "
+            "use force=1 only to abandon unresolved ownership"
+        ),
+    }
+    print(
+        "pp_nav_stop incomplete: %s. Next: %s"
+        % (
+            json.dumps(errors, sort_keys=True),
+            (
+                "inspect remaining_managed_names; unresolved ownership was explicitly abandoned"
+                if force_value
+                else "repair the reported condition and run pp_nav_stop again; use force=1 only to abandon ownership"
+            ),
+        )
+    )
+    if force_value:
+        _CONTROLLER = None
+    return result
 
 
 def register_commands(command_api=None) -> None:

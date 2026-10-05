@@ -9,18 +9,37 @@ file no longer creates a second state machine or steals generic ``next`` /
 import os
 import sys
 import traceback
+from functools import wraps
 
 from pymol import cmd
 
 try:
-    from pymolplugins.core.parameters import as_bool, as_int
+    from pymolplugins.core.parameters import as_bool, as_int, extend_command
     from pymolplugins.navigation import commands as _navigation
+    from pymolplugins.navigation.compat.selected_paths import selected_output_name
 except ImportError:
     _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     if _ROOT not in sys.path:
         sys.path.insert(0, _ROOT)
-    from pymolplugins.core.parameters import as_bool, as_int  # type: ignore
+    from pymolplugins.core.parameters import (  # type: ignore
+        as_bool,
+        as_int,
+        extend_command,
+    )
     from pymolplugins.navigation import commands as _navigation  # type: ignore
+    from pymolplugins.navigation.compat.selected_paths import (  # type: ignore
+        selected_output_name,
+    )
+
+
+def _compat_error(command_name, exc, hint):
+    """Return one actionable line for input mistakes and trace internal faults."""
+
+    message = " ".join(str(exc).splitlines())
+    print(f"{command_name} error: {message}. Next: {hint}")
+    if not isinstance(exc, (ValueError, TypeError, _navigation.NavigationError)):
+        traceback.print_exc()
+    return {"status": "error", "error": str(exc)}
 
 
 def load_structures(path=".", pattern=None, bucket_size=10):
@@ -77,13 +96,10 @@ def clear_pins():
 
 def _get_current_structure():
     """Return the first leaf name in the current entry."""
-    try:
-        controller = _navigation._controller()
-        entry = controller.session.entries[controller.session.cursor]
-        names = controller._entry_names(entry)
-        return names[0] if names else None
-    except Exception:
-        return None
+    controller = _navigation._controller()
+    entry = controller.session.entries[controller.session.cursor]
+    names = controller._entry_names(entry)
+    return names[0] if names else None
 
 
 def save_selected():
@@ -93,26 +109,29 @@ def save_selected():
         entry = controller.session.entries[controller.session.cursor]
         current = _get_current_structure()
         if not current:
-            raise RuntimeError("current entry has no loaded object")
+            raise ValueError("current entry has no loaded object")
         if entry.source_paths:
             base_dir = os.path.dirname(entry.source_paths[0])
         else:
             base_dir = os.getcwd()
         selected_dir = os.path.join(base_dir, "selected")
         os.makedirs(selected_dir, exist_ok=True)
-        source_name = os.path.basename(entry.source_paths[0]) if entry.source_paths else current
-        for suffix in (".pdb.gz", ".cif.gz", ".pdb", ".cif"):
-            if source_name.lower().endswith(suffix):
-                source_name = source_name[: -len(suffix)]
-                break
-        save_path = os.path.join(selected_dir, f"{source_name}.pdb")
-        cmd.save(save_path, current)
+        source_path = entry.source_paths[0] if entry.source_paths else ""
+        save_path = os.path.join(
+            selected_dir,
+            selected_output_name(source_path, current),
+        )
+        # Use the command API owned by the canonical navigator so a manually
+        # reloaded compatibility facade cannot retain a stale ``cmd`` object.
+        _navigation.cmd.save(save_path, current)
         print(f"Saved {current} to {save_path}")
         return save_path
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return None
+        return _compat_error(
+            "save_selected",
+            exc,
+            "start file navigation and move to a loaded structure first",
+        )
 
 
 def register_switch_command(command, offset=0):
@@ -140,9 +159,11 @@ def set_auto_batch(enabled=True):
         controller.session.wrap = as_bool(enabled)
         return controller.status()
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _compat_error(
+            "set_auto_batch",
+            exc,
+            "start navigation first and use enabled=0|1",
+        )
 
 
 def set_batch_size(size):
@@ -155,9 +176,11 @@ def set_batch_size(size):
         controller.session.cursor = controller.session._clamp_cursor(current_entry)
         return controller.apply_scene()
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return {"status": "error", "error": str(exc)}
+        return _compat_error(
+            "set_batch_size",
+            exc,
+            "start navigation first and use an integer no smaller than window_size",
+        )
 
 
 LEGACY_COMMANDS = {
@@ -184,7 +207,18 @@ def register_commands(command_api=None):
     """Register legacy aliases against an explicit PyMOL command API."""
     command_api = cmd if command_api is None else command_api
     for name, function in LEGACY_COMMANDS.items():
-        command_api.extend(name, function)
+        @wraps(function)
+        def guarded(*args, __name=name, __function=function, **kwargs):
+            try:
+                return __function(*args, **kwargs)
+            except Exception as exc:
+                return _compat_error(
+                    __name,
+                    exc,
+                    "check the command arguments and run pp_nav_status",
+                )
+
+        extend_command(command_api, name, guarded)
 
 
 register_commands()

@@ -1,19 +1,21 @@
-"""Durable row-level annotations for CSV-backed Structure Annotator datasets.
+"""Durable row-level annotations for Structure Annotator datasets.
 
 The store is intentionally independent from PyMOL and Qt.  Each mutation is a
 single JSONL event keyed by ``(entry_id, label)`` and is flushed and fsynced
 before the call returns.  A final line without a newline is treated as a torn
 write: readers ignore it and the next writer truncates it before appending.
 
-``compact()`` atomically replaces the event history with ``snapshot_set``
-baseline events.  The current mapping is preserved, but the compacted history
-is no longer undoable; callers that need a permanent audit trail should export
-it before compacting.
+``compact()`` atomically replaces the event history with non-undoable snapshot
+events. ``snapshot_set`` stores sidecar overrides and ``snapshot_remove`` keeps
+source-baseline tombstones durable. The current mapping is preserved, but the
+compacted history is no longer undoable; callers that need a permanent audit
+trail should export it before compacting.
 """
 
 from __future__ import annotations
 
 import datetime
+import copy
 import json
 import ntpath
 import os
@@ -24,16 +26,20 @@ from typing import Dict, List, Mapping, Optional, Tuple
 
 from pymolplugins.annotation.state_store import (
     csv_dataset_id,
+    csv_dataset_identity,
     dataset_state_directory,
     mark_hidden_on_windows,
 )
 from pymolplugins.core.windows_paths import windows_long_path
 
 
-ANNOTATION_SCHEMA = "pymolplugins.structure-annotator-annotations/1.0"
+ANNOTATION_SCHEMA_V1 = "pymolplugins.structure-annotator-annotations/1.0"
+ANNOTATION_SCHEMA = "pymolplugins.structure-annotator-annotations/1.1"
+ANNOTATION_BATCH_SCHEMA = "pymolplugins.structure-annotator-annotations/1.2"
 ANNOTATION_DIRECTORY = ".pymolplugins"
+DIRECTORY_ANNOTATION_FILENAME = "structure_annotator.annotations.jsonl"
 MAX_LOG_BYTES = 64 * 1024 * 1024
-MAX_EVENT_BYTES = 2 * 1024 * 1024
+MAX_EVENT_BYTES = 16 * 1024 * 1024
 MAX_ENTRY_ID_LENGTH = 4096
 MAX_LABEL_LENGTH = 1024
 MAX_VALUE_LENGTH = 256 * 1024
@@ -45,6 +51,9 @@ _EVENT_FIELDS = {
     "remove": _COMMON_FIELDS | {"entry_id", "label"},
     "undo": _COMMON_FIELDS | {"entry_id", "label", "target_seq"},
     "snapshot_set": _COMMON_FIELDS | {"entry_id", "label", "value"},
+    "snapshot_remove": _COMMON_FIELDS | {"entry_id", "label"},
+    "batch": _COMMON_FIELDS | {"changes"},
+    "undo_batch": _COMMON_FIELDS | {"target_seq"},
 }
 _MISSING = object()
 _LOCKS_GUARD = threading.Lock()
@@ -103,6 +112,30 @@ def _validate_value(value: object) -> str:
     return value
 
 
+def _validate_baseline(
+    raw: Optional[Mapping[str, Mapping[str, str]]]
+) -> Dict[Tuple[str, str], str]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise AnnotationStoreError("annotation baseline must be a mapping")
+    result: Dict[Tuple[str, str], str] = {}
+    for entry_id, labels in raw.items():
+        clean_entry = _validate_identifier(
+            entry_id, "baseline entry_id", MAX_ENTRY_ID_LENGTH
+        )
+        if not isinstance(labels, Mapping):
+            raise AnnotationStoreError(
+                "annotation baseline labels must be mappings"
+            )
+        for label, value in labels.items():
+            clean_label = _validate_identifier(
+                label, "baseline label", MAX_LABEL_LENGTH
+            )
+            result[(clean_entry, clean_label)] = _validate_value(value)
+    return result
+
+
 def _validate_timestamp(value: object) -> str:
     if not isinstance(value, str) or not value or len(value) > 64:
         raise AnnotationStoreError("timestamp_utc must be a bounded string")
@@ -118,13 +151,20 @@ def _validate_timestamp(value: object) -> str:
 def _validate_event(raw: object) -> Dict[str, object]:
     if not isinstance(raw, dict):
         raise AnnotationStoreError("event must be a JSON object")
-    if raw.get("schema") != ANNOTATION_SCHEMA:
+    schema = raw.get("schema")
+    if schema not in {ANNOTATION_SCHEMA_V1, ANNOTATION_SCHEMA, ANNOTATION_BATCH_SCHEMA}:
         raise AnnotationStoreError(
-            "unsupported annotation schema: {!r}".format(raw.get("schema"))
+            "unsupported annotation schema: {!r}".format(schema)
         )
     operation = raw.get("op")
     if not isinstance(operation, str) or operation not in _EVENT_FIELDS:
         raise AnnotationStoreError(f"unsupported annotation operation: {operation!r}")
+    if schema == ANNOTATION_SCHEMA_V1 and operation == "snapshot_remove":
+        raise AnnotationStoreError(
+            "snapshot_remove requires annotation schema 1.1"
+        )
+    if operation in {"batch", "undo_batch"} and schema != ANNOTATION_BATCH_SCHEMA:
+        raise AnnotationStoreError("batch operations require annotation schema 1.2")
     expected = _EVENT_FIELDS[operation]
     present = set(raw)
     if present != expected:
@@ -141,15 +181,73 @@ def _validate_event(raw: object) -> Dict[str, object]:
     if type(sequence) is not int or sequence < 1:
         raise AnnotationStoreError("event seq must be a positive integer")
     _validate_timestamp(raw.get("timestamp_utc"))
-    _validate_identifier(raw.get("entry_id"), "entry_id", MAX_ENTRY_ID_LENGTH)
-    _validate_identifier(raw.get("label"), "label", MAX_LABEL_LENGTH)
+    if operation not in {"batch", "undo_batch"}:
+        _validate_identifier(raw.get("entry_id"), "entry_id", MAX_ENTRY_ID_LENGTH)
+        _validate_identifier(raw.get("label"), "label", MAX_LABEL_LENGTH)
+    if operation == "batch":
+        changes = raw.get("changes")
+        if not isinstance(changes, list) or not changes:
+            raise AnnotationStoreError("batch changes must be a nonempty list")
+        seen = set()
+        for change in changes:
+            if not isinstance(change, dict) or set(change) != {"entry_id", "label", "value"}:
+                raise AnnotationStoreError("each batch change needs entry_id, label, and value")
+            key = (_validate_identifier(change["entry_id"], "entry_id", MAX_ENTRY_ID_LENGTH),
+                   _validate_identifier(change["label"], "label", MAX_LABEL_LENGTH))
+            if key in seen:
+                raise AnnotationStoreError("duplicate entry/label in batch")
+            seen.add(key)
+            if change["value"] is not None:
+                _validate_value(change["value"])
     if operation in {"set", "snapshot_set"}:
         _validate_value(raw.get("value"))
-    if operation == "undo":
+    if operation in {"undo", "undo_batch"}:
         target = raw.get("target_seq")
         if type(target) is not int or target < 1:
             raise AnnotationStoreError("undo target_seq must be a positive integer")
     return dict(raw)
+
+
+def _newest_for_key(key, stacks, undone):
+    values = stacks.get(key, [])
+    while values and values[-1] in undone:
+        values.pop()
+    return values[-1] if values else None
+
+
+def _apply_batch(event, state, batches, stacks, undone, history_by_seq):
+    sequence = int(event["seq"])
+    target = None
+    if event["op"] == "batch":
+        values = {(item["entry_id"], item["label"]): item["value"] for item in event["changes"]}
+        before = {key: state.get(key, _MISSING) for key in values}
+    else:
+        target = int(event["target_seq"])
+        if target not in batches or target in undone:
+            raise AnnotationStoreError("batch undo target is unavailable or already undone")
+        values = batches[target]
+        if any(_newest_for_key(key, stacks, undone) != target for key in values):
+            raise AnnotationStoreError("batch undo target is not the newest active event for every key")
+        before = {key: state.get(key, _MISSING) for key in values}
+    changes = []
+    for key, value in values.items():
+        if value is None or value is _MISSING:
+            state.pop(key, None)
+            current = None
+        else:
+            state[key] = current = str(value)
+        changes.append({"entry_id": key[0], "label": key[1],
+                        "previous": None if before[key] is _MISSING else before[key],
+                        "had_previous": before[key] is not _MISSING, "current": current})
+    if target is None:
+        batches[sequence] = before
+        for key in values:
+            stacks.setdefault(key, []).append(sequence)
+    else:
+        undone.add(target)
+        if target in history_by_seq:
+            history_by_seq[target]["undone"] = True
+    return dict(event, changes=changes, baseline=False, undone=False)
 
 
 def _object_without_duplicate_keys(pairs):
@@ -202,8 +300,28 @@ def annotation_sidecar_path(csv_path: str, dataset_id: Optional[str] = None) -> 
     )
 
 
+def legacy_annotation_sidecar_path(csv_path: str) -> str:
+    """Return the pre-discriminator CSV sidecar path for safe migration."""
+
+    identity = csv_dataset_identity(str(csv_path))
+    return annotation_sidecar_path(str(csv_path), identity.legacy_dataset_id)
+
+
+def directory_annotation_sidecar_path(dataset_dir: str) -> str:
+    """Return the hidden row-annotation log for a directory dataset."""
+
+    state_directory = dataset_state_directory(str(dataset_dir), source_mode="directory")
+    path_module = (
+        ntpath
+        if ntpath.splitdrive(state_directory)[0]
+        or state_directory.startswith(("\\\\", "\\\\?\\"))
+        else os.path
+    )
+    return path_module.join(state_directory, DIRECTORY_ANNOTATION_FILENAME)
+
+
 class RowAnnotationStore:
-    """Thread-safe append-only annotations keyed by CSV entry ID and label.
+    """Thread-safe append-only annotations keyed by dataset entry ID and label.
 
     Thread safety covers all :class:`RowAnnotationStore` instances for the same
     normalized path in this Python process.  This class intentionally does not
@@ -215,6 +333,8 @@ class RowAnnotationStore:
         path: str,
         max_log_bytes: int = MAX_LOG_BYTES,
         max_event_bytes: int = MAX_EVENT_BYTES,
+        *,
+        baseline: Optional[Mapping[str, Mapping[str, str]]] = None,
     ) -> None:
         if not str(path or "").strip():
             raise AnnotationStoreError("annotation path must not be empty")
@@ -237,6 +357,7 @@ class RowAnnotationStore:
         self.path = os.path.abspath(os.path.expanduser(str(path)))
         self.max_log_bytes = max_log_bytes
         self.max_event_bytes = max_event_bytes
+        self._baseline_state = _validate_baseline(baseline)
         self._lock = _shared_lock(self.path)
         self._events: List[Dict[str, object]] = []
         self._history: List[Dict[str, object]] = []
@@ -244,6 +365,8 @@ class RowAnnotationStore:
         self._state: Dict[Tuple[str, str], str] = {}
         self._by_entry: Dict[str, Dict[str, str]] = {}
         self._reversible: Dict[int, Tuple[Tuple[str, str], object]] = {}
+        self._batch_reversible = {}
+        self._key_history = {}
         self._reversible_order: List[int] = []
         self._undone = set()
         self._complete_size = 0
@@ -333,8 +456,9 @@ class RowAnnotationStore:
         return events, complete_size, actual_size
 
     def _replay_unlocked(self, events: List[Dict[str, object]]) -> None:
-        state: Dict[Tuple[str, str], str] = {}
+        state: Dict[Tuple[str, str], str] = dict(self._baseline_state)
         reversible: Dict[int, Tuple[Tuple[str, str], object]] = {}
+        batches, key_history = {}, {}
         reversible_order: List[int] = []
         undone = set()
         history: List[Dict[str, object]] = []
@@ -345,41 +469,59 @@ class RowAnnotationStore:
         for line_number, event in enumerate(events, 1):
             sequence = int(event["seq"])
             operation = str(event["op"])
+            if operation in {"batch", "undo_batch"}:
+                saw_mutation = True
+                enriched = _apply_batch(event, state, batches, key_history, undone, history_by_seq)
+                if operation == "batch":
+                    reversible_order.append(sequence)
+                history.append(enriched)
+                history_by_seq[sequence] = enriched
+                continue
             key = (str(event["entry_id"]), str(event["label"]))
             before = state.get(key, _MISSING)
             enriched = dict(event)
             enriched["had_previous"] = before is not _MISSING
             enriched["previous"] = None if before is _MISSING else before
-            enriched["baseline"] = operation == "snapshot_set"
+            enriched["baseline"] = operation in {
+                "snapshot_set",
+                "snapshot_remove",
+            }
             enriched["undone"] = False
 
-            if operation in {"set", "snapshot_set"}:
+            if operation in {"snapshot_set", "snapshot_remove"}:
+                if saw_mutation:
+                    raise AnnotationStoreError(
+                        f"annotation log corruption on line {line_number}: "
+                        "snapshot baseline appears after mutable history"
+                    )
+                if key in baseline_keys:
+                    raise AnnotationStoreError(
+                        f"annotation log corruption on line {line_number}: "
+                        "duplicate key in snapshot baseline"
+                    )
+                baseline_keys.add(key)
                 if operation == "snapshot_set":
-                    if saw_mutation:
-                        raise AnnotationStoreError(
-                            f"annotation log corruption on line {line_number}: "
-                            "snapshot baseline appears after mutable history"
-                        )
-                    if key in baseline_keys:
-                        raise AnnotationStoreError(
-                            f"annotation log corruption on line {line_number}: "
-                            "duplicate key in snapshot baseline"
-                        )
-                    baseline_keys.add(key)
+                    value = str(event["value"])
+                    state[key] = value
+                    enriched["current"] = value
                 else:
-                    saw_mutation = True
+                    state.pop(key, None)
+                    enriched["current"] = None
+            elif operation == "set":
+                saw_mutation = True
                 value = str(event["value"])
                 state[key] = value
                 enriched["current"] = value
-                if operation == "set":
-                    reversible[sequence] = (key, before)
-                    reversible_order.append(sequence)
+                reversible[sequence] = (key, before)
+                reversible_order.append(sequence)
+                key_history.setdefault(key, []).append(sequence)
             elif operation == "remove":
                 saw_mutation = True
                 state.pop(key, None)
                 enriched["current"] = None
                 reversible[sequence] = (key, before)
                 reversible_order.append(sequence)
+                key_history.setdefault(key, []).append(sequence)
             elif operation == "undo":
                 saw_mutation = True
                 target_seq = int(event["target_seq"])
@@ -400,15 +542,7 @@ class RowAnnotationStore:
                         f"annotation log corruption on line {line_number}: "
                         "undo key does not match its target"
                     )
-                newest_for_key = next(
-                    (
-                        candidate
-                        for candidate in reversed(reversible_order)
-                        if candidate not in undone
-                        and reversible[candidate][0] == key
-                    ),
-                    None,
-                )
+                newest_for_key = _newest_for_key(key, key_history, undone)
                 if target_seq != newest_for_key:
                     raise AnnotationStoreError(
                         f"annotation log corruption on line {line_number}: "
@@ -436,6 +570,8 @@ class RowAnnotationStore:
             by_entry.setdefault(entry_id, {})[label] = value
         self._by_entry = by_entry
         self._reversible = reversible
+        self._batch_reversible = batches
+        self._key_history = key_history
         self._reversible_order = reversible_order
         self._undone = undone
         self._last_seq = int(events[-1]["seq"]) if events else 0
@@ -570,6 +706,22 @@ class RowAnnotationStore:
         clean = dict(event)
         sequence = int(clean["seq"])
         operation = str(clean["op"])
+        if operation in {"batch", "undo_batch"}:
+            enriched = _apply_batch(clean, self._state, self._batch_reversible,
+                                    self._key_history, self._undone, self._history_by_seq)
+            for change in enriched["changes"]:
+                key = (change["entry_id"], change["label"])
+                if change["current"] is None:
+                    self._remove_state_unlocked(key)
+                else:
+                    self._set_state_unlocked(key, change["current"])
+            if operation == "batch":
+                self._reversible_order.append(sequence)
+            self._events.append(clean)
+            self._history.append(enriched)
+            self._history_by_seq[sequence] = enriched
+            self._last_seq = sequence
+            return copy.deepcopy(enriched)
         key = (str(clean["entry_id"]), str(clean["label"]))
         before = self._state.get(key, _MISSING)
         enriched = dict(clean)
@@ -584,11 +736,13 @@ class RowAnnotationStore:
             enriched["current"] = value
             self._reversible[sequence] = (key, before)
             self._reversible_order.append(sequence)
+            self._key_history.setdefault(key, []).append(sequence)
         elif operation == "remove":
             self._remove_state_unlocked(key)
             enriched["current"] = None
             self._reversible[sequence] = (key, before)
             self._reversible_order.append(sequence)
+            self._key_history.setdefault(key, []).append(sequence)
         elif operation == "undo":
             target_sequence = int(clean["target_seq"])
             target = self._reversible.get(target_sequence)
@@ -597,6 +751,8 @@ class RowAnnotationStore:
             target_key, restored = target
             if target_key != key:
                 raise AnnotationStoreError("appended undo key does not match target")
+            if _newest_for_key(key, self._key_history, self._undone) != target_sequence:
+                raise AnnotationStoreError("undo target is not the newest active event for its key")
             if restored is _MISSING:
                 self._remove_state_unlocked(key)
                 enriched["current"] = None
@@ -621,13 +777,31 @@ class RowAnnotationStore:
 
     def _new_event(self, operation: str, **fields: object) -> Dict[str, object]:
         event: Dict[str, object] = {
-            "schema": ANNOTATION_SCHEMA,
+            "schema": ANNOTATION_BATCH_SCHEMA if operation in {"batch", "undo_batch"} else ANNOTATION_SCHEMA,
             "seq": self._last_seq + 1,
             "timestamp_utc": _utc_now(),
             "op": operation,
         }
         event.update(fields)
         return event
+
+    def set_many(self, changes) -> Dict[str, object]:
+        """Commit multiple row/label values as one fsynced, undoable JSONL event."""
+        with self._lock:
+            self._refresh_if_changed_unlocked()
+            event = self._new_event("batch", changes=[dict(change) for change in changes])
+            return self._append_event_unlocked(event)
+
+    def undo_batch(self, sequence: int) -> Dict[str, object]:
+        """Undo an entire batch only if none of its keys has a newer active edit."""
+        with self._lock:
+            self._refresh_if_changed_unlocked()
+            before = self._batch_reversible.get(int(sequence))
+            if before is None or sequence in self._undone:
+                raise AnnotationStoreError("batch undo target is unavailable or already undone")
+            if any(_newest_for_key(key, self._key_history, self._undone) != sequence for key in before):
+                raise AnnotationStoreError("batch undo target is not the newest active event for every key")
+            return self._append_event_unlocked(self._new_event("undo_batch", target_seq=int(sequence)))
 
     def set(self, entry_id: str, label: str, value: str) -> Dict[str, object]:
         """Set one string annotation and return its persisted change record."""
@@ -686,6 +860,13 @@ class RowAnnotationStore:
             for candidate in reversed(self._reversible_order):
                 if candidate in self._undone:
                     continue
+                if candidate in self._batch_reversible:
+                    keys = self._batch_reversible[candidate]
+                    if not any((clean_entry is None or key[0] == clean_entry) and (clean_label is None or key[1] == clean_label) for key in keys):
+                        continue
+                    if clean_entry is not None or clean_label is not None:
+                        raise AnnotationStoreError(f"annotation belongs to batch {candidate}; undo the whole batch")
+                    return self.undo_batch(candidate)
                 key, _restored = self._reversible[candidate]
                 if clean_entry is not None and key[0] != clean_entry:
                     continue
@@ -724,14 +905,15 @@ class RowAnnotationStore:
             self._refresh_if_changed_unlocked()
             return self._state.get((clean_entry, clean_label), default)
 
-    def annotations_for(self, entry_id: str) -> Dict[str, str]:
+    def annotations_for(self, entry_id: str, *, refresh: bool = True) -> Dict[str, str]:
         """Return all current labels for one CSV entry."""
 
         clean_entry = _validate_identifier(
             entry_id, "entry_id", MAX_ENTRY_ID_LENGTH
         )
         with self._lock:
-            self._refresh_if_changed_unlocked()
+            if refresh:
+                self._refresh_if_changed_unlocked()
             return dict(sorted(self._by_entry.get(clean_entry, {}).items()))
 
     def _snapshot_unlocked(self) -> Dict[str, Dict[str, str]]:
@@ -740,36 +922,47 @@ class RowAnnotationStore:
             for entry_id, values in sorted(self._by_entry.items())
         }
 
-    def snapshot(self) -> Dict[str, Dict[str, str]]:
+    def snapshot(self, *, refresh: bool = True) -> Dict[str, Dict[str, str]]:
         """Return ``{entry_id: {label: value}}`` for UI and export use."""
 
         with self._lock:
-            self._refresh_if_changed_unlocked()
+            if refresh:
+                self._refresh_if_changed_unlocked()
             return self._snapshot_unlocked()
 
-    def snapshot_for_label(self, label: str) -> Dict[str, str]:
+    def snapshot_for_label(self, label: str, *, refresh: bool = True) -> Dict[str, str]:
         """Return ``{entry_id: value}`` for one label with one log refresh."""
 
         clean_label = _validate_identifier(label, "label", MAX_LABEL_LENGTH)
         with self._lock:
-            self._refresh_if_changed_unlocked()
+            if refresh:
+                self._refresh_if_changed_unlocked()
             return {
                 entry_id: value
                 for (entry_id, candidate), value in sorted(self._state.items())
                 if candidate == clean_label
             }
 
-    def revision(self) -> Tuple[Optional[Tuple[int, int, int, int]], int]:
+    def revision(self, *, refresh: bool = True) -> Tuple[Optional[Tuple[int, int, int, int]], int]:
         """Return a cheap comparable revision after observing external writes."""
 
         with self._lock:
-            self._refresh_if_changed_unlocked()
+            if refresh:
+                self._refresh_if_changed_unlocked()
             return self._loaded_signature, self._last_seq
 
     def export_mapping(self) -> Dict[str, Dict[str, str]]:
         """Return the current row-level mapping for a CSV export adapter."""
 
         return self.snapshot()
+
+    def baseline(self) -> Dict[str, Dict[str, str]]:
+        """Return a defensive source-baseline mapping for store reconstruction."""
+
+        result: Dict[str, Dict[str, str]] = {}
+        for (entry_id, label), value in sorted(self._baseline_state.items()):
+            result.setdefault(entry_id, {})[label] = value
+        return result
 
     def history(
         self,
@@ -803,13 +996,15 @@ class RowAnnotationStore:
             self._refresh_if_changed_unlocked()
             matches = []
             for event in self._history:
-                if not include_baseline and event["op"] == "snapshot_set":
+                if not include_baseline and event["op"] in {
+                    "snapshot_set",
+                    "snapshot_remove",
+                }:
                     continue
-                if clean_entry is not None and event["entry_id"] != clean_entry:
+                parts = event.get("changes") or [event]
+                if not any((clean_entry is None or part["entry_id"] == clean_entry) and (clean_label is None or part["label"] == clean_label) for part in parts):
                     continue
-                if clean_label is not None and event["label"] != clean_label:
-                    continue
-                matches.append(dict(event))
+                matches.append(copy.deepcopy(event))
             if limit is not None:
                 matches = matches[-limit:] if limit else []
             return matches
@@ -831,29 +1026,55 @@ class RowAnnotationStore:
             os.close(descriptor)
 
     def compact(self) -> Dict[str, object]:
-        """Atomically replace history with non-undoable current baselines."""
+        """Atomically replace history with non-undoable sidecar deviations.
+
+        Unchanged source-baseline values are omitted so later source updates
+        remain visible. Sidecar overrides become ``snapshot_set`` records and
+        removed source values become durable ``snapshot_remove`` tombstones.
+        """
 
         with self._lock:
             self._load_unlocked()
             previous_events = len(self._events)
             timestamp = _utc_now()
             lines: List[bytes] = []
-            for sequence, ((entry_id, label), value) in enumerate(
-                sorted(self._state.items()), 1
-            ):
-                lines.append(
-                    self._serialize_event(
-                        {
-                            "schema": ANNOTATION_SCHEMA,
-                            "seq": sequence,
-                            "timestamp_utc": timestamp,
-                            "op": "snapshot_set",
-                            "entry_id": entry_id,
-                            "label": label,
-                            "value": value,
-                        }
-                    )
+            snapshots: List[Dict[str, object]] = []
+            for (entry_id, label), value in sorted(self._state.items()):
+                if self._baseline_state.get((entry_id, label), _MISSING) == value:
+                    continue
+                snapshots.append(
+                    {
+                        "op": "snapshot_set",
+                        "entry_id": entry_id,
+                        "label": label,
+                        "value": value,
+                    }
                 )
+            for entry_id, label in sorted(
+                set(self._baseline_state).difference(self._state)
+            ):
+                snapshots.append(
+                    {
+                        "op": "snapshot_remove",
+                        "entry_id": entry_id,
+                        "label": label,
+                    }
+                )
+            snapshots.sort(
+                key=lambda event: (
+                    str(event["entry_id"]),
+                    str(event["label"]),
+                    str(event["op"]),
+                )
+            )
+            for sequence, snapshot in enumerate(snapshots, 1):
+                event = {
+                    "schema": ANNOTATION_SCHEMA,
+                    "seq": sequence,
+                    "timestamp_utc": timestamp,
+                }
+                event.update(snapshot)
+                lines.append(self._serialize_event(event))
             encoded_size = sum(len(line) for line in lines)
             if encoded_size > self.max_log_bytes:
                 raise AnnotationStoreError(
@@ -909,6 +1130,8 @@ AnnotationStore = RowAnnotationStore
 __all__ = [
     "ANNOTATION_DIRECTORY",
     "ANNOTATION_SCHEMA",
+    "ANNOTATION_SCHEMA_V1",
+    "DIRECTORY_ANNOTATION_FILENAME",
     "MAX_ENTRY_ID_LENGTH",
     "MAX_EVENT_BYTES",
     "MAX_HISTORY_RESULTS",
@@ -919,4 +1142,6 @@ __all__ = [
     "AnnotationStoreError",
     "RowAnnotationStore",
     "annotation_sidecar_path",
+    "directory_annotation_sidecar_path",
+    "legacy_annotation_sidecar_path",
 ]

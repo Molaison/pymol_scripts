@@ -170,6 +170,35 @@ def _match_candidates(
     )
 
 
+def _target_queries(targets: object, mode: str) -> Tuple[str, ...]:
+    """Return target expressions without treating a regex as a name list.
+
+    Comma and whitespace are useful list separators for object names, but both
+    are ordinary regex syntax (for example ``{1,3}`` and a literal space).
+    Console quoting has already been normalized before this boundary, so one
+    string in regex mode is one complete expression. Direct Python callers may
+    still pass an iterable to request several regex expressions explicitly.
+    """
+
+    if mode != "regex":
+        return tuple(split_names(targets))
+    if targets is None:
+        return ()
+    if isinstance(targets, str):
+        return (targets,) if targets else ()
+    if isinstance(targets, Iterable):
+        values = []
+        for value in targets:
+            if value is None:
+                continue
+            text = str(value)
+            if text:
+                values.append(text)
+        return tuple(values)
+    text = str(targets)
+    return (text,) if text else ()
+
+
 def resolve_targets(
     cmd_api,
     targets: object,
@@ -188,14 +217,14 @@ def resolve_targets(
     before executing commands.
     """
 
-    queries = split_names(targets)
-    if not queries:
-        raise TargetResolutionError("targets must contain at least one expression")
     mode = str(match).strip().lower()
     if mode not in {"auto", "exact", "glob", "contains", "regex", "fuzzy"}:
         raise TargetResolutionError(
             "match must be auto, exact, glob, contains, regex, or fuzzy"
         )
+    queries = _target_queries(targets, mode)
+    if not queries:
+        raise TargetResolutionError("targets must contain at least one expression")
     allowed = _parse_kinds(kinds)
     cutoff = as_float(fuzzy_cutoff, minimum=0.0, maximum=1.0, name="fuzzy_cutoff")
     maximum = as_int(limit, minimum=0, name="limit")
@@ -260,11 +289,11 @@ def expand_targets(
     result: List[ExpandedTarget] = []
     seen = set()
 
-    def append(source: str, target: str) -> None:
+    def append(source: str, target: str, *, molecule_leaf_only: bool = False) -> None:
         if target in seen:
             return
         object_type_name = object_type(cmd_api, target)
-        if mode == "molecules" and object_type_name != "object:molecule":
+        if molecule_leaf_only and object_type_name != "object:molecule":
             return
         seen.add(target)
         result.append(
@@ -284,7 +313,11 @@ def expand_targets(
             append(match.name, match.name)
         if mode in {"leaves", "both", "molecules"}:
             for leaf in expand_group_leaves(cmd_api, match.name, dict(parents)):
-                append(match.name, leaf)
+                append(
+                    match.name,
+                    leaf,
+                    molecule_leaf_only=(mode == "molecules"),
+                )
     if not result:
         raise TargetResolutionError(
             f"resolved targets produced no executable names for group_mode={mode}"

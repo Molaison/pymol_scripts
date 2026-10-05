@@ -6,11 +6,19 @@ view or starts a render unless the caller explicitly opts in.
 """
 
 from dataclasses import dataclass, field
+from difflib import get_close_matches
+from functools import wraps
 import os
 import sys
+import traceback
 
 from pymol import cmd
 from pymolplugins.core.parameters import extend_command
+from pymolplugins.core.pymol_groups import (
+    GroupMetadataError,
+    expand_group_leaves,
+    object_type,
+)
 
 try:
     if not globals().get("__package__"):
@@ -60,6 +68,14 @@ REPRESENTATION_BITS = {
 }
 
 
+class StyleMutationError(RuntimeError):
+    """A style transaction failed with an explicit scene rollback outcome."""
+
+    def __init__(self, message, scene_preserved):
+        super().__init__(message)
+        self.scene_preserved = bool(scene_preserved)
+
+
 LEGACY_COLOR_ALIASES = {
     "pp_macaron_1": "color1",
     "pp_macaron_2": "color2",
@@ -96,14 +112,17 @@ LEGACY_COLOR_ALIASES = {
 def _as_bool(value):
     if isinstance(value, bool):
         return value
-    if isinstance(value, (int, float)):
+    if isinstance(value, (int, float)) and value in (0, 1):
         return bool(value)
     text = str(value).strip().lower()
     if text in ("1", "true", "yes", "on"):
         return True
     if text in ("0", "false", "no", "off", "", "none"):
         return False
-    raise ValueError("Expected a boolean value, got %r" % value)
+    raise ValueError(
+        "expected a boolean token (1/0, true/false, on/off, yes/no), got %r"
+        % value
+    )
 
 
 def _positive_int(value, label):
@@ -120,6 +139,164 @@ def _selection(operation, selection):
     return operation.get("selection", "{selection}").format(selection=selection)
 
 
+@dataclass(frozen=True)
+class StyleTarget:
+    """One validated target and the stable atom identities it resolves to."""
+
+    requested: str
+    selection: str
+    kind: str
+    resolved_targets: tuple
+    atom_targets: tuple
+    skipped_targets: tuple
+    atom_keys: tuple
+    atom_count: int
+
+    def as_dict(self):
+        return {
+            "requested": self.requested,
+            "effective_selection": self.selection,
+            "kind": self.kind,
+            "resolved_targets": list(self.resolved_targets),
+            "atom_targets": list(self.atom_targets),
+            "skipped_targets": list(self.skipped_targets),
+            "atom_count": self.atom_count,
+        }
+
+
+def _selector_literal(value):
+    return '"%s"' % str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _model_selection(name):
+    return "(model %s)" % _selector_literal(name)
+
+
+def _models_selection(names):
+    values = tuple(names)
+    if not values:
+        return "none"
+    return "(%s)" % " or ".join(_model_selection(name) for name in values)
+
+
+def _capture_atom_keys(command_api, selection, label):
+    keys = set()
+    try:
+        command_api.iterate(
+            selection,
+            "_pp_atom_keys.add((model, index))",
+            space={"_pp_atom_keys": keys},
+        )
+    except Exception as exc:
+        raise ValueError("invalid style %s %r: %s" % (label, selection, exc)) from exc
+    return tuple(sorted((str(model), int(index)) for model, index in keys))
+
+
+def _count_target_atoms(command_api, selection, label):
+    try:
+        return int(command_api.count_atoms(selection))
+    except Exception as exc:
+        raise ValueError("invalid style %s %r: %s" % (label, selection, exc)) from exc
+
+
+def _resolve_group_target(command_api, requested, capture_identity):
+    try:
+        leaves = tuple(expand_group_leaves(command_api, requested))
+    except GroupMetadataError as exc:
+        raise ValueError(
+            "could not expand style target group %r: %s" % (requested, exc)
+        ) from exc
+    atom_targets = []
+    skipped_targets = []
+    atom_keys = set()
+    atom_count = 0
+    for name in leaves:
+        if object_type(command_api, name) != "object:molecule":
+            skipped_targets.append(name)
+            continue
+        member_selection = _model_selection(name)
+        count = _count_target_atoms(command_api, member_selection, "group member")
+        destination = atom_targets if count else skipped_targets
+        destination.append(name)
+        atom_count += count
+        if count and capture_identity:
+            atom_keys.update(
+                _capture_atom_keys(command_api, member_selection, "group member")
+            )
+    if not atom_count:
+        raise ValueError("style target group %r contains no atoms" % requested)
+    return StyleTarget(
+        requested=requested,
+        selection=_models_selection(atom_targets),
+        kind="group",
+        resolved_targets=leaves,
+        atom_targets=tuple(atom_targets),
+        skipped_targets=tuple(skipped_targets),
+        atom_keys=tuple(sorted(atom_keys)),
+        atom_count=atom_count,
+    )
+
+
+def _resolve_non_group_target(
+    command_api, requested, target_type, capture_identity
+):
+    if target_type.startswith("object:"):
+        effective = _model_selection(requested)
+        atom_count = _count_target_atoms(command_api, effective, "object")
+        if not atom_count:
+            raise ValueError("style target object %r contains no atoms" % requested)
+        atom_keys = (
+            _capture_atom_keys(command_api, effective, "object")
+            if capture_identity
+            else ()
+        )
+        return StyleTarget(
+            requested=requested,
+            selection=effective,
+            kind="object",
+            resolved_targets=(requested,),
+            atom_targets=(requested,),
+            skipped_targets=(),
+            atom_keys=atom_keys,
+            atom_count=atom_count,
+        )
+
+    atom_count = _count_target_atoms(command_api, requested, "selection")
+    if not atom_count:
+        raise ValueError("style target selection %r contains no atoms" % requested)
+    atom_keys = (
+        _capture_atom_keys(command_api, requested, "selection")
+        if capture_identity
+        else ()
+    )
+    try:
+        atom_targets = tuple(command_api.get_object_list("(%s)" % requested))
+    except Exception:
+        atom_targets = tuple(dict.fromkeys(model for model, _ in atom_keys))
+    return StyleTarget(
+        requested=requested,
+        selection=requested,
+        kind="named_selection" if target_type.startswith("selection") else "selection",
+        resolved_targets=atom_targets,
+        atom_targets=atom_targets,
+        skipped_targets=(),
+        atom_keys=atom_keys,
+        atom_count=atom_count,
+    )
+
+
+def _resolve_style_target(command_api, selection, capture_identity):
+    if selection is None or not str(selection).strip():
+        raise ValueError("style selection must not be empty")
+    requested = str(selection).strip()
+    target_type = object_type(command_api, requested)
+    if target_type == "object:group":
+        return _resolve_group_target(command_api, requested, capture_identity)
+    return _resolve_non_group_target(
+        command_api, requested, target_type, capture_identity
+    )
+
+
 @dataclass
 class StyleSnapshot:
     """State needed to reverse one successful style application."""
@@ -127,12 +304,26 @@ class StyleSnapshot:
     snapshot_id: int
     preset_names: tuple
     selection: str
+    atom_keys: tuple = ()
     settings: dict = field(default_factory=dict)
+    target_settings: dict = field(default_factory=dict)
     named_colors: dict = field(default_factory=dict)
     atom_state: dict = None
     has_atom_colors: bool = False
     has_representations: bool = False
     representations: tuple = ()
+
+
+class StyleApplyResult(int):
+    """Backward-compatible snapshot ID carrying a structured apply report."""
+
+    def __new__(cls, snapshot_id, report):
+        value = int.__new__(cls, int(snapshot_id))
+        value.report = report
+        return value
+
+    def to_dict(self):
+        return dict(self.report)
 
 
 def _read_setting(command_api, name, selection=None):
@@ -167,9 +358,12 @@ def _capture_named_colors(command_api, presets):
     return colors
 
 
-def _capture_atom_state(command_api, selection, need_colors, need_reps):
+def _capture_atom_state(
+    command_api, selection, atom_keys, need_colors, need_reps
+):
     if not need_colors and not need_reps:
         return None, False, False
+    expected = set(atom_keys)
     atom_state = {}
     if need_reps:
         try:
@@ -178,6 +372,10 @@ def _capture_atom_state(command_api, selection, need_colors, need_reps):
                 "_pp_atom_state[(model, index)] = (color, reps)",
                 space={"_pp_atom_state": atom_state},
             )
+            if set(atom_state) != expected:
+                raise RuntimeError(
+                    "style target changed while its snapshot was being captured"
+                )
             return atom_state, need_colors, True
         except Exception:
             atom_state = {}
@@ -187,6 +385,56 @@ def _capture_atom_state(command_api, selection, need_colors, need_reps):
             "_pp_atom_state[(model, index)] = (color, None)",
             space={"_pp_atom_state": atom_state},
         )
+        if set(atom_state) != expected:
+            raise RuntimeError(
+                "style target changed while its snapshot was being captured"
+            )
+        return atom_state, True, False
+    return None, False, False
+
+
+def _capture_atom_state_by_keys(
+    command_api, atom_keys, need_colors, need_reps
+):
+    """Capture live atom state by immutable ``(model, index)`` identities."""
+
+    if not need_colors and not need_reps:
+        return None, False, False
+    expected = set(atom_keys)
+    if not expected:
+        raise RuntimeError("style snapshot has no stable atom identities")
+    selection = _models_selection(sorted({model for model, _ in expected}))
+    all_state = {}
+    if need_reps:
+        try:
+            command_api.iterate(
+                selection,
+                "_pp_atom_state[(model, index)] = (color, reps)",
+                space={"_pp_atom_state": all_state},
+            )
+            atom_state = {
+                key: value for key, value in all_state.items() if key in expected
+            }
+            if set(atom_state) != expected:
+                raise RuntimeError(
+                    "style target atoms changed since the snapshot was captured"
+                )
+            return atom_state, need_colors, True
+        except Exception:
+            all_state = {}
+    if need_colors:
+        command_api.iterate(
+            selection,
+            "_pp_atom_state[(model, index)] = (color, None)",
+            space={"_pp_atom_state": all_state},
+        )
+        atom_state = {
+            key: value for key, value in all_state.items() if key in expected
+        }
+        if set(atom_state) != expected:
+            raise RuntimeError(
+                "style target atoms changed since the snapshot was captured"
+            )
         return atom_state, True, False
     return None, False, False
 
@@ -203,18 +451,40 @@ def _changed_representations(presets):
     return tuple(sorted(names))
 
 
-def _snapshot_settings(command_api, presets, selection):
+def _needs_stable_atom_identity(presets):
+    return any(
+        preset.selection_settings
+        or preset.color_operations
+        or preset.representation_operations
+        for preset in presets
+    )
+
+
+def _snapshot_settings(command_api, presets):
     result = {}
     for preset in presets:
         for name in preset.global_settings:
             key = (name, None)
             if key not in result:
                 result[key] = _read_setting(command_api, name)
-        for name in preset.selection_settings:
-            key = (name, selection)
-            if key not in result:
-                result[key] = _read_setting(command_api, name, selection)
     return result
+
+
+def _target_setting_names(presets):
+    return tuple(
+        sorted({name for preset in presets for name in preset.selection_settings})
+    )
+
+
+def _capture_target_settings(command_api, atom_keys, names):
+    values = {}
+    for model, index in atom_keys:
+        selection = _fallback_atom_selector(model, index)
+        for name in names:
+            values[(model, int(index), name)] = _read_setting(
+                command_api, name, selection
+            )
+    return values
 
 
 def _group_visible_atoms(atom_state, representation):
@@ -231,24 +501,123 @@ def _fallback_atom_selector(model, index):
     return '(model "%s" and index %d)' % (escaped, int(index))
 
 
-def _show_atom_groups(command_api, snapshot, representation, grouped):
+def _capture_current_settings(command_api, snapshot):
+    """Capture the current values for exactly the fields owned by a snapshot."""
+
+    current = {}
+    for name, selection in snapshot.settings:
+        if selection is None:
+            current[(name, None)] = _read_setting(command_api, name)
+        else:
+            # Compatibility for process-local snapshots created by an older
+            # registry instance before per-atom target settings were added.
+            identity_selection = _fallback_atom_selector(*snapshot.atom_keys[0])
+            current[(name, selection)] = _read_setting(
+                command_api, name, identity_selection
+            )
+    return current
+
+
+def _group_atom_keys(atom_keys):
+    grouped = {}
+    for model, index in atom_keys:
+        grouped.setdefault(str(model), []).append(int(index))
+    return grouped
+
+
+def _apply_to_atom_groups(
+    command_api, snapshot, operation_name, grouped, callback
+):
     serial = 0
     for model, indices in grouped.items():
         serial += 1
-        temp_name = "pp_style_restore_%d_%d" % (snapshot.snapshot_id, serial)
+        temp_name = "pp_style_restore_%d_%s_%d" % (
+            snapshot.snapshot_id,
+            operation_name,
+            serial,
+        )
         try:
             command_api.select_list(temp_name, model, indices, mode="index")
-            command_api.show(representation, temp_name)
         except (AttributeError, TypeError):
             for index in indices:
-                command_api.show(
-                    representation, _fallback_atom_selector(model, index)
-                )
-        finally:
+                callback(_fallback_atom_selector(model, index))
+        else:
             try:
-                command_api.delete(temp_name)
-            except Exception:
-                pass
+                callback(temp_name)
+            finally:
+                try:
+                    command_api.delete(temp_name)
+                except Exception:
+                    pass
+
+
+def _effect_inventory(presets):
+    return {
+        "global_settings": sorted(
+            {name for preset in presets for name in preset.global_settings}
+        ),
+        "named_colors": sorted(
+            {name for preset in presets for name in preset.colors}
+        ),
+        "target_settings": sorted(
+            {name for preset in presets for name in preset.selection_settings}
+        ),
+        "color_operations": [
+            operation["action"]
+            for preset in presets
+            for operation in preset.color_operations
+        ],
+        "representation_operations": [
+            "%s:%s" % (operation["action"], operation["representation"])
+            for preset in presets
+            for operation in preset.representation_operations
+        ],
+    }
+
+
+def _revert_limitations(snapshot_enabled, inventory):
+    if snapshot_enabled:
+        limitations = [
+            "revert is LIFO and snapshots are process-local, not stored in a PSE",
+            "deleted, replaced, or renamed target objects cannot be safely restored",
+        ]
+        if inventory["named_colors"]:
+            limitations.append(
+                "new named colors remain registered because PyMOL has no color-delete API"
+            )
+        if inventory["target_settings"]:
+            limitations.append(
+                "target-scoped settings are restored per atom by captured model/index identity"
+            )
+    else:
+        limitations = ["snapshot was disabled; this successful apply cannot be reverted"]
+        if inventory["named_colors"]:
+            limitations.append("registered named colors remain in the PyMOL process")
+    return limitations
+
+
+def _style_effect_report(
+    presets, target, snapshot_enabled, snapshot_id, render_requested
+):
+    inventory = _effect_inventory(presets)
+    return {
+        "schema": "pymolplugins.style_apply/1.0",
+        "presets": [preset.name for preset in presets],
+        "target": target.as_dict(),
+        "global_effects": {
+            "settings": inventory["global_settings"],
+            "named_colors_registered": inventory["named_colors"],
+            "render_requested": bool(render_requested),
+        },
+        "target_effects": {
+            "settings": inventory["target_settings"],
+            "atom_colors": inventory["color_operations"],
+            "representations": inventory["representation_operations"],
+        },
+        "snapshot_id": snapshot_id,
+        "revertible": bool(snapshot_enabled),
+        "revert_limitations": _revert_limitations(snapshot_enabled, inventory),
+    }
 
 
 class StyleRegistry:
@@ -259,13 +628,14 @@ class StyleRegistry:
         self.presets, self.lookup = validate_presets(tuple(presets))
         self.snapshots = []
         self.next_snapshot_id = 1
+        self.last_application = None
 
     def resolve(self, expression):
         """Resolve a name or ``name+name`` composition to ordered presets."""
         if isinstance(expression, (tuple, list)):
-            names = [str(item).strip() for item in expression]
+            names = [str(item).strip().lower() for item in expression]
         else:
-            names = [item.strip() for item in str(expression).split("+")]
+            names = [item.strip().lower() for item in str(expression).split("+")]
         if not names or any(not name for name in names):
             raise ValueError("A non-empty preset name is required")
         resolved = []
@@ -273,9 +643,17 @@ class StyleRegistry:
             try:
                 preset = self.lookup[name]
             except KeyError:
+                suggestions = get_close_matches(
+                    name, sorted(self.lookup), n=3, cutoff=0.55
+                )
+                hint = (
+                    "; did you mean %s?" % ", ".join(suggestions)
+                    if suggestions
+                    else ""
+                )
                 raise ValueError(
-                    "Unknown style preset %r. Available: %s"
-                    % (name, ", ".join(sorted(self.presets)))
+                    "Unknown style preset %r%s. Available: %s"
+                    % (name, hint, ", ".join(sorted(self.presets)))
                 )
             if preset not in resolved:
                 resolved.append(preset)
@@ -309,25 +687,79 @@ class StyleRegistry:
                 if alias:
                     self.cmd.set_color(alias, list(rgb))
 
-    def _new_snapshot(self, presets, selection):
+    def _new_snapshot(self, presets, target, consume_id=True):
         representations = _changed_representations(presets)
         need_colors = any(preset.color_operations for preset in presets)
         atom_state, has_colors, has_reps = _capture_atom_state(
-            self.cmd, selection, need_colors, bool(representations)
+            self.cmd,
+            target.selection,
+            target.atom_keys,
+            need_colors,
+            bool(representations),
         )
+        if representations and not has_reps:
+            raise RuntimeError(
+                "this PyMOL build cannot capture atom representation state; "
+                "refusing a non-revertible representation apply"
+            )
         snapshot = StyleSnapshot(
             snapshot_id=self.next_snapshot_id,
             preset_names=tuple(preset.name for preset in presets),
-            selection=selection,
-            settings=_snapshot_settings(self.cmd, presets, selection),
+            selection=target.selection,
+            atom_keys=target.atom_keys,
+            settings=_snapshot_settings(self.cmd, presets),
+            target_settings=_capture_target_settings(
+                self.cmd,
+                target.atom_keys,
+                _target_setting_names(presets),
+            ),
             named_colors=_capture_named_colors(self.cmd, presets),
             atom_state=atom_state,
             has_atom_colors=has_colors,
             has_representations=has_reps,
             representations=representations,
         )
-        self.next_snapshot_id += 1
+        if consume_id:
+            self.next_snapshot_id += 1
         return snapshot
+
+    def _capture_current_like(self, snapshot):
+        """Capture the styled state needed to roll back a failed revert."""
+
+        atom_state, has_colors, has_reps = _capture_atom_state_by_keys(
+            self.cmd,
+            snapshot.atom_keys,
+            snapshot.has_atom_colors,
+            snapshot.has_representations,
+        )
+        if snapshot.has_representations and not has_reps:
+            raise RuntimeError(
+                "this PyMOL build cannot capture the current representation state; "
+                "revert was not started"
+            )
+        if snapshot.has_atom_colors and not has_colors:
+            raise RuntimeError(
+                "this PyMOL build cannot capture the current atom colors; "
+                "revert was not started"
+            )
+        presets = tuple(self.presets[name] for name in snapshot.preset_names)
+        return StyleSnapshot(
+            snapshot_id=snapshot.snapshot_id,
+            preset_names=snapshot.preset_names,
+            selection=snapshot.selection,
+            atom_keys=snapshot.atom_keys,
+            settings=_capture_current_settings(self.cmd, snapshot),
+            target_settings=_capture_target_settings(
+                self.cmd,
+                snapshot.atom_keys,
+                sorted({key[2] for key in snapshot.target_settings}),
+            ),
+            named_colors=_capture_named_colors(self.cmd, presets),
+            atom_state=atom_state,
+            has_atom_colors=has_colors,
+            has_representations=has_reps,
+            representations=snapshot.representations,
+        )
 
     def _apply_settings(self, presets, selection):
         for preset in presets:
@@ -358,10 +790,16 @@ class StyleRegistry:
         if not snapshot.has_atom_colors or snapshot.atom_state is None:
             return
         colors = {key: value[0] for key, value in snapshot.atom_state.items()}
-        self.cmd.alter(
-            snapshot.selection,
-            "color = _pp_colors.get((model, index), color)",
-            space={"_pp_colors": colors},
+        _apply_to_atom_groups(
+            self.cmd,
+            snapshot,
+            "colors",
+            _group_atom_keys(snapshot.atom_keys),
+            lambda selection: self.cmd.alter(
+                selection,
+                "color = _pp_colors.get((model, index), color)",
+                space={"_pp_colors": colors},
+            ),
         )
         try:
             self.cmd.recolor()
@@ -371,10 +809,53 @@ class StyleRegistry:
     def _restore_representations(self, snapshot):
         if not snapshot.has_representations or snapshot.atom_state is None:
             return
+        all_atoms = _group_atom_keys(snapshot.atom_keys)
         for representation in snapshot.representations:
-            self.cmd.hide(representation, snapshot.selection)
+            _apply_to_atom_groups(
+                self.cmd,
+                snapshot,
+                "hide_%s" % representation,
+                all_atoms,
+                lambda selection, value=representation: self.cmd.hide(
+                    value, selection
+                ),
+            )
             grouped = _group_visible_atoms(snapshot.atom_state, representation)
-            _show_atom_groups(self.cmd, snapshot, representation, grouped)
+            _apply_to_atom_groups(
+                self.cmd,
+                snapshot,
+                "show_%s" % representation,
+                grouped,
+                lambda selection, value=representation: self.cmd.show(
+                    value, selection
+                ),
+            )
+
+    def _restore_target_setting(self, snapshot, name, value):
+        _apply_to_atom_groups(
+            self.cmd,
+            snapshot,
+            "setting_%s" % name,
+            _group_atom_keys(snapshot.atom_keys),
+            lambda selection: self.cmd.set(name, value, selection),
+        )
+
+    def _restore_exact_target_settings(self, snapshot):
+        grouped = {}
+        for (model, index, name), value in snapshot.target_settings.items():
+            grouped.setdefault((name, value), []).append((model, int(index)))
+        for serial, ((name, value), atom_keys) in enumerate(
+            grouped.items(), start=1
+        ):
+            _apply_to_atom_groups(
+                self.cmd,
+                snapshot,
+                "setting_%s_%d" % (name, serial),
+                _group_atom_keys(atom_keys),
+                lambda selection, setting=name, current=value: self.cmd.set(
+                    setting, current, selection
+                ),
+            )
 
     def _restore_snapshot(self, snapshot):
         self._restore_atom_colors(snapshot)
@@ -383,34 +864,75 @@ class StyleRegistry:
             if selection is None:
                 self.cmd.set(name, value)
             else:
-                self.cmd.set(name, value, selection)
+                self._restore_target_setting(snapshot, name, value)
+        self._restore_exact_target_settings(snapshot)
         for name, rgb in snapshot.named_colors.items():
             if rgb is not None:
                 self.cmd.set_color(name, list(rgb))
 
     def apply(self, expression, selection="all", snapshot=True, render=False):
-        """Apply one preset/composition and optionally push a snapshot."""
+        """Apply atomically and optionally return a report-bearing snapshot ID.
+
+        The default return value is an ``int`` subclass for compatibility with
+        existing scripts.  Its ``report`` attribute separates global effects,
+        target-scoped effects, resolved group members, and revert limitations.
+        With ``snapshot=0`` the historical ``None`` return is preserved and the
+        same report is available as ``last_application``.
+        """
+        self.last_application = None
         presets = self.resolve(expression)
-        selection = str(selection or "all")
-        record = self._new_snapshot(presets, selection) if _as_bool(snapshot) else None
+        target = _resolve_style_target(
+            self.cmd, selection, _needs_stable_atom_identity(presets)
+        )
+        snapshot_enabled = _as_bool(snapshot)
+        render_requested = _as_bool(render)
+        # A transient snapshot is always captured so a failed apply is atomic,
+        # even when the caller opts out of retaining a successful snapshot.
+        record = self._new_snapshot(presets, target, consume_id=False)
         try:
             self.register_colors(tuple(preset.name for preset in presets))
-            self._apply_settings(presets, selection)
-            self._apply_operations(presets, selection)
-            if _as_bool(render):
+            self._apply_settings(presets, target.selection)
+            self._apply_operations(presets, target.selection)
+            if render_requested:
                 defaults = presets[-1].render_defaults
                 self.render(
                     defaults.get("width", 1600),
                     defaults.get("height", 1200),
                     defaults.get("filename", ""),
                 )
-        except Exception:
-            if record is not None:
+        except Exception as exc:
+            try:
                 self._restore_snapshot(record)
+            except Exception as rollback_exc:
+                raise StyleMutationError(
+                    "style apply failed: %s; rollback failed: %s"
+                    % (exc, rollback_exc),
+                    scene_preserved=False,
+                ) from exc
+            irreversible_colors = sorted(
+                name for name, rgb in record.named_colors.items() if rgb is None
+            )
+            if irreversible_colors:
+                raise StyleMutationError(
+                    "style apply failed: %s; rollback limitation: newly registered "
+                    "colors may remain because PyMOL has no color-delete API (%s)"
+                    % (exc, ", ".join(irreversible_colors)),
+                    scene_preserved=False,
+                ) from exc
             raise
-        if record is not None:
+        snapshot_id = record.snapshot_id if snapshot_enabled else None
+        report = _style_effect_report(
+            presets,
+            target,
+            snapshot_enabled,
+            snapshot_id,
+            render_requested,
+        )
+        self.last_application = report
+        if snapshot_enabled:
+            self.next_snapshot_id += 1
             self.snapshots.append(record)
-            return record.snapshot_id
+            return StyleApplyResult(record.snapshot_id, report)
         return None
 
     def revert(self, snapshot_id=None):
@@ -422,7 +944,25 @@ class StyleRegistry:
             raise ValueError(
                 "Style snapshots are LIFO; next snapshot is %d" % expected.snapshot_id
             )
-        self._restore_snapshot(expected)
+        current = self._capture_current_like(expected)
+        try:
+            self._restore_snapshot(expected)
+        except Exception as exc:
+            try:
+                self._restore_snapshot(current)
+            except Exception as rollback_exc:
+                raise StyleMutationError(
+                    "style revert failed: %s; rollback to the pre-revert styled "
+                    "state also failed: %s; snapshot %d was retained"
+                    % (exc, rollback_exc, expected.snapshot_id),
+                    scene_preserved=False,
+                ) from exc
+            raise StyleMutationError(
+                "style revert failed: %s; restored the pre-revert styled state; "
+                "snapshot %d was retained and can be retried"
+                % (exc, expected.snapshot_id),
+                scene_preserved=True,
+            ) from exc
         self.snapshots.pop()
         return expected.snapshot_id
 
@@ -457,16 +997,78 @@ def pp_style_describe(preset):
     print(description["description"])
     if description["aliases"]:
         print("aliases: %s" % ", ".join(description["aliases"]))
+    effects = description["effects"]
+    global_effects = effects["global"]
+    target_effects = effects["target_scoped"]
+    print(
+        "global effects: settings=%s; named_colors_registered=%d"
+        % (
+            ",".join(global_effects["settings"]) or "none",
+            len(global_effects["named_colors_registered"]),
+        )
+    )
+    print(
+        "target-scoped effects: settings=%s; atom_colors=%s; representations=%s"
+        % (
+            ",".join(target_effects["settings"]) or "none",
+            ",".join(target_effects["atom_colors"]) or "none",
+            ",".join(target_effects["representations"]) or "none",
+        )
+    )
     return description
 
 
 def pp_style_apply(preset, selection="all", snapshot=1, render=0):
-    """Apply a style without rendering by default and return snapshot ID."""
+    """Apply without rendering by default; return a report-bearing snapshot ID."""
+    pp_style_apply.last_report = None
     snapshot_id = _REGISTRY.apply(preset, selection, snapshot, render)
-    message = "Applied style %s to %s" % (preset, selection)
+    report = _REGISTRY.last_application
+    target = report["target"]
+    message = "Applied style %s to %s" % (preset, target["requested"])
     if snapshot_id is not None:
         message += " (snapshot %d)" % snapshot_id
     print(message)
+    if snapshot_id is not None:
+        print("Undo: pp_style_revert %d" % snapshot_id)
+    else:
+        print("Undo: unavailable (snapshot=0)")
+    resolved = ", ".join(target["resolved_targets"]) or "(selection expression)"
+    print(
+        "Resolved target: kind=%s atoms=%d names=%s"
+        % (target["kind"], target["atom_count"], resolved)
+    )
+    if target["skipped_targets"]:
+        print(
+            "Skipped non-atom group members: %s"
+            % ", ".join(target["skipped_targets"])
+        )
+    global_effects = report["global_effects"]
+    global_parts = []
+    if global_effects["settings"]:
+        global_parts.append("settings=" + ",".join(global_effects["settings"]))
+    if global_effects["named_colors_registered"]:
+        global_parts.append(
+            "named_colors_registered=%d"
+            % len(global_effects["named_colors_registered"])
+        )
+    if global_effects["render_requested"]:
+        global_parts.append("render=requested")
+    print("Global effects: %s" % ("; ".join(global_parts) or "none"))
+    target_effects = report["target_effects"]
+    target_parts = []
+    if target_effects["settings"]:
+        target_parts.append("settings=" + ",".join(target_effects["settings"]))
+    if target_effects["atom_colors"]:
+        target_parts.append(
+            "atom_colors=" + ",".join(target_effects["atom_colors"])
+        )
+    if target_effects["representations"]:
+        target_parts.append(
+            "representations=" + ",".join(target_effects["representations"])
+        )
+    print("Target-scoped effects: %s" % ("; ".join(target_parts) or "none"))
+    print("Revert limitations: %s" % "; ".join(report["revert_limitations"]))
+    pp_style_apply.last_report = report
     return snapshot_id
 
 
@@ -482,7 +1084,12 @@ def pp_style_revert(snapshot_id=""):
 
 def pp_style_render(width=1600, height=1200, filename=""):
     """Ray trace the current scene, optionally writing a PNG."""
-    return _REGISTRY.render(width, height, filename)
+    result = _REGISTRY.render(width, height, filename)
+    if isinstance(result, str):
+        print("Rendered PNG: %s" % result)
+    else:
+        print("Rendered in viewer: %d x %d" % result)
+    return result
 
 
 CANONICAL_COMMANDS = {
@@ -494,10 +1101,84 @@ CANONICAL_COMMANDS = {
 }
 
 
+def _style_console_error_text(exc):
+    if isinstance(exc, KeyError) and exc.args:
+        return str(exc.args[0])
+    return str(exc)
+
+
+def _style_console_guard(command_name, function):
+    """Return actionable error records at the PyMOL console boundary."""
+
+    @wraps(function)
+    def guarded(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except Exception as exc:
+            message = _style_console_error_text(exc)
+            scene_preserved = bool(getattr(exc, "scene_preserved", True))
+            expected = False
+            if isinstance(exc, StyleMutationError):
+                if scene_preserved:
+                    action = (
+                        "The pre-command styled scene was restored. Fix the "
+                        "reported Host operation, then retry pp_style_revert "
+                        "with the same retained snapshot ID."
+                    )
+                else:
+                    action = (
+                        "The style transaction may be partial. Inspect atom colors, "
+                        "representations, and settings before retrying."
+                    )
+            elif isinstance(exc, (KeyError, ValueError)):
+                expected = True
+                if command_name == "pp_style_revert":
+                    action = (
+                        "Run pp_style_revert with no ID to restore the newest "
+                        "snapshot, or pass that exact newest snapshot ID."
+                    )
+                elif command_name == "pp_style_render":
+                    action = (
+                        "Use positive integer width/height values and a writable "
+                        "PNG filename, or omit filename to render in the viewer."
+                    )
+                else:
+                    action = (
+                        "Run pp_style_list, then pp_style_describe PRESET; retry "
+                        "with an exact preset and non-empty object/group selection."
+                    )
+            elif isinstance(exc, OSError):
+                expected = True
+                action = "Check the output path and permissions, then retry."
+            else:
+                action = (
+                    "The prior scene was restored; inspect the traceback and retry."
+                    if scene_preserved
+                    else "Inspect the traceback and current scene before retrying."
+                )
+            print("%s error: %s" % (command_name, message))
+            print(
+                "Scene %s. Action: %s"
+                % ("preserved" if scene_preserved else "may be partial", action)
+            )
+            if not expected:
+                traceback.print_exc()
+            return {
+                "schema": "pymolplugins.style_command/1.0",
+                "status": "error",
+                "command": command_name,
+                "error": message,
+                "action": action,
+                "scene_preserved": scene_preserved,
+            }
+
+    return guarded
+
+
 def register_commands(command_api=cmd):
     """Register canonical commands; repeated calls are deterministic."""
     for name, function in CANONICAL_COMMANDS.items():
-        extend_command(command_api, name, function)
+        extend_command(command_api, name, _style_console_guard(name, function))
 
 
 # Legacy adapters intentionally contain no direct PyMOL side effects.  They
@@ -576,11 +1257,11 @@ def legacy_get_lighting(selection="all", snapshot=1):
 def legacy_mass_rainbow(name="all", snapshot=1):
     # Unlike the old implementation, ``name`` is respected and never replaced
     # by an implicit loop variable.
-    return pp_style_apply("rfd2_sam_palette", name or "all", snapshot, 0)
+    return pp_style_apply("rfd2_sam_palette", name, snapshot, 0)
 
 
 def legacy_mass_paper_rainbow(name="all", snapshot=1):
-    return pp_style_apply("rfd2_paper_palette", name or "all", snapshot, 0)
+    return pp_style_apply("rfd2_paper_palette", name, snapshot, 0)
 
 
 LEGACY_COMMANDS = {

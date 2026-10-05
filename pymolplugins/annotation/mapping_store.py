@@ -16,9 +16,12 @@ from typing import Dict, List, Mapping, Optional, Sequence, Union
 
 from pymolplugins.annotation.state_store import mark_hidden_on_windows
 from pymolplugins.core.windows_paths import windows_long_path
+from .path_formats import validate_distribution, validate_format, validate_rewrites
+from .path_resolver import PathResolver
 
 
-MAPPING_SCHEMA = "pymolplugins.structure-annotator-path-mappings/1.0"
+MAPPING_SCHEMA = "pymolplugins.structure-annotator-path-mappings/1.1"
+LEGACY_MAPPING_SCHEMA = "pymolplugins.structure-annotator-path-mappings/1.0"
 MAPPING_ENVIRONMENT_VARIABLE = "PYMOLPLUGINS_ANNOTATOR_MAPPINGS"
 MAPPING_DIRECTORY = ".pymolplugins"
 MAPPING_FILENAME = "path_mappings.json"
@@ -43,13 +46,21 @@ _RULE_FIELDS = {
     "require_exists",
     "provider",
 }
-_PROFILE_FIELDS = {"name", "description", "rules"}
+_PROFILE_FIELDS = {"name", "description", "rules", "source_format", "target_format", "rewrites", "wsl_distribution"}
 _DOCUMENT_FIELDS = {"schema", "updated_at_utc", "profiles"}
 _STORE_LOCK = threading.RLock()
 
 
 class MappingStoreError(ValueError):
     """Raised when a mapping document or profile violates the store contract."""
+
+
+class UnsupportedMappingSchema(MappingStoreError):
+    """A newer store must never be repaired by replacing user configuration."""
+
+
+class InvalidMappingProfile(MappingStoreError):
+    """A readable profile needs correction, not replacement with defaults."""
 
 
 def utc_now() -> str:
@@ -215,7 +226,7 @@ def _validate_profile(raw: object, context: str = "profile") -> Dict[str, object
         raise MappingStoreError(
             f"{context}.rules contains more than {MAX_RULES_PER_PROFILE} entries"
         )
-    return {
+    clean = {
         "name": name,
         "description": description,
         "rules": [
@@ -223,11 +234,29 @@ def _validate_profile(raw: object, context: str = "profile") -> Dict[str, object
             for index, rule in enumerate(rules)
         ],
     }
+    try:
+        if set(raw) & {"source_format", "target_format", "wsl_distribution", "rewrites"}:
+            clean.update(source_format=validate_format(raw.get("source_format", "custom")),
+                         target_format=validate_format(raw.get("target_format", "custom")),
+                         wsl_distribution=validate_distribution(raw.get("wsl_distribution", "")),
+                         rewrites=validate_rewrites(raw.get("rewrites", [])))
+        resolver = PathResolver.from_profile(clean)
+        clean["rules"] = [rule.to_dict() for rule in resolver.rules]
+    except ValueError as exc:
+        raise InvalidMappingProfile("%s: %s" % (context, exc)) from exc
+    return clean
+
+
+def validate_mapping_profile(profile):
+    """Validate a draft profile without reading or writing its store."""
+    return _validate_profile(profile)
 
 
 def _validate_document(raw: object) -> Dict[str, object]:
     if not isinstance(raw, Mapping):
         raise MappingStoreError("mapping document must be a JSON object")
+    if raw.get("schema") not in {MAPPING_SCHEMA, LEGACY_MAPPING_SCHEMA}:
+        raise UnsupportedMappingSchema("unsupported mapping schema: %r" % raw.get("schema"))
     missing = _DOCUMENT_FIELDS.difference(raw)
     unknown = set(raw).difference(_DOCUMENT_FIELDS)
     if missing:
@@ -238,8 +267,8 @@ def _validate_document(raw: object) -> Dict[str, object]:
         raise MappingStoreError(
             f"mapping document contains unknown fields: {', '.join(sorted(unknown))}"
         )
-    if raw.get("schema") != MAPPING_SCHEMA:
-        raise MappingStoreError(
+    if raw.get("schema") not in {MAPPING_SCHEMA, LEGACY_MAPPING_SCHEMA}:
+        raise UnsupportedMappingSchema(
             "unsupported mapping schema: {!r}".format(raw.get("schema"))
         )
     updated_at = _validate_string(
@@ -356,6 +385,8 @@ def _load_or_initialize() -> Dict[str, object]:
         return document
     try:
         return _read_document()
+    except (UnsupportedMappingSchema, InvalidMappingProfile):
+        raise
     except MappingStoreError:
         _quarantine_invalid_store()
         document = _initial_document()

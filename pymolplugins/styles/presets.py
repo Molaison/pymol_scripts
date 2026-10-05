@@ -87,6 +87,26 @@ class StylePreset:
     )
     schema_version: int = SCHEMA_VERSION
 
+    def effect_summary(self):
+        """Classify process-global and target-scoped effects for discovery UIs."""
+        return {
+            "global": {
+                "settings": sorted(self.global_settings),
+                "named_colors_registered": sorted(self.colors),
+            },
+            "target_scoped": {
+                "settings": sorted(self.selection_settings),
+                "atom_colors": [
+                    operation["action"] for operation in self.color_operations
+                ],
+                "representations": [
+                    "%s:%s"
+                    % (operation["action"], operation["representation"])
+                    for operation in self.representation_operations
+                ],
+            },
+        }
+
     def as_dict(self):
         """Return a JSON-friendly description of this preset."""
         return {
@@ -105,6 +125,7 @@ class StylePreset:
             "render_defaults": dict(self.render_defaults),
             "compatibility": list(self.compatibility),
             "reversible_fields": list(self.reversible_fields),
+            "effects": self.effect_summary(),
         }
 
 
@@ -294,8 +315,8 @@ PRESETS = (
     StylePreset(
         name="high_contrast_outline",
         aliases=("cartoon", "high_contrast"),
-        description="Flat, high-contrast cartoon lighting with smooth outlines.",
-        category="lighting",
+        description="Show cartoon and apply flat, high-contrast lighting with smooth outlines.",
+        category="scene",
         global_settings={
             "specular": 0,
             "ambient": 0.8,
@@ -307,6 +328,13 @@ PRESETS = (
             "ray_shadow": 0,
             "valence": 0,
         },
+        representation_operations=(
+            {
+                "action": "show",
+                "representation": "cartoon",
+                "selection": "{selection}",
+            },
+        ),
         render_defaults={"width": 2000, "height": 2000},
     ),
     StylePreset(

@@ -38,7 +38,11 @@ try:
         split_names,
     )
     from pymolplugins.core.pymol_groups import expand_names as expand_group_names
-    from pymolplugins.core.sequence import find_sequence_matches, index_atom_streams
+    from pymolplugins.core.sequence import (
+        SequenceOccurrenceError,
+        find_sequence_matches,
+        index_atom_streams,
+    )
 except ImportError:
     _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     if _ROOT not in sys.path:
@@ -61,7 +65,11 @@ except ImportError:
         split_names,
     )
     from pymolplugins.core.pymol_groups import expand_names as expand_group_names  # type: ignore
-    from pymolplugins.core.sequence import find_sequence_matches, index_atom_streams  # type: ignore
+    from pymolplugins.core.sequence import (  # type: ignore
+        SequenceOccurrenceError,
+        find_sequence_matches,
+        index_atom_streams,
+    )
 
 
 @dataclass(frozen=True)
@@ -98,6 +106,10 @@ class AlignmentRecord:
     parameters: Dict[str, object]
     backend_version: str = "1.0"
     committed: bool = False
+    committed_at: Optional[float] = None
+    commit_order: int = 0
+    undone: bool = False
+    commit_count: int = 0
     committed_ttt: Dict[str, Optional[Tuple[float, ...]]] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
 
@@ -123,20 +135,101 @@ class AlignmentRecord:
                 "version": self.backend_version,
             },
             "committed": self.committed,
+            "committed_at": self.committed_at,
+            "commit_order": self.commit_order,
+            "undone": self.undone,
+            "commit_count": self.commit_count,
+            "changed": self.committed,
+            "scene_changed": self.committed,
+            "status": (
+                "committed"
+                if self.committed
+                else "undone"
+                if self.undone
+                else "preview"
+            ),
+            "next_command": (
+                "pp_align_undo {}".format(self.id)
+                if self.committed
+                else None
+                if self.undone
+                else "pp_align_commit {}".format(self.id)
+            ),
             "warnings": list(self.warnings),
         }
 
 
 _RECORDS: Dict[str, AlignmentRecord] = {}
 _LAST_RECORD_ID = ""
+_COMMIT_COUNTER = 0
 
 
 class AtomMappingAmbiguity(ValueError):
     """Raised when atom identifiers do not define one rigid correspondence."""
 
 
+class AlignmentWorkflowError(RuntimeError):
+    """Expected alignment state/input error with a concrete recovery action."""
+
+    def __init__(self, message: str, error_code: str, guidance: str):
+        self.error_code = str(error_code)
+        self.guidance = str(guidance)
+        super().__init__(str(message))
+
+
+class MotifResolutionError(AlignmentWorkflowError):
+    """Raised when a motif is absent or scientifically ambiguous."""
+
+    def __init__(
+        self, object_name: str, motif: str, chain: str, match_count: int
+    ):
+        self.object_name = str(object_name)
+        self.motif = str(motif)
+        self.chain = str(chain)
+        self.match_count = int(match_count)
+        location = "{} chain {}".format(object_name, chain or "*")
+        if self.match_count == 0:
+            message = "motif {!r} was not found in {}".format(motif, location)
+            code = "motif_no_match"
+            guidance = "check the motif/chain with pp_select_sequence, then retry"
+        else:
+            message = "motif {!r} is ambiguous in {} (at least {} matches)".format(
+                motif, location, self.match_count
+            )
+            code = "motif_ambiguous"
+            guidance = (
+                "use a longer motif or narrow mobile_chain/target_chain; "
+                "occurrence=first requires an explicit scientific choice"
+            )
+        super().__init__(message, code, guidance)
+
+
+class AlignmentMutationError(RuntimeError):
+    """PyMOL mutation failure with explicit rollback diagnostics."""
+
+    def __init__(
+        self, operation: str, cause: Exception, rollback_failures: Iterable[str]
+    ):
+        self.operation = str(operation)
+        self.rollback_failures = tuple(str(name) for name in rollback_failures)
+        detail = (
+            "; rollback failed for: {}".format(", ".join(self.rollback_failures))
+            if self.rollback_failures
+            else ""
+        )
+        super().__init__(
+            "alignment {} failed: {}{}".format(operation, cause, detail)
+        )
+
+
 def _error_result(exc: Exception) -> Dict[str, object]:
-    result: Dict[str, object] = {"status": "error", "error": str(exc)}
+    result: Dict[str, object] = {
+        "status": "error",
+        "error": str(exc),
+        "changed": False,
+        "scene_changed": False,
+        "scene_preserved": True,
+    }
     if isinstance(exc, AtomMappingAmbiguity):
         result.update(
             {
@@ -147,6 +240,72 @@ def _error_result(exc: Exception) -> Dict[str, object]:
                 ),
             }
         )
+    elif isinstance(exc, AlignmentWorkflowError):
+        result.update(
+            {
+                "error_code": exc.error_code,
+                "guidance": exc.guidance,
+            }
+        )
+        if isinstance(exc, MotifResolutionError):
+            result.update(
+                {
+                    "motif": exc.motif,
+                    "motif_object": exc.object_name,
+                    "motif_chain": exc.chain,
+                    "motif_match_count": exc.match_count,
+                }
+            )
+    elif isinstance(exc, AlignmentMutationError):
+        result.update(
+            {
+                "error_code": "alignment_{}_failed".format(exc.operation),
+                "rollback_failures": list(exc.rollback_failures),
+                "scene_preserved": not bool(exc.rollback_failures),
+                "guidance": (
+                    "inspect the listed objects before retrying"
+                    if exc.rollback_failures
+                    else "the prior transforms were restored; fix the PyMOL error and retry"
+                ),
+            }
+        )
+    elif isinstance(exc, (ValueError, GeometryError)):
+        result.update(
+            {
+                "error_code": "invalid_alignment_request",
+                "guidance": "check selections, matching mode, move target, and state",
+            }
+        )
+    else:
+        result.update(
+            {
+                "error_code": "alignment_internal_error",
+                "scene_preserved": False,
+                "guidance": "inspect the traceback before retrying",
+            }
+        )
+    if not result.get("scene_preserved"):
+        result["scene_changed"] = None
+    return result
+
+
+def _report_error(exc: Exception) -> Dict[str, object]:
+    result = _error_result(exc)
+    preserved = (
+        "Scene unchanged."
+        if result.get("scene_preserved")
+        else "Scene state may be partial; inspect affected objects."
+    )
+    print(
+        "Alignment error: {} {} Next: {}.".format(
+            exc, preserved, result.get("guidance", "inspect the command inputs")
+        ),
+        flush=True,
+    )
+    if isinstance(exc, AlignmentMutationError) or not isinstance(
+        exc, (AlignmentWorkflowError, AtomMappingAmbiguity, ValueError, GeometryError)
+    ):
+        traceback.print_exc()
     return result
 
 
@@ -194,9 +353,11 @@ def _rollback_ttt(
     for name in reversed(tuple(names)):
         try:
             _restore_ttt(name, baselines[name])
+            if not _ttt_close(_get_ttt(name), baselines[name]):
+                failures.append(name)
         except Exception:
             failures.append(name)
-    return failures
+    return list(dict.fromkeys(failures))
 
 
 def _object_world_matrix(name: str, state: int) -> Tuple[float, ...]:
@@ -232,13 +393,20 @@ def _atom_points(selection: str, state: int) -> List[AtomPoint]:
         matrices.setdefault(object_name, _object_world_matrix(object_name, state))
         raw_coord = tuple(float(value) for value in _atom_value(atom, "coord", ()))
         if len(raw_coord) != 3:
-            raise ValueError(f"atom {object_name}`{_atom_value(atom, 'index', '?')} has no 3D coordinate")
+            raise ValueError(
+                f"atom {object_name}`{_atom_value(atom, 'index', '?')} "
+                "has no 3D coordinate"
+            )
         result.append(
             AtomPoint(
                 object=object_name,
                 index=int(_atom_value(atom, "index", 0)),
                 name=str(_atom_value(atom, "name", "")).strip().upper(),
-                element=str(_atom_value(atom, "symbol", _atom_value(atom, "elem", ""))).strip().upper(),
+                element=str(
+                    _atom_value(atom, "symbol", _atom_value(atom, "elem", ""))
+                )
+                .strip()
+                .upper(),
                 resn=str(_atom_value(atom, "resn", "")).strip().upper(),
                 resi=str(_atom_value(atom, "resi", "")).strip(),
                 chain=str(_atom_value(atom, "chain", "")).strip(),
@@ -250,7 +418,9 @@ def _atom_points(selection: str, state: int) -> List[AtomPoint]:
     return result
 
 
-def _unique_map(points: Sequence[AtomPoint], key_fn, label: str) -> Dict[Tuple[object, ...], AtomPoint]:
+def _unique_map(
+    points: Sequence[AtomPoint], key_fn, label: str
+) -> Dict[Tuple[object, ...], AtomPoint]:
     result: Dict[Tuple[object, ...], AtomPoint] = {}
     duplicates = []
     for point in points:
@@ -279,7 +449,14 @@ def _pair_atoms(
     if strategy == "name":
         key_fn = lambda atom: (atom.name, atom.element)
     elif strategy == "identifier":
-        key_fn = lambda atom: (atom.segi, atom.chain, atom.resi, atom.resn, atom.name, atom.element)
+        key_fn = lambda atom: (
+            atom.segi,
+            atom.chain,
+            atom.resi,
+            atom.resn,
+            atom.name,
+            atom.element,
+        )
     else:
         raise ValueError("match must be order, name, or identifier")
     mobile_map = _unique_map(mobile, key_fn, "mobile")
@@ -440,24 +617,46 @@ def _create_record(
 
 
 def _commit_record(record: AlignmentRecord) -> None:
+    global _COMMIT_COUNTER
     if record.committed:
-        raise RuntimeError(f"alignment record is already committed: {record.id}")
-    current = {name: _get_ttt(name) for name in record.move_objects}
+        raise AlignmentWorkflowError(
+            f"alignment record is already committed: {record.id}",
+            "alignment_already_committed",
+            f"use pp_align_undo {record.id} before applying it again",
+        )
+    try:
+        current = {name: _get_ttt(name) for name in record.move_objects}
+    except Exception as exc:
+        raise AlignmentWorkflowError(
+            "alignment preview is stale because a move object is unavailable",
+            "stale_alignment_preview",
+            "restore the missing object or rerun the original pp_align_* command",
+        ) from exc
     stale = [
         name
         for name in record.move_objects
         if not _ttt_close(current[name], record.baseline_ttt[name])
     ]
     if stale:
-        raise RuntimeError(
+        raise AlignmentWorkflowError(
             "alignment preview is stale because move objects changed: "
-            + ", ".join(stale)
-            + "; create a new alignment record"
+            + ", ".join(stale),
+            "stale_alignment_preview",
+            "rerun the original pp_align_* command to create a fresh preview",
         )
-    if _current_anchor_fingerprint(record) != record.anchor_fingerprint:
-        raise RuntimeError(
-            "alignment preview is stale because anchor atoms or transforms changed; "
-            "create a new alignment record"
+    try:
+        current_anchor_fingerprint = _current_anchor_fingerprint(record)
+    except Exception as exc:
+        raise AlignmentWorkflowError(
+            "alignment preview is stale because anchor atoms are unavailable",
+            "stale_alignment_preview",
+            "restore the anchor objects or rerun the original pp_align_* command",
+        ) from exc
+    if current_anchor_fingerprint != record.anchor_fingerprint:
+        raise AlignmentWorkflowError(
+            "alignment preview is stale because anchor atoms or transforms changed",
+            "stale_alignment_preview",
+            "rerun the original pp_align_* command to create a fresh preview",
         )
     attempted = []
     try:
@@ -465,16 +664,17 @@ def _commit_record(record: AlignmentRecord) -> None:
             attempted.append(name)
             matrix = ttt_to_homogeneous(current[name])
             _set_ttt_h(name, mat4_multiply(record.matrix, matrix))
+        committed_ttt = {name: _get_ttt(name) for name in record.move_objects}
     except Exception as exc:
         rollback_failures = _rollback_ttt(current, attempted)
-        detail = (
-            f"; rollback failed for: {', '.join(rollback_failures)}"
-            if rollback_failures
-            else ""
-        )
-        raise RuntimeError(f"alignment commit failed: {exc}{detail}") from exc
+        raise AlignmentMutationError("commit", exc, rollback_failures) from exc
+    _COMMIT_COUNTER += 1
     record.committed = True
-    record.committed_ttt = {name: _get_ttt(name) for name in record.move_objects}
+    record.committed_at = time.time()
+    record.commit_order = _COMMIT_COUNTER
+    record.undone = False
+    record.commit_count += 1
+    record.committed_ttt = committed_ttt
 
 
 def _fit_and_record(
@@ -489,8 +689,17 @@ def _fit_and_record(
     default_mobile_object: str,
     state: int,
     parameters: Mapping[str, object],
+    preview: object,
     commit: object,
 ) -> Dict[str, object]:
+    preview_value = as_bool(preview)
+    commit_value = as_bool(commit)
+    if not preview_value and not commit_value:
+        raise AlignmentWorkflowError(
+            "preview=0 and commit=0 request neither a preview nor an apply",
+            "alignment_no_action",
+            "use preview=1 for a safe record or commit=1 to apply",
+        )
     if not mobile_points or not target_points:
         raise ValueError("both anchor selections must contain atoms")
     paired_mobile, paired_target = _pair_atoms(mobile_points, target_points, match)
@@ -508,16 +717,60 @@ def _fit_and_record(
         paired_mobile,
         paired_target,
         state,
-        parameters,
+        {
+            **dict(parameters),
+            "move": split_names(move),
+            "preview": preview_value,
+            "commit": commit_value,
+        },
     )
-    if as_bool(commit):
+    if commit_value:
         _commit_record(record)
-    print(
-        f"Alignment {record.id}: points={record.point_count}, "
-        f"RMSD {record.rmsd_before:.4f} -> {record.rmsd_after:.4f}, "
-        f"move={','.join(record.move_objects)}, committed={record.committed}"
-    )
+    if record.committed:
+        print(
+            "Alignment applied to {} object(s): {}. RMSD {:.4f} -> {:.4f}. "
+            "Undo: pp_align_undo {}".format(
+                len(record.move_objects),
+                ",".join(record.move_objects),
+                record.rmsd_before,
+                record.rmsd_after,
+                record.id,
+            )
+        )
+    else:
+        print(
+            "Preview only; nothing changed. Alignment {} moves {}. "
+            "RMSD {:.4f} -> {:.4f}. Apply: pp_align_commit {}".format(
+                record.id,
+                ",".join(record.move_objects),
+                record.rmsd_before,
+                record.rmsd_after,
+                record.id,
+            )
+        )
     return record.to_dict()
+
+
+def _alignment_action(preview: object, commit: object) -> Tuple[bool, bool]:
+    """Resolve the compatible preview/apply flags before reading anchors."""
+
+    commit_value = as_bool(commit)
+    # ``commit=1`` has long been a one-flag shortcut. ``None`` preserves the
+    # safe preview default while allowing that shortcut to remain unambiguous.
+    preview_value = not commit_value if preview is None else as_bool(preview)
+    if preview_value and commit_value:
+        raise AlignmentWorkflowError(
+            "preview and commit are mutually exclusive",
+            "alignment_action_conflict",
+            "use preview=1, commit=0 to inspect or preview=0, commit=1 to apply",
+        )
+    if not preview_value and not commit_value:
+        raise AlignmentWorkflowError(
+            "preview=0 and commit=0 request neither a preview nor an apply",
+            "alignment_no_action",
+            "use preview=1 for a safe record or commit=1 to apply",
+        )
+    return preview_value, commit_value
 
 
 def pp_align_anchor(
@@ -526,13 +779,13 @@ def pp_align_anchor(
     move: object = "",
     match: str = "identifier",
     state: object = 1,
-    preview: object = 1,
+    preview: object = None,
     commit: object = 0,
 ) -> Dict[str, object]:
     """Fit arbitrary anchor selections and optionally move whole objects."""
     try:
         parsed_state = as_int(state, minimum=1, name="state")
-        as_bool(preview)  # Kept for an explicit, stable command signature.
+        preview_value, commit_value = _alignment_action(preview, commit)
         mobile_objects = _selection_objects(mobile_anchor)
         if len(mobile_objects) != 1:
             raise ValueError("mobile_anchor must belong to exactly one molecule object")
@@ -552,12 +805,11 @@ def pp_align_anchor(
                 "match": str(match).lower(),
                 "state": parsed_state,
             },
-            commit=commit,
+            preview=preview_value,
+            commit=commit_value,
         )
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return _error_result(exc)
+        return _report_error(exc)
 
 
 def _motif_points(
@@ -571,18 +823,28 @@ def _motif_points(
     model = _require_cmd().get_model(f"({object_name})", state)
     atoms = tuple(getattr(model, "atom", ()) or ())
     index = index_atom_streams([(object_name, state, atoms)], protein_only=True)
-    matches = find_sequence_matches(
-        index,
-        [str(motif)],
-        gap_mode="exact",
-        max_gap=0,
-        occurrence=str(occurrence).lower(),
-        chain=str(chain) if str(chain) else None,
-    )
-    if len(matches) != 1:
+    policy = str(occurrence).strip().lower()
+    if policy not in ("first", "unique"):
         raise ValueError(
-            f"motif '{motif}' in {object_name} must resolve to one match; found {len(matches)}"
+            "alignment occurrence must be 'unique' or 'first'; occurrence=all "
+            "cannot define one rigid correspondence"
         )
+    search_policy = policy
+    try:
+        matches = find_sequence_matches(
+            index,
+            [str(motif)],
+            gap_mode="exact",
+            max_gap=0,
+            occurrence=search_policy,
+            chain=str(chain) if str(chain) else None,
+        )
+    except SequenceOccurrenceError as error:
+        raise MotifResolutionError(
+            object_name, motif, chain, error.match_count
+        ) from error
+    if len(matches) != 1:
+        raise MotifResolutionError(object_name, motif, chain, len(matches))
     all_points = {point.index: point for point in _atom_points(f"({object_name})", state)}
     result = []
     for residue in matches[0].residues:
@@ -609,22 +871,49 @@ def pp_align_motif(
     move: object = "",
     occurrence: str = "unique",
     state: object = 1,
-    preview: object = 1,
+    preview: object = None,
     commit: object = 0,
 ) -> Dict[str, object]:
     """Align a whole payload from exact sequence-motif residue anchors."""
     try:
         parsed_state = as_int(state, minimum=1, name="state")
-        as_bool(preview)
-        atom_names = [name.strip().upper() for name in str(atoms).replace(",", "+").split("+") if name.strip()]
+        preview_value, commit_value = _alignment_action(preview, commit)
+        occurrence_value = str(occurrence).strip().lower()
+        if occurrence_value not in {"first", "unique"}:
+            if occurrence_value == "all":
+                raise AlignmentWorkflowError(
+                    "occurrence=all cannot define one rigid correspondence",
+                    "invalid_motif_occurrence",
+                    "use occurrence=unique or occurrence=first explicitly",
+                )
+            raise AlignmentWorkflowError(
+                "alignment occurrence must be unique or first",
+                "invalid_motif_occurrence",
+                "use occurrence=unique for safety or occurrence=first as an explicit choice",
+            )
+        atom_names = [
+            name.strip().upper()
+            for name in str(atoms).replace(",", "+").split("+")
+            if name.strip()
+        ]
         if not atom_names:
             raise ValueError("atoms must contain at least one atom name")
         target_query = str(target_motif).strip() or str(mobile_motif).strip()
         mobile_points, mobile_description = _motif_points(
-            str(mobile_obj), str(mobile_motif), str(mobile_chain), atom_names, occurrence, parsed_state
+            str(mobile_obj),
+            str(mobile_motif),
+            str(mobile_chain),
+            atom_names,
+            occurrence_value,
+            parsed_state,
         )
         target_points, target_description = _motif_points(
-            str(target_obj), target_query, str(target_chain), atom_names, occurrence, parsed_state
+            str(target_obj),
+            target_query,
+            str(target_chain),
+            atom_names,
+            occurrence_value,
+            parsed_state,
         )
         return _fit_and_record(
             kind="motif",
@@ -644,15 +933,14 @@ def pp_align_motif(
                 "mobile_chain": str(mobile_chain),
                 "target_chain": str(target_chain),
                 "atoms": list(atom_names),
-                "occurrence": str(occurrence).lower(),
+                "occurrence": occurrence_value,
                 "state": parsed_state,
             },
-            commit=commit,
+            preview=preview_value,
+            commit=commit_value,
         )
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return _error_result(exc)
+        return _report_error(exc)
 
 
 def pp_align_ligand(
@@ -663,13 +951,13 @@ def pp_align_ligand(
     match: str = "name",
     move: object = "",
     state: object = 1,
-    preview: object = 1,
+    preview: object = None,
     commit: object = 0,
 ) -> Dict[str, object]:
     """Align a payload by explicitly selected ligand atoms."""
     try:
         parsed_state = as_int(state, minimum=1, name="state")
-        as_bool(preview)
+        preview_value, commit_value = _alignment_action(preview, commit)
         mobile_selection = f"({mobile_obj}) and ({mobile_ligand})"
         target_selection = f"({target_obj}) and ({target_ligand})"
         return _fit_and_record(
@@ -690,40 +978,94 @@ def pp_align_ligand(
                 "match": str(match).lower(),
                 "state": parsed_state,
             },
-            commit=commit,
+            preview=preview_value,
+            commit=commit_value,
         )
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return _error_result(exc)
+        return _report_error(exc)
 
 
-def _record(record_id: object = "") -> AlignmentRecord:
-    key = str(record_id or _LAST_RECORD_ID).strip()
+def _record(record_id: object = "", action: str = "inspect") -> AlignmentRecord:
+    key = str(record_id).strip()
+    if key:
+        if key not in _RECORDS:
+            raise AlignmentWorkflowError(
+                f"unknown alignment record: {key}",
+                "unknown_alignment_record",
+                "run pp_align_list and choose a listed record ID",
+            )
+        return _RECORDS[key]
+    if action == "undo":
+        committed_records = [
+            record for record in _RECORDS.values() if record.committed
+        ]
+        if committed_records:
+            return max(
+                committed_records,
+                key=lambda record: (
+                    record.commit_order,
+                    record.created_at,
+                ),
+            )
+        raise AlignmentWorkflowError(
+            "no committed alignment is available to undo",
+            "no_committed_alignment",
+            "apply a preview with pp_align_commit before undoing",
+        )
+    if action == "commit":
+        for record in reversed(tuple(_RECORDS.values())):
+            if not record.committed and not record.undone:
+                return record
+        raise AlignmentWorkflowError(
+            "no uncommitted alignment preview is available",
+            "no_alignment_preview",
+            "run pp_align_anchor, pp_align_motif, or pp_align_ligand first",
+        )
+    key = str(_LAST_RECORD_ID).strip()
     if not key or key not in _RECORDS:
-        raise ValueError(f"unknown alignment record: {key or '(none)'}")
+        raise AlignmentWorkflowError(
+            "no alignment record is available",
+            "unknown_alignment_record",
+            "run an alignment preview first",
+        )
     return _RECORDS[key]
 
 
 def pp_align_commit(record_id: object = "") -> Dict[str, object]:
     try:
-        record = _record(record_id)
+        record = _record(record_id, action="commit")
         _commit_record(record)
-        print(f"Alignment committed: {record.id}")
+        print(
+            "Alignment applied to {} object(s): {}. Undo: pp_align_undo {}".format(
+                len(record.move_objects),
+                ",".join(record.move_objects),
+                record.id,
+            )
+        )
         return record.to_dict()
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return _error_result(exc)
+        return _report_error(exc)
 
 
 def pp_align_undo(record_id: object = "", force: object = 0) -> Dict[str, object]:
     try:
-        record = _record(record_id)
+        record = _record(record_id, action="undo")
         if not record.committed:
-            raise RuntimeError(f"alignment record is not committed: {record.id}")
+            raise AlignmentWorkflowError(
+                f"alignment record is not committed: {record.id}",
+                "alignment_not_committed",
+                "commit that preview first, or omit record_id to undo the "
+                "latest committed alignment",
+            )
         force_value = as_bool(force)
-        current = {name: _get_ttt(name) for name in record.move_objects}
+        try:
+            current = {name: _get_ttt(name) for name in record.move_objects}
+        except Exception as exc:
+            raise AlignmentWorkflowError(
+                "alignment undo is stale because a moved object is unavailable",
+                "stale_alignment_undo",
+                "restore the missing object before undoing; force cannot recreate it",
+            ) from exc
         stale = [
             name
             for name in record.move_objects
@@ -731,38 +1073,63 @@ def pp_align_undo(record_id: object = "", force: object = 0) -> Dict[str, object
             and not _ttt_close(current[name], record.committed_ttt[name])
         ]
         if stale and not force_value:
-            raise RuntimeError(
-                "alignment objects changed after commit: %s; undo refused to "
-                "overwrite external changes (use force=1)" % ", ".join(stale)
+            raise AlignmentWorkflowError(
+                "alignment objects changed after commit: {}".format(
+                    ", ".join(stale)
+                ),
+                "stale_alignment_undo",
+                "inspect newer edits, then use force=1 only if they may be overwritten",
             )
         attempted = []
         try:
             for name in record.move_objects:
                 attempted.append(name)
                 _restore_ttt(name, record.baseline_ttt[name])
+            not_restored = [
+                name
+                for name in record.move_objects
+                if not _ttt_close(_get_ttt(name), record.baseline_ttt[name])
+            ]
+            if not_restored:
+                raise RuntimeError(
+                    "PyMOL did not restore transforms for: {}".format(
+                        ", ".join(not_restored)
+                    )
+                )
         except Exception as exc:
             rollback_failures = _rollback_ttt(current, attempted)
-            detail = (
-                f"; rollback failed for: {', '.join(rollback_failures)}"
-                if rollback_failures
-                else ""
-            )
-            raise RuntimeError(f"alignment undo failed: {exc}{detail}") from exc
+            raise AlignmentMutationError("undo", exc, rollback_failures) from exc
         record.committed = False
+        record.undone = True
         record.committed_ttt.clear()
-        print(f"Alignment undone: {record.id}")
+        print(
+            "Alignment undone for {} object(s): {}. Record: {}{}".format(
+                len(record.move_objects),
+                ",".join(record.move_objects),
+                record.id,
+                (
+                    ". Forced overwrite of newer transforms: {}".format(
+                        ",".join(stale)
+                    )
+                    if stale and force_value
+                    else ""
+                ),
+            )
+        )
         result = record.to_dict()
+        result["record_status"] = result["status"]
+        result["status"] = "restored"
         result.update(
             {
+                "changed": True,
+                "scene_changed": True,
                 "forced": force_value,
                 "stale_overwritten": stale if force_value else [],
             }
         )
         return result
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
-        return _error_result(exc)
+        return _report_error(exc)
 
 
 def pp_align_export(record_id: object = "", filename: str = "") -> Optional[str]:
@@ -781,17 +1148,22 @@ def pp_align_export(record_id: object = "", filename: str = "") -> Optional[str]
         print(f"Alignment exported: {path}")
         return path
     except Exception as exc:
-        print(f"Error: {exc}")
-        traceback.print_exc()
+        _report_error(exc)
         return None
 
 
 def pp_align_list() -> List[Dict[str, object]]:
     result = [record.to_dict() for record in _RECORDS.values()]
+    if not result:
+        print(
+            "No alignment records. Start with pp_align_anchor, "
+            "pp_align_motif, or pp_align_ligand."
+        )
+        return result
     for record in result:
         print(
             f"{record['id']}: kind={record['kind']}, points={record['point_count']}, "
-            f"after={record['rmsd_after']:.4f}, committed={record['committed']}"
+            f"after={record['rmsd_after']:.4f}, status={record['status']}"
         )
     return result
 

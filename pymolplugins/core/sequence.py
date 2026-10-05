@@ -11,7 +11,7 @@ import re
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from .parameters import as_bool, as_int
 
@@ -203,12 +203,27 @@ class SequenceMatch:
 class SequenceOccurrenceError(ValueError):
     """Raised when ``occurrence=unique`` does not produce exactly one match."""
 
-    def __init__(self, query: str, match_count: int):
+    def __init__(self, query: str, match_count: int, *, at_least: bool = False):
         self.query = query
         self.match_count = match_count
+        self.at_least = bool(at_least)
         super().__init__(
-            "query {!r} expected exactly one match, found {}".format(
-                query, match_count
+            "query {!r} expected exactly one match, found {}{}".format(
+                query, "at least " if self.at_least else "", match_count
+            )
+        )
+
+
+class SequenceMatchLimitError(ValueError):
+    """Raised before an ``occurrence=all`` search can grow without bound."""
+
+    def __init__(self, query: str, limit: int):
+        self.query = str(query)
+        self.limit = int(limit)
+        self.observed_at_least = self.limit + 1
+        super().__init__(
+            "query {!r} exceeds the {}-match safety limit".format(
+                self.query, self.limit
             )
         )
 
@@ -455,40 +470,52 @@ def _letter_matches(sequence_letter: str, query_letter: str) -> bool:
     return query_letter == "X" or sequence_letter.upper() == query_letter
 
 
-def _exact_positions(sequence: str, query: str) -> List[Tuple[int, ...]]:
+def _exact_positions(sequence: str, query: str) -> Iterator[Tuple[int, ...]]:
     if len(query) > len(sequence):
-        return []
-    positions = []
+        return
     for start in range(len(sequence) - len(query) + 1):
         candidate = tuple(range(start, start + len(query)))
         if all(
             _letter_matches(sequence[position], query[offset])
             for offset, position in enumerate(candidate)
         ):
-            positions.append(candidate)
-    return positions
+            yield candidate
 
 
 def _bounded_positions(
     sequence: str, query: str, max_gap: int
-) -> List[Tuple[int, ...]]:
-    results: List[Tuple[int, ...]] = []
-
-    def extend(path: Tuple[int, ...]) -> None:
-        query_offset = len(path)
-        if query_offset == len(query):
-            results.append(path)
-            return
-        start = 0 if not path else path[-1] + 1
-        stop = len(sequence) if not path else min(
-            len(sequence), path[-1] + max_gap + 2
+) -> Iterator[Tuple[int, ...]]:
+    if len(query) > len(sequence):
+        return
+    # Iterative depth-first enumeration avoids recursion failures for long
+    # motifs while retaining the deterministic lexicographic order.
+    path: List[int] = []
+    next_candidates = [0]
+    while next_candidates:
+        depth = len(path)
+        start = 0 if depth == 0 else path[-1] + 1
+        stop = (
+            len(sequence)
+            if depth == 0
+            else min(len(sequence), path[-1] + max_gap + 2)
         )
-        for position in range(start, stop):
-            if _letter_matches(sequence[position], query[query_offset]):
-                extend(path + (position,))
-
-    extend(())
-    return results
+        position = max(start, next_candidates[-1])
+        while position < stop and not _letter_matches(
+            sequence[position], query[depth]
+        ):
+            position += 1
+        if position >= stop:
+            next_candidates.pop()
+            if path:
+                path.pop()
+            continue
+        next_candidates[-1] = position + 1
+        path.append(position)
+        if len(path) == len(query):
+            yield tuple(path)
+            path.pop()
+        else:
+            next_candidates.append(position + 1)
 
 
 def find_sequence_matches(
@@ -499,12 +526,19 @@ def find_sequence_matches(
     max_gap: int = 0,
     occurrence: str = "all",
     chain: Optional[str] = None,
+    max_matches: int = 10000,
 ) -> Tuple[SequenceMatch, ...]:
     """Find deterministic exact or bounded-gap matches across all tracks.
 
     ``max_gap`` is the maximum count of intervening residues between each pair
     of adjacent query letters.  ``X`` is a one-residue wildcard.  Exact search
     examines every start position, so overlapping matches are retained.
+
+    Matching is streamed. ``occurrence=first`` stops after the first match and
+    ``occurrence=unique`` stops as soon as ambiguity is proven by a second
+    match. ``occurrence=all`` is bounded by ``max_matches`` across the whole
+    request; exceeding the bound raises :class:`SequenceMatchLimitError`
+    before an unbounded result can be accumulated.
     """
 
     if queries is None:
@@ -524,10 +558,14 @@ def find_sequence_matches(
     policy = str(occurrence).strip().lower()
     if policy not in ("all", "first", "unique"):
         raise ValueError("occurrence must be 'all', 'first', or 'unique'")
+    parsed_limit = as_int(
+        max_matches, minimum=1, maximum=100000, name="max_matches"
+    )
 
     all_matches: List[SequenceMatch] = []
     for query_index, query in enumerate(normalized_queries):
-        query_matches = []
+        query_matches: List[SequenceMatch] = []
+        first_found = False
         for track in index.tracks:
             if chain is not None and track.chain != chain:
                 continue
@@ -536,24 +574,35 @@ def find_sequence_matches(
             else:
                 position_sets = _bounded_positions(track.sequence, query, parsed_gap)
             for positions in position_sets:
-                query_matches.append(
-                    SequenceMatch(
-                        query_index=query_index,
-                        query=query,
-                        object=track.object,
-                        state=track.state,
-                        segi=track.segi,
-                        chain=track.chain,
-                        residue_positions=positions,
-                        residues=tuple(track.residues[position] for position in positions),
-                    )
+                match = SequenceMatch(
+                    query_index=query_index,
+                    query=query,
+                    object=track.object,
+                    state=track.state,
+                    segi=track.segi,
+                    chain=track.chain,
+                    residue_positions=positions,
+                    residues=tuple(
+                        track.residues[position] for position in positions
+                    ),
                 )
+                if policy == "all":
+                    if len(all_matches) >= parsed_limit:
+                        raise SequenceMatchLimitError(query, parsed_limit)
+                    all_matches.append(match)
+                    continue
+                query_matches.append(match)
+                if policy == "first":
+                    first_found = True
+                    break
+                if len(query_matches) == 2:
+                    raise SequenceOccurrenceError(query, 2, at_least=True)
+            if first_found:
+                break
         if policy == "unique":
             if len(query_matches) != 1:
                 raise SequenceOccurrenceError(query, len(query_matches))
             all_matches.extend(query_matches)
         elif policy == "first":
-            all_matches.extend(query_matches[:1])
-        else:
             all_matches.extend(query_matches)
     return tuple(all_matches)
