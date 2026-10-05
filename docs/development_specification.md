@@ -199,7 +199,7 @@ canonical toolkit 单独提供：
 pp_target_resolve targets, match=auto, kinds="object,group",
                   group_mode=atomic, fuzzy_cutoff=0.72, limit=0
 pp_foreach targets, command, match=auto, kinds="object,group",
-           group_mode=atomic, commit=0, on_error=stop
+           group_mode=molecules, commit=1, on_error=stop
 ```
 
 所有 canonical `cmd.extend` callback 必须经过统一 console boundary：PyMOL
@@ -208,12 +208,15 @@ escape decoding、`literal_eval` 或 `shlex`，以保持 UNC/Windows path、rege
 selection 和 command template 的内部文本不变；直接 Python 调用不经过此转换。
 
 - match 支持 `exact|glob|contains|regex|fuzzy|auto`；返回实际名称、类型、
-  match method 和 score，不静默丢弃歧义。
-- group mode 支持 `atomic|leaves|both|molecules`；`leaves` 使用 partial-session
-  parent metadata，递归包含 molecule、CGO、map 和 measurement。
+  match method 和 score，不静默丢弃歧义。`auto` 隐式 contains/fuzzy 多命中和
+  显式 fuzzy 多命中在 mutation 前拒绝；只有 `all_matches=1` 可确认批量执行，
+  显式 `glob|contains` 仍表示用户有意进行 set operation。
+- group mode 支持 `atomic|leaves|both|molecules`；默认 `molecules` 仅将命中的
+  group 递归展开为 molecule leaves，不过滤直接命中的 CGO/map/measurement；
+  `leaves` 使用 partial-session parent metadata，递归包含所有 leaf 类型。
 - command template 提供 `{target}`、`{source}`、`{kind}`、`{object_type}`、
-  `{index}`；preview 为默认，只有 `commit=1` 才调用 `cmd.do`。模板必须渲染为
-  单个 physical parser line；允许 `;` 串联，但拒绝换行和 NUL。
+  `{index}`；默认立即调用 `cmd.do`，显式 `commit=0` 才 preview。模板必须渲染
+  为单个 physical parser line；允许 `;` 串联，但拒绝换行和 NUL。
 - PyMOL 3.1 的 public `cmd.do` 对 parser/CmdException 成功与失败都返回
   `None`，private `_cmd.do` 也不是稳定 status API。每次执行须在同一 parser
   line 末尾追加唯一、quiet 的空 selection marker；只有 parser 完整执行前序
@@ -227,7 +230,7 @@ selection 和 command template 的内部文本不变；直接 Python 调用不�
 
 - `TARGET-01` exact/glob/contains/regex/fuzzy 均确定性排序、去重。
 - `TARGET-02` nested group 的 leaf expansion 不遗漏非 molecule object。
-- `TARGET-03` preview 不调用 `cmd.do`；commit 只执行返回列表中的命令。
+- `TARGET-03` 默认执行；显式 `commit=0` preview 不调用 `cmd.do`。
 - `TARGET-04` unrelated object 不受 group leaf iteration 影响。
 - `TARGET-05` swallowed parser/CmdException 不能记为 executed；stop/continue
   数量准确，且 scene 中不残留 completion marker。
@@ -535,6 +538,33 @@ signature 后必须 reload/replay。已 fsync 的本地 append 允许增量更�
   的边界。WSL registry regression 与真实 Windows bundled-Qt smoke 都必须覆盖普通
   Cancel 和 blocked worker 期间 close，且 worker 释放后的 late completion 不留 registry
   entry、不触发 commit/navigation/annotation mutation。
+
+### 5.7 Review bundles and responsive source import
+
+CSV/TSV 同目录的 `review.json` 是生成端的只读查看配置，支持
+`path_column`、有序 `display_columns`、可选 `label_column`、整批共用
+`step_cmd`。先读取它，再逐字段合并 `review.override.json`；显式导入选项优先。
+用户应用修改时原子写入 override，不能改写生成配置、表格或结构文件。
+预览或未修改的首次加载不创建 override。每个独立结果包使用单独目录。
+
+源 `label` 只作为结构标题，空值保留 ID/文件名标题；标签可重复且不参与
+entry ID，不得当成用户已完成标注。实际标注继续保存在现有 JSONL 中。
+配置格式、字段名或命令占位符错误必须可见，失败保留原 dataset 和 scene。
+CSV/TSV 分隔符检测必须在 ragged/truncated data sample 下仍能正确发现表头。
+
+目录导入与表格导入共用现有 prepare/commit 异步队列：扫描、旧 annotation
+读取、首结构 materialization、state path 计算在线程内完成。已准备的结果
+在主线程事务提交，提交与后续 background-save enqueue 不扫描远端目录。
+取消、关闭和晚到结果的隔离规则同 CSV；取消不能承诺强杀正在阻塞的系统读。
+
+路径历史补全只在明确接受时插入，不能通过 QLineEdit 的 highlighted 信号
+替换用户刚键入或粘贴的路径。表头完成后，从同一次请求直接继续 pending
+import，不能出现旧路径被加载或点击后只读表头的状态。根目录表格内单独的
+`K:` 规范为 `K:\`；`K:relative` 仍按不完整路径报错。
+
+验收覆盖真实 Windows/PyMOL 的首次加载、修改重开、连续粘贴 CSV/TSV 路径、
+坏配置、目录取消与失败、慢文件操作下的 Qt heartbeat。注入延迟的证据与真实
+远端目录耗时分别记录，不能互相替代。
 
 ## 6. Specification：group follow 刚体变换
 
@@ -963,7 +993,8 @@ pp_help
 
 doctor 报告：PyMOL/Python/platform、完整 canonical command manifest、可写
 cache、Windows/WSL path、PLIP/Rosetta/ANVIL endpoints、optional dependencies
-和 command conflicts；`pp_help` 按类别列出支持命令。
+和 command conflicts；`pp_help` 默认显示不超过十二个任务，并可解析 category、
+exact/fuzzy command、preset 和中英文任务词。
 
 ### 12.2 Result freshness 与 caching
 
@@ -992,9 +1023,22 @@ cache、Windows/WSL path、PLIP/Rosetta/ANVIL endpoints、optional dependencies
 ### 12.5 Object/group command iteration
 
 - 已实现：object/group 类型过滤、glob/contains/regex/fuzzy matching、nested
-  group leaf expansion、结构化 preview 和显式 commit。
-- 后续：为常用 command template 提供可发现 preset；不改变 PyMOL 原生
-  `iterate` 的逐 atom 行为。
+  group leaf expansion、默认执行和显式 `commit=0` preview。
+- 任意 template 保持 advanced；普通 representation 使用 `pp_show` 的白名单、
+  all-state atom-representation snapshot、Host 支持时的隐藏 same-session object
+  identity marker 和统一 `pp_undo`，不改变 PyMOL 原生 `iterate` 的逐 atom 行为。
+
+### 12.6 Task facades 与统一 undo
+
+新用户只需发现八个 Tier-1 名称：`pp_show`、`pp_nav`、`pp_align`、
+`pp_orient`、`pp_contacts`、`pp_metrics`、`pp_jobs`、`pp_undo`。现有 63 个
+canonical primitives 保持脚本兼容并归入 Advanced。Facade 不新建第二套
+navigation/alignment/interaction controller，只保存指向 owner record 的 bounded
+operation journal。所有 action-named facade 默认执行，只暴露 `preview=1`，不同时
+暴露 `preview`/`commit`。`pp_orient` 和 `pp_metrics` 要求显式 target/source；
+Rosetta facade 禁止默认猜测 target/binder chain，GUI 默认异步提交且失败进入
+`pp_jobs` history，不在 GUI thread 同步请求 capabilities。Navigation control
+action 拒绝 start-only 参数；统一 undo 只委托 journal 中保存的 exact owner reference。
 
 ## 13. 测试策略
 

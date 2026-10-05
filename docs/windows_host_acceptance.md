@@ -1,5 +1,20 @@
 # Windows Host PyMOL Acceptance Checklist
 
+## 2026-09-29 当前交付
+
+0.10.0最终ZIP已通过真实临时Plugin Manager安装。原14组命令检查及新增语法检查
+已取得分项通过证据；修复项在真实PyMOLQtGUI主线程验收。两离散状态30原子显示/撤销、
+引号正则、分号与失败完成标记通过；共享批处理56对/112输出，坐标误差0。
+完整矩阵、原始失败、最终ZIP校验值和未验证项见
+[本轮执行记录](validation/01_sampling_reference_2026-09-29.md#最终交付与真实证据)。
+
+使用 `just test-host-commands` 直接调用既有Windows Python/PyMOL，
+不需要PowerShell脚本或永久安全策略变更。它默认打开真实Qt窗口，
+可指定检查ID；原来的PowerShell入口及下文历史记录保留各自的历史边界。
+安装复现：`just test-package`。600行实际RNA审阅已有独立证据，不随命令补验重复运行。
+
+## 历史检查边界
+
 This checklist is the required integration gate for behavior that WSL pure/fake
 tests cannot prove.  `tests/host/host_smoke.py` and
 `scripts/windows/run_host_smoke.ps1` now automate the headless subset with
@@ -11,6 +26,39 @@ result beyond what its versioned JSON record actually tested.
 The latest reviewed record is
 [the PyMOL 3.1.3.1 smoke summary](validation/windows_host_smoke_2026-07-25.md).
 PyMOL 2.x remains a separate compatibility gate.
+
+Version 0.7.0 has a separate [workspace window-mode record](workspace_window_modes.md).
+`tests/host/workspace_window_smoke.py --output <modes.json>` exercises native
+docking, floating, tabification, state-preserving switches during real work,
+close guards, settings errors and remembered geometry in the actual desktop.
+Use isolated `PYMOLPLUGINS_UI_SETTINGS`; floating content must be resized through
+its host. The record includes explicit native framebuffer repaints, compact
+viewport bounds, exact ZIP checks and isolated Plugin Manager installation.
+It does not claim PyMOL 2.x compatibility or a fix for native shutdown callbacks.
+
+Structure Annotator 0.5.0 has a separate
+[current GUI record](validation/structure_annotator_layout_2026-09-16.md).
+Run `tests/host/annotator_layout_smoke.py --output <layout.json>` with the
+bundled Windows Python from a Windows-local working directory. It exercises
+visible controls, staged choices, explicit save/advance, batch/menu undo,
+required fields, filter reset, and 1000 x 720 / 760 x 560 geometry with long
+names and six scores. It also captures and checks the actual OpenGL framebuffer.
+For the bundled PyQt5 `QGLWidget`, use `grabFrameBuffer()`; QWidget `grab()` does
+not capture that GL buffer. Write JSON before `cmd.quit` and verify both the
+terminal exit and the expected artifacts. This GUI gate does not extend the
+canonical-command or version-compatibility evidence below.
+
+That record covers the former 63-command surface. Harness 1.5.0 adds the eight
+task facades, Unicode/task help, and a state-1 atom-representation undo round
+trip under `HOST-TASKS-01`; it does not yet cover the newer all-state snapshot,
+hidden object-identity marker, or asynchronous backend-failure history gates.
+It must be extended and rerun before those additions are called Host-verified;
+WSL/fake-command success is supporting evidence only.
+
+The 2026-07-27 current-revision launcher attempt was blocked before PowerShell
+or PyMOL started: WSL reported `UtilConnectUnix:514 connect failed 1` followed
+by `UtilBindVsockAnyPort:287 socket failed 1`. This is a launcher-environment
+blocker, not a Host pass and not evidence about the harness assertions.
 
 ## Runtime boundary
 
@@ -122,13 +170,21 @@ Test file, object, and group sources separately.
 Run `pp_nav_stop` and confirm pre-session enabled states are restored for
 existing-object/group sessions.
 
+For manually loaded navigation compatibility adapters, use a separate fresh
+session: load only one of `screen_boost.py` or `file_management.py`, confirm its
+callbacks carry the shared console adapter, and pass a quoted path plus strict
+`0|1` booleans. An invalid boolean must produce one actionable line without a
+traceback; an injected internal failure must retain diagnostics. With sibling
+`same.pdb` and `same.cif`, save both selections and verify distinct stable
+`same__pdb.pdb` / `same__cif.pdb` files and correct `exclude_selected` behavior.
+
 ### Object/group target iteration (`TARGET-*`)
 
 1. Run `pp_target_resolve` with exact, glob, contains, regex, and an intentional
    misspelling under `match=fuzzy`; record actual names, methods, and scores.
-2. Preview `pp_foreach test_group, "disable {target}", group_mode=leaves` and
+2. Preview `pp_foreach test_group, "disable {target}", group_mode=leaves, commit=0` and
    confirm no object changed.
-3. Repeat with `commit=1`; molecule, static CGO, map, measurement, and multistate
+3. Repeat without `commit=0`; molecule, static CGO, map, measurement, and multistate
    leaves must all receive exactly one command.
 4. Confirm an unrelated overlay remains enabled, then restore the fixtures.
 5. Test `group_mode=atomic` for a command that accepts a group name and verify
@@ -138,8 +194,52 @@ existing-object/group sessions.
    `executed_targets`, error counts follow the policy, and no `ppfe_ack_*`
    selection remains.
 
-The automated `HOST-TARGETS-01` covers steps 1–4 and 6. Arbitrary command templates
-have no generic undo, so preview-before-commit is part of the public contract.
+The current `HOST-TARGETS-01` rerun must cover steps 1–4 and 6; earlier Host
+records validated the prior explicit-commit contract only. `pp_foreach` now
+executes by default. Arbitrary command templates have no generic undo, so risky
+operations should first be run with explicit `commit=0`.
+
+## Tier-1 task facades (`TASK-*`)
+
+Harness 1.5.0 registers `HOST-TASKS-01`. In a disposable session it must:
+
+1. run `pp_show surface, TEST_GROUP`, then `pp_undo OPERATION_ID`, and compare
+   every molecule atom's `reps` bitmask in every state before/after. Confirm CGO,
+   map, and measurement leaves were not representation targets. On a Host with
+   object-property APIs, confirm commit stored the hidden identity marker and
+   undo refuses a deleted/recreated same-name object;
+2. run group navigation through `pp_nav groups, "A,B", wrap=0`, confirm a non-wrapping
+   `next-page` boundary, then confirm `pp_nav next, window=2` is rejected without
+   changing the scene before `pp_nav stop`;
+3. run `pp_align SOURCE, SOURCE, preview=1`, `pp_orient SOURCE, preview=1`, and
+   `pp_contacts SOURCE, focus=EXACT_LIGAND, preview=1`; prove no transform or
+   interaction-manifest mutation;
+4. run default `pp_metrics SOURCE, target=A, binder=B` and verify it submits
+   without a synchronous capabilities request on the GUI thread. Inspect it with
+   `pp_jobs`; an unavailable or failed backend must become a recent terminal
+   history entry with actionable diagnostics. Test `wait=1` separately as the
+   deliberate blocking/preflight path;
+5. run `pp_jobs` and `pp_undo list` with bounded human output; verify
+   `pp_jobs cancel, JOB_ID` is described as result suppression, not backend
+   termination;
+6. send quoted commands through `cmd.do`, and verify all eight callbacks carry
+   the shared console adapter;
+7. query `pp_help "ligand contacts"`, `pp_help "group batch"`, `pp_help 导航`,
+   `pp_help 表面`, `pp_help 对齐`, and `pp_help 配体接触`; exact/full-token intent
+   must rank first. Then query the English typo `pp_help aligment` and Chinese
+   typo `pp_help 结构对其`; both must return the `align` task with
+   `matched_by=fuzzy`. Natural queries `pp_help "browse groups"`,
+   `pp_help "sequence selection"`, `pp_help "axis align"`, and
+   `pp_help "ligand contact"` must route to navigation, sequence-motif,
+   orientation, and interaction tasks respectively. `pp_help "!!!"` and
+   `pp_help foobar` must return `no_match`, not the default guide or an unrelated
+   low-confidence command.
+
+Failure or stale undo must retain a retryable operation. Each `pp_undo` result
+must name the exact canonical delegate/reference stored in the journal. A
+`force=1` test may overwrite only a representation/transform changed after
+commit; it must still refuse a replaced/missing source object which cannot be
+recreated.
 
 ## 4. Structure Annotator persistence (`ANNO-*`)
 
@@ -178,18 +278,19 @@ columns, two rows that deliberately reference the same structure, one missing
 path, and spaces in both the CSV and structure paths. Record the source CSV and
 PDB SHA-256 before testing.
 
-1. In **Source**, choose **CSV + scores**, select the file, enter the exact path
-   and ID headers, select display columns, then click **Preview mapping**.
+1. In **Open data**, choose **CSV table**, select the file, enter the exact
+   structure and row-ID headers, then open **File locations > Check file paths**.
    Confirm valid/missing statuses and metadata. Click a preview row and confirm
    PyMOL does not navigate or replace the previously active dataset.
 2. Snapshot state/history/annotation/mapping files immediately before Preview.
    Confirm Preview created no state/history/annotation data, left an existing
    mapping file byte-identical, and changed no managed object. Panel creation
-   itself may initialize/repair the mapping store before this baseline. Then
-   click **Load CSV** and inspect the **Scores** tab: numeric sort, substring
-   filter, active annotation column, raw/resolved path, provider, materialized
-   path, and cache hit must be visible/correct.
-3. Annotate the two duplicate-path rows with different values, undo one, and
+   also uses read-only mapping lookup. Then click **Open CSV** and inspect the
+   review workspace. **Scores…**, **Filter**, and **More actions > Structure
+   details…** expose numeric scores/sort, filtering, annotation, raw/resolved
+   paths, provider, materialized path and cache-hit information.
+3. Choose a value, confirm that no annotation is written before Save, and save
+   the two duplicate-path rows with different values. Undo one, and
    annotate it again. Confirm the source CSV remains byte-identical and the
    hidden JSONL sidecar contains row-ID-specific events.
 4. Export to a new CSV. Confirm the header contains exactly one
@@ -209,8 +310,9 @@ PDB SHA-256 before testing.
    identical entry only uses session memoization and is not a cache re-check.
    Source bytes/size/mtime must not change.
 7. For a WSL-only file, start the authenticated worker with
-   `--stage-root structures=<absolute-root>`. Put that root in **WSL root** and
-   `structures` in **alias**. First use at least two unique staged paths plus a
+   `--stage-root structures=<absolute-root>`. Under **File locations**, select
+   worker file access, put that root in **Server root** and `structures` in
+   **Worker root alias**. First use at least two unique staged paths plus a
    duplicate row: Preview/Load should issue bounded `stat-batch` requests,
    preserve per-row missing/error status, and count the duplicate path once.
    Then use two IDs with the same staged path. Preview produces its own single
@@ -221,9 +323,10 @@ PDB SHA-256 before testing.
    duplicate preflight stat. Revisiting the same entry is memoized and produces
    no request. A wrong token/missing row must be rejected without replacing the
    active scene.
-8. Close/reopen the panel and then a fresh PyMOL process. Confirm source mode,
-   CSV path, scores view, annotation values and cursor restore. Disable
-   **Restore last dataset** and confirm the next fresh open does not auto-load.
+8. Close/reopen the panel in the same process and confirm live data and cursor
+   remain available. A fresh PyMOL process opens Open data without restoring
+   history. Use Recent configurations to restore or restore-and-load explicitly;
+   confirm the chosen configuration takes precedence over newer sidecar settings.
 
 `HOST-ANNOTATION-CSV-01` automates the Windows-local subset of steps 1-5 and 8
 through real `cmd.do`; `annotator_qt_smoke.py` automates preview-source

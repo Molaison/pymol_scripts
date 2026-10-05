@@ -1,25 +1,295 @@
 # Implementation Status
 
-Snapshot date: 2026-07-26 (Asia/Shanghai)
+## 连续审阅 — 0.12.2
+
+已交付：显式恢复最近数据源/筛选/候选位置；独立的“稍后复核”状态与 Next unreviewed / Next marked for later 路线；不污染质量标签的 review handoff JSON；分数相对排名/绝对规则提示；SSH/路径错误的直接恢复入口。
+最终 `output/12_continuous_review_20261001.json` 在 Windows PyMOL 3.1.3.1、全新隔离设置和临时安装包中 passed：首次导入、保存并继续、later路线、handoff导出、恢复入口可用、760×560布局及源文件不变。未做真人上手计时或长期断线实验；完整记录见 `docs/validation/01_sampling_reference_2026-09-29.md` 末尾。
+
+## 新手上手 — 0.12.1
+
+已交付：Open data三步入口、可选Quick start、空SSH列表行动提示、Connections里的首次连接说明；README/包内安装说明先给操作、再给高级信息。
+最终临时安装包在Windows PyMOL3.1.3.1和全新隔离设置下通过：打开帮助、3行CSV/首结构、点击标签不自动保存、Save and next写入并继续、760×560主按钮可见，4份源文件不变。证据output/11_onboarding_20260930.json及同名前缀截图，完整状态在validation/01_sampling_reference_2026-09-29.md末尾。未做真人上手计时；保留外部SSH准备条件，不修改用户当前安装。
+
+## SSH体验优化 — 0.12.0
+
+已交付：SSH阶段/计时/字节与速率反馈、取消、轻量压缩、原子流式落盘和非gzip直接缓存；保留原profile、OTP程序与持久会话。真实Windows3.1.3.1及x服务器600行/56列通过；首连加读表3.46秒，热导入0.412秒，TSV/CIF载荷分别减少约88%/68%。这些是单次实测，不是旧版吞吐提升倍数或每次OTP的承诺。
+21项传输测试、原生SSH/取消、最终0.12.0 ZIP临时安装均passed。完整证据、失败保留及下一步统一见validation/01_sampling_reference_2026-09-29.md末尾SSH章节；08/09/10系列JSON是对应原生输出。没有更改用户当前安装或远端原始文件。
+
+Snapshot date: 2026-07-27 (Asia/Shanghai)
 Specification: [development_specification.md](development_specification.md)
 
 This file separates code existence, WSL evidence, automated Windows Host
 evidence, interactive Host evidence, and optional licensed-backend evidence.
 
+## AI per-step命令草稿 — 0.11.0，2026-09-29
+
+Settings > Automation内增加AI草稿；固定test/gpt-6-astra，复用Debian WSL既有Responses配置和认证。准确prompt加JSON schema，严格解析后按on_open/after_label触发框填入，确认覆盖后仍需Apply，不自动执行；标签命令支持多行并随review.override保存重开。
+
+`output/07_ai_installed_20260929.json` passed：真实Plugin Manager临时安装后，在Windows PyMOL3.1.3.1完成实际provider请求（6.743秒）、2个step的生成/编辑/确认、2399原子的原生命令执行、取消（约20毫秒）、保存重开和紧凑GUI。11类坏文档与真实拒绝连接的网络错误属于明确标记的故障注入，均不污染原框。完整prompt、模型原始JSON文字/usage、状态、PSE和原生截图保留，无认证内容。600行原验收未重跑。
+
+安装包459007字节，SHA256 `66126cc3bae9c50c8816a25a87312c5ad6eddf2f9b6f168a98eadbb22147670a`。同一[权威记录](validation/01_sampling_reference_2026-09-29.md)列明失败修复及未验证边界；不是所有外部依赖或PyMOL版本已通过。
+
+## 全量概览、分层抽样与 reference — 0.10.0，2026-09-29
+
+现有候选表加入 Overview / sample 和 reference 列；不创建第二个导航游标。
+全集/筛选/样本分别计数，组和最多五个分位层交叉取代表样本，支持恢复全量。
+评分百分位不因取样而改变。reference 复用既有解析、缓存和后台任务，
+只对齐独立的 reference 对象，候选坐标不变；配置可保存并重开。
+
+本轮 Windows PyMOL 3.1.3.1 使用真实 RNA 数据（600 行/56 列）验证。
+维护恢复后未重跑600行流程。最终ZIP已在真实Plugin Manager临时安装通过；
+命令验收原14组分项及新增语法项已有通过证据，修复了引号正则、原子表示位读取和完成标记残留。
+受影响的共享批处理补验56对/112输出，最大坐标误差0，51份源文件不变。
+这是分项证据的汇总；保留含失败项的原始JSON，不把它们标成整次passed。
+完整状态、失败修正与范围见[唯一执行记录和验收矩阵](validation/01_sampling_reference_2026-09-29.md)。
+下文较早的功能记录仍保留其原验证边界，不表示全部在本轮重测。
+
+## Real SSH source and simplified opening - 0.9.1, 2026-09-18
+
+Fixes the Windows Python 3.10 empty-query failure for ordinary SSH URLs and
+reuses the existing SSH login program instead of bypassing OTP authentication.
+The source page now has one Open from selector, one path and one Open button;
+table type is detected and advanced options remain available. Exact-case aliases
+win completion, and failed operations retain their full details.
+
+One authenticated SSH connection handles the source reads, avoiding repeated
+OTP-window waits. Real Windows PyMOL opens the user's 600-row, 56-column CSV and
+its 2399-atom first structure with unchanged source hashes. The 788-test suite
+passes; the authenticated import takes 0.429 s in the recorded run.
+
+Validation is recorded in
+[the real-source follow-up](validation/structure_annotator_source_ui_2026-09-17.md).
+
+## SSH sources and fuzzy selection - 0.9.0, 2026-09-17
+
+Implemented: OpenSSH Host profiles, remote directory/table browsing and reads,
+remote-relative CSV paths, local annotation/configuration stores, cached
+structure transfer, shared fuzzy completion and default Ctrl+click save/Next.
+Existing asynchronous source replacement, required fields, explicit batches,
+Shift, retry and popup acceptance behavior are retained.
+
+The 781-test regression and real Windows PyMOL 3.1.3.1 / local OpenSSH workflow
+pass. The tested server uses an ephemeral profile/key; this is not a measurement
+of a production cluster or cold long-distance network performance. Final
+packaging and clean-exit Plugin Manager installation checks also pass; evidence is in
+[the validation record](validation/structure_annotator_ssh_fuzzy_2026-09-17.md).
+
+## Filter Enter completion - 0.8.1, 2026-09-17
+
+Enter/keypad Enter/Tab accept the highlighted column completion without
+submitting or closing the filter dialog. Enter without an open popup applies
+the expression. The popup now uses the existing completion key handler, so
+QCompleter cannot forward the same acceptance key into filter submission.
+
+The regression fails on 0.8.0 and passes after the fix in real Windows PyMOL
+3.1.3.1, including the full 200-row/128-column GUI workflow. The 0.8.1 ZIP passes
+both source-byte/CRC and isolated bootstrap tests. Evidence is recorded in
+[the Enter validation record](validation/structure_annotator_filter_enter_2026-09-17.md).
+
+## Review bundles and responsive imports - 0.8.0, 2026-09-17
+
+CSV/TSV imports automatically apply adjacent `review.json` followed by
+`review.override.json`. User edits save only to the override; ordered metrics,
+descriptive source labels and shared command templates are supported. Mapping
+roots accept `K:` as `K:\`. History suggestions only insert paths on explicit
+acceptance. Folder discovery/legacy annotation reads and table settings writes
+prepare off the Qt thread, with cancellation and transactional scene commit.
+
+All 767 regression tests pass in 26.578 s; 20 focused review/history/package
+checks pass after final changes. Windows PyMOL 3.1.3.1 passes review/override
+reopen, CSV/TSV pasted-path switching, invalid-config preservation, drive-root
+mapping, 421-character paths and the existing 200-row/128-column GUI workflow.
+The real K: source passes 600-row TSV import in 0.281 s after header discovery
+and 600-structure folder import in 16.151 s. Maximum Qt heartbeat gaps are
+46.99/58.41 ms, with no main-thread remote stat/list/scandir calls. Source table
+and state hashes are unchanged. The separate 203-file blocked-I/O test verifies
+responsive cancellation and suppressed late results. The 0.8.0 ZIP passes
+source-byte/CRC checks and real Plugin Manager installation in an isolated
+temporary directory. Detailed results are in
+[the import validation record](validation/structure_annotator_import_2026-09-17.md).
+
+## Embedded and floating workspaces - 0.7.0, 2026-09-17
+
+Implemented and packaged: Structure Annotator and Batch Processing default to
+native left-side PyMOL docks. A shared window-mode icon offers independent
+floating windows. Each tool remembers its mode, side/width and floating
+position/size; same-side tools share tabs. Switches preserve drafts, selection,
+preparation and running work. Existing close guards and shortcut ownership stay
+active. Original viewport minimum/corner constraints are restored after use.
+
+All 757 regression tests pass in 27.348 s. Windows PyMOL 3.1.3.1 / PyQt5 passes
+native/menu mode switching, real save/preparation/run switches, close protection,
+reopen geometry, full-frame off-screen recovery, explicit settings errors and
+1440 x 900 / 1280 x 720 layouts.
+The smaller window retains a 320 x 406 viewport. Existing annotation layout,
+click-save and full asynchronous workflow checks pass. Full batch regression
+verifies 56 pairs, 112 outputs and 51 unchanged inputs, with coordinate error 0.0.
+
+`dist/PymolPlugins-0.7.0.zip` passes source-byte/CRC/version checks and real
+Plugin Manager installation in an isolated temporary directory, including both
+installed tools' modes, shared styling and tabification. No user installation
+was changed. Evidence and standalone-harness capture/shutdown boundaries are in
+[workspace window modes](workspace_window_modes.md). PyMOL 2.x and other Qt
+bindings remain unverified.
+
+## Batch UI consistency - 0.6.1, 2026-09-16
+
+Batch Processing now uses the same local stylesheet as Structure Annotator:
+Segoe UI controls, Consolas command editors, shared primary/error roles,
+36-pixel table rows, 34 x 34 icon tools and a thin progress line. It reuses the
+File locations collapsible control and preserves the application-wide style.
+The input area and table remain usable at 1000 x 720 and 760 x 560.
+
+Real Windows PyMOL 3.1.3.1 passes standalone/annotation-entry style comparisons,
+rendered button colors, both layouts and all 56-pair/112-output processing
+checks. Annotation layout, click-save/advance, failure recovery and the full
+200-row, 128-column GUI workflow pass. Pairing and execution logic are unchanged.
+All 757 regression tests pass in 24.629 s. The final 0.6.1 ZIP passes CRC,
+source-byte/version checks and real Plugin Manager installation, including the
+installed dialog's shared theme: 11 modules, 72 canonical + 8 compatibility
+commands and 6 menus. Evidence is tracked in
+[the UI validation record](validation/batch_ui_consistency_2026-09-16.md).
+PyMOL 2.x and other Qt bindings remain unverified.
+
+## File/CSV batch processing - 0.6.0, 2026-09-16
+
+Implemented: `pp_batch` and the Batch Processing dialog accept folder or CSV
+structure files, all against one reference or ID-matched A/B pairs. Matching
+supports literal templates, wildcard ID captures and named/single-group regexes.
+Ordered editable commands run on the PyMOL thread; both processed A and B save
+by default. Preview is read-only, outputs never overwrite sources/existing
+automatic files, and stop/continue/cancel results are recorded in JSON/JSONL.
+CSV parsing and mapping reuse canonical APIs. Each pair has unique object names,
+and the fixed reference is loaded once and copied before each pair's commands.
+
+The full 757-test suite passes in 23.406 s. Windows PyMOL 3.1.3.1 / PyQt5 passes all matching
+modes, both CSV modes, 36 continuous pairs, real two-step commands, cancellation,
+stop/continue-on-error, the annotation entry point and compact layouts. The final
+run completed 56 pairs and verified 112 A/B outputs with maximum coordinate
+error 0.0; all 51 source-file hashes were unchanged. PDB/mmCIF, gzip outputs and
+431-character output paths pass actual read-back, and native undo remains
+enabled. Annotation click-save/advance and the full 200-row, 128-column workflow
+also pass. The final 0.6.0 ZIP passes CRC/source-byte/version checks and real
+Windows Plugin Manager installation in an isolated temporary directory:
+11 modules, 72 canonical + 8 compatibility commands, 6 menus, and a working
+Batch Processing dialog with both-output defaults and all three matching modes.
+No release blocker remains for this target; PyMOL 2.x and other Qt bindings
+remain unverified. Evidence is tracked in
+[the 0.6.0 validation record](validation/batch_processing_2026-09-16.md).
+
+## Optional label-click saving and restored controls - 0.5.1, 2026-09-16
+
+Implemented: independent persisted click-save and auto-advance controls in
+Settings / Annotations and More actions. Click-save defaults off; single-choice
+buttons/dropdowns save one candidate only after required values are complete.
+Shift, multiple-choice and batch clicks remain drafts. Failed writes preserve
+drafts/cursor, and single-choice shortcuts save once. Multiple-choice Alt+digit
+again toggles draft values without saving. Source row / File status are optional
+persisted list columns; Structure details shows every stored annotation,
+including fields absent from the current configuration.
+
+The full 716-test suite passes in 24.241 s. Real Windows PyMOL 3.1.3.1 / PyQt5
+passes visible click-save/manual/stay controls, required/batch/Shift cases,
+write-failure recovery, shortcuts, dropdown restoration, all-saved-label details,
+column toggles without loading/reordering, and preference reopen. Main windows
+pass at 1000 x 720 and 760 x 560; the OpenGL sample contains 83 colors. Full
+workflow, 50,000-row review, import/history/long paths and mapping/command
+recovery also pass. Warm Next median/p95: 2.09/3.10 ms, zero load/stat calls.
+The final 0.5.1 ZIP passes CRC/source-byte/version checks and the real Windows
+Plugin Manager installer: 11 modules, 71 canonical + 8 compatibility commands,
+5 menus. Installation used an isolated temporary plugin directory. No release
+blocker remains for this target; PyMOL 2.x and other Qt bindings are unverified.
+Evidence:
+[the 0.5.1 validation record](validation/structure_annotator_click_save_2026-09-16.md).
+
+## Review workspace - 0.5.0, 2026-09-16
+
+Implemented: the candidate list and current structure are the primary workspace;
+Data, Filter, Settings and the more-actions menu expose secondary controls on
+demand. Mouse choices remain drafts, required fields gate Save, and navigation
+or opening configuration preserves drafts. Save stays outside the scrolling
+score/field content. A source change clears the previous source's draft values.
+
+The 714-test regression passes. Real Windows PyMOL 3.1.3.1 passes visible-control
+import, draft/save/advance, batch/menu undo, empty/reset filters, 1000 x 720 and
+760 x 560 geometry, long names, six scores, and a nonblank OpenGL framebuffer.
+The complete workflow also passes shortcuts in the panel, viewport and both
+console modes, completion, cancellation and failed-import preservation. Warm
+Next median/p95 is 1.34/2.19 ms with zero load/stat calls. The 50,000-row review,
+profile/command recovery and long-path import gates also pass. Profile and
+configuration table text fit in normal and compact windows, and Test path
+scrolls the result into view. The final 0.5.0 ZIP passes source-byte/CRC checks
+and the real Windows installer (11 modules, 71 canonical + 8 compatibility
+commands, 5 menus). PyMOL 2.x and other Qt bindings remain unverified. Evidence:
+[the 0.5.0 validation record](validation/structure_annotator_layout_2026-09-16.md).
+
+## Mapping profiles and switching — 0.4.0, 2026-09-16
+
+Implemented: named server profiles, ordered literal-prefix/regex rewrites,
+Windows/POSIX root mappings, per-dataset computer-format overrides and WSL
+distribution selection. Sample tests and preview use read-only configuration;
+preview has a separate window and preserves the active review and multi-selection.
+Optional worker transfer is grouped under file access. Command editors keep
+drafts until Apply commands; checked parser dispatch reports the failing line,
+and failed warm/cold navigation restores cursor, visibility and camera.
+
+The full **714-test** suite passes. Real Windows PyMOL **3.1.3.1** passes profile
+editing/round-trip, preview isolation, selection-error recovery, 421-character
+paths, import/history/shortcuts/cancellation, and 50,000-row batch review.
+Warm Next median/p95 is **1.51/2.18 ms** with zero load/stat calls. Evidence,
+package details and remaining compatibility boundaries are in
+[the 0.4.0 validation record](validation/structure_annotator_mapping_2026-09-16.md).
+
+## Multi-field review and score guidance — 0.3.0
+
+Implemented: Shift/Ctrl multi-row selection, required/optional single/multiple/
+text fields, atomic batch events and whole-batch undo, multi-field export, and
+filtered candidate score cards with compact formatting and explicit quality
+rules. Explicit directory/CSV import and searchable manual history replace
+automatic startup restoration. Windows long-path discovery/materialization is
+verified with the supplied 72-file K: directory and 421-character test paths.
+The 50,000-row real Windows/PyMOL review test passes with cached relative
+ranks, no batch structure loading, and warm navigation below 5 ms in that run.
+See [the feature record](annotation_fields_and_score_guidance.md) for the final
+validation and storage-compatibility details.
+
+## Structure Annotator 0.2.1 update — 2026-09-15
+
+The integrated review UI, schema-based column completion/selection, typed
+filters, native command completion, and Qt shortcuts are implemented. Real
+Windows PyMOL 3.1.3.1 tests cover the viewport and both console docking modes,
+failure recovery, cancellation/late-result isolation, and the current K-drive
+CSV. The full Python suite passes 687 tests. See the
+[current validation record](validation/structure_annotator_usability_2026-09-15.md)
+for measurements, package acceptance, and the precise evidence boundaries.
+
+The historical three-tab/history-completion and sandbox-blocked statements
+below describe the earlier snapshot, not the updated annotation workflow.
+
 Current evidence anchors:
 
-- WSL: 372 standard-library unit/fake-command tests pass (`22.267s` on the
-  final ANNO-CSV-14 rerun).
-- Windows Host: the latest automated PyMOL 3.1.3.1 record passed 13/13 and is
+- WSL current revision: the complete non-loopback subset passes 619/619 on
+  Python 3.12.13 and 619/619 on Python 3.13.14. The four loopback HTTP modules
+  contain 60 additional discovered tests; their sandbox run reaches 43 socket
+  bind points and every one fails with `PermissionError: [Errno 1] Operation
+  not permitted`, with no assertion failure. They remain an explicit
+  environment gate rather than being counted as passed.
+- Windows Host historical baseline: the latest reviewed automated PyMOL
+  3.1.3.1 record passed 13/13 and is
   [automatic pass / manual pending](validation/structure_annotator_optimization_2026-07-26.md).
+  It covers the former 63-command surface. A 2026-07-27 attempt to launch the
+  current 71-command harness 1.5.0 failed before PowerShell/PyMOL startup because
+  this sandbox cannot connect to the outer WSL interop socket
+  (`UtilConnectUnix` / `UtilBindVsockAnyPort`); it is **not passed**.
 - Structure Annotator: `HOST-ANNOTATION-CSV-01` and the real PyQt5 smoke pass;
   real Windows `K:` FUSE mapping/cache passes, and the PyMOL-independent
   allowlisted WSL staging client/cache/materializer chain passes a real worker
   cold/warm E2E. The batch-stat and 50,000-row evidence is recorded in
   [the 2026-07-26 optimization record](validation/structure_annotator_optimization_2026-07-26.md).
-- WSL worker: a real loopback run on Python 3.12.13 returned `status=ok` with
-  PLIP 3.0.0 available; Windows Host PyMOL reached that worker through localhost
-  forwarding and verified all 63 canonical commands.
+- WSL worker historical evidence: a real loopback run on Python 3.12.13
+  returned `status=ok` with PLIP 3.0.0 available; the reviewed Windows Host
+  baseline reached that worker through localhost forwarding and verified its
+  then-current 63 canonical commands.
 - Real PLIP/OpenBabel numerical validation passes both direct-backend and HTTP
   paths on RCSB 1A4W. A separate Windows PyMOL -> WSL PLIP -> exact-ligand Host
   render produced one QWE site, 14 interactions, and 12 manifest-owned outputs.
@@ -34,6 +304,15 @@ Status vocabulary:
   callback, Qt, rendering, or another interactive behavior is not recorded.
 - **Blocked by optional licensed environment**: code/mock contract exists, but
   a legal installed backend is required for numerical validation.
+
+### Task-oriented command UX
+
+| IDs | Status | Evidence and remaining boundary |
+| --- | --- | --- |
+| HELP-01 | WSL verified; Host pending | Unicode NFKC/casefold, exact/full-token ranking, Chinese/natural-language task aliases, a 0.50 low-confidence cutoff, and nonempty `no_match` behavior are regression-tested. |
+| TASK-01 | WSL verified; Host pending | The eight declared, console-adapted facades delegate to existing state owners. `pp_orient`/`pp_metrics` require explicit targets, and navigation controls reject start-only options. |
+| UNDO-01 | WSL verified; Host pending | Unified references delegate the exact stored canonical reference and mark undone only after success. `pp_show` snapshots all states and uses a hidden same-session object marker when supported. Harness 1.5.0 covers only the older state-1 Host round trip; the all-state/marker Host gate remains open. |
+| METRIC-UX-01 | WSL verified; licensed backend pending | `pp_metrics` requires explicit source and disjoint target/binder chains. `preview=1` resolves the single molecule and output plan without structure export or worker access. GUI-default submission is asynchronous without a synchronous capabilities probe; readiness/backend failures remain inspectable in `pp_jobs` history. |
 
 PyMOL 2.x compatibility remains open even when the 3.1.3.1 smoke check passes.
 
@@ -57,7 +336,7 @@ context/offset, pin clearing, and explicit session replacement are also tested.
 | IDs | Status | Evidence and remaining boundary |
 | --- | --- | --- |
 | ANNO-01, ANNO-02 | Host smoke verified (3.1.3.1) + WSL verified | Version-2 dataset-local state is schema-checked, size-bounded, and atomically replaced. Tests cover directory/CSV isolation, version-1 directory migration, On-step/bucket/preload/cache restoration, relative-file or stable-entry cursor recovery, missing-entry fallback, corrupt JSON repair, and exclusion of undo/object/materialized-cache state. Host restored `b.pdb`, the complete config, and commands from a quoted path containing spaces; the Windows hidden attribute was set. |
-| ANNO-03 | Host Qt/storage/search + WSL verified | Global history snapshots and 12 field histories are bounded, de-duplicated, atomically written, corrupt-file quarantined, and fuzzy-ranked by textual relevance plus frequency/recency. Headless PyMOL wrote the global schema through a temporary profile path and resolved `cartn` to the complete command. A separate real Host PyQt5 smoke created the three-tab panel, observed both popups, accepted On-step by mouse and bucket command by keyboard, and verified fixed/dynamic completers plus preview-source isolation. A latest snapshot reopens its source by default; a fresh-process visual check of the opt-out remains manual. |
+| ANNO-03 | WSL verified; fresh Host Qt rerun pending | Global history snapshots and 17 field histories are bounded, de-duplicated, atomically written, corrupt-file quarantined, and fuzzy-ranked by textual relevance plus frequency/recency. The current GUI exposes 15 static fuzzy-history bindings, plus token completion for display columns. Headless PyMOL wrote the global schema through a temporary profile path and resolved `cartn` to the complete command. A prior real Host PyQt5 smoke created the three-tab panel, observed both popups, accepted On-step by mouse and bucket command by keyboard, and verified the then-current fixed/dynamic completers plus preview-source isolation; it predates the current 17-field/15-binding surface and is not evidence for this revision. A latest snapshot reopens its source by default; a fresh Host Qt rerun and fresh-process visual check of the opt-out remain pending. |
 | ANNO-04 | Host smoke verified (3.1.3.1) | `HOST-ANNOTATION-STATE-01` is registered and passed. It uses a quoted directory containing spaces and a temporary global history path, and asserts Windows hidden state, schema/config/cursor restoration, and fuzzy command lookup without polluting the real user profile. Removing `cmd.sync()` from the parser callback eliminated the observed self-wait `wait_queue` timeout on rerun. |
 
 ### Structure Annotator CSV, mapping, and cache
@@ -149,7 +428,7 @@ downloaded or added.
 
 | Feature | Status |
 | --- | --- |
-| Unified plugin bootstrap (`pp_load`) and `pp_help` | Host smoke verified (3.1.3.1), including reload and the full 63-command manifest. |
+| Unified plugin bootstrap (`pp_load`) and `pp_help` | Former 63-command bootstrap Host-verified (3.1.3.1); current 71-command/task-help registry is WSL-verified and Host rerun pending. |
 | Feature-oriented package ownership | Implemented and WSL architecture-tested: canonical code lives under `pymolplugins/`; AST tests reject imports back into historical namespaces; old paths are thin compatibility shims and standalone tools live under `extras/`. |
 | Runtime doctor and `pp_capabilities` | Host smoke verified for complete commands/API/cache/UNC and live PLIP worker state; configured ANVIL state is reported. |
 | Transactional interaction replacement | Implemented; a failed new render restores the prior exact result instead of leaving a blank group. |
@@ -185,3 +464,55 @@ git diff --check
 Use `scripts/windows/run_host_smoke.ps1` for the automated Host subset and
 [windows_host_acceptance.md](windows_host_acceptance.md) for the remaining
 interactive and optional-backend gates.
+
+
+## SSH desktop authentication fix — 0.12.3 (2026-10-02)
+
+**Fixed:** the remote worker could print ready in an external window while the plugin stayed at authenticate. Windows desktop PyMOL uses pythonw.exe; its Python OTP wrapper's nested subprocess did not return inherited SSH stdout to the plugin pipe. Earlier console-Python acceptance did not cover this desktop boundary.
+
+Python login scripts now use python.exe from the same installation when the host is pythonw.exe. The original wrapper, profile, OTP rules and CREATE_NO_WINDOW remain unchanged. A missing sibling interpreter produces an actionable error, not an authentication-client or environment fallback. SSH Host acceptance now defaults to pythonw.
+
+| Boundary | Result |
+| --- | --- |
+| Focused protocol/interpreter regression | 23 passed; output/13_ssh_ready_unit_20261002.log |
+| Desktop pythonw + Windows Qt + real temporary OpenSSH | Passed; output/13_ssh_ready_gui_20261002.json; 14 off-Qt-thread SSH operations, cache/directory/cancellation |
+| Desktop pythonw + original x profile/OTP + real remote data | Passed; output/13_ssh_ready_real_20261002.json; 600 rows, 56 columns, 2399 atoms, one reused connection |
+| Final 0.12.3 ZIP installed through temporary Plugin Manager | Passed; output/13_ssh_ready_install_20261002.json; Windows PyMOL 3.1.3.1, modules/menus/workspace/SSH controls |
+
+One live measurement: first connection plus table read 1.597213 s; warm structure download 0.0428855 s; warm GUI import 0.407005 s. These are not isolated authentication timings, before/after benchmarks, or guaranteed WAN/OTP performance.
+
+Delivery: dist/PymolPlugins-0.12.3.zip. All execution handles are terminal. The user's current installation and running PyMOL were not changed; install the ZIP, fully exit, then restart PyMOL. The authoritative completion record and package hash are in docs/validation/01_sampling_reference_2026-09-29.md.
+
+
+## Quiet default UI — 0.12.4 (2026-10-02)
+
+Removed persistent onboarding paragraphs, SSH guidance, the review color legend, score disclaimers and redundant later-status confirmations. Default pages now use contextual setup actions, local/network icons, optional help, collapsed advanced SSH settings and a Later badge. Filter/sample counts appear only when needed. Score targets use badges, while relative metrics stay neutral and use normal-size text. Errors, progress/cancellation and unsaved-state feedback remain visible.
+
+Windows pythonw/PyMOL 3.1.3.1 acceptance from the final Plugin Manager ZIP passed: output/14_quiet_ui_20261002.json. The native 760×560 first-use path covers actual table/structure import and saving, help/settings interaction, advanced disclosure, score help, later status and conditional filter counts. Open/review screenshots and compact settings/help screenshots were inspected. Initial oversized-dialog evidence is retained; content-driven dialog sizing now passes at 576×207 and 586×430. This is automated native UI evidence, not a human usability study or a new WAN benchmark.
+
+Deliverable: dist/PymolPlugins-0.12.4.zip. All handles are terminal. The user's installed plugin and running PyMOL were not modified. Install the ZIP and fully restart PyMOL. Future UI additions should use layout and control states before explanatory prose; preserve actionable errors and operation feedback.
+
+
+## Configurable AI and viewing/path UX — 0.13.0 (2026-10-02)
+
+| Feature | Result and evidence boundary |
+| --- | --- |
+| AI connection settings | Explicit Codex/Custom API; editable URL/key/model, model refresh and Responses/Chat Completions selection. Windows Host loaded 31 models and completed a real custom/native Responses request using the unchanged configured test/gpt-6-astra model in 8.46 s. |
+| Key storage | Session-only by default; optional Windows current-user DPAPI persistence. Native encrypted-key roundtrip and removal passed; no keys in prompt, dataset state or request logs. |
+| Draft recovery | 14 supported command forms, object-scoped set/spectrum and element colors; per-trigger empty-result reason, failed-retry preview preservation and manual blank/comment editing. Confirmation/Apply and no-generation-execution boundaries retained. |
+| Viewing presets | Cartoon, PPI, PLI, oligomer, membrane, nucleic complex and surface; actual Windows structures (1BRS/1A4W/2RH1 and existing RNA complex), unchanged coordinates. PLI occlusion found visually and corrected with transparent receptor/context and pocket orientation. No membrane placement inference. |
+| Fuzzy remote browser | Ranked fuzzy matching, keyboard selection, query clearing on successful directory change, rollback and restored controls after read failure. Real temporary OpenSSH + Windows passed. |
+| New-source isolation | Fixed previous dataset reference_column leaking into another CSV import; explicit new-source/history settings remain authoritative. |
+
+Evidence: output/15_path_ux_20261002.json; the AI-complete portion of 15_command_ux_20261002.json (its later source-switch failure is preserved); repaired 15_viewing_presets_20261002.json and final-package 15_pli_view_20261002.json passed. Focused tests: 6 command-template, 9 provider HTTP-contract, 6 fuzzy. Chat Completions was exercised against a real local HTTP server, not claimed as an external-model call. Native connection/draft and structure screenshots were inspected.
+
+Delivery: dist/PymolPlugins-0.13.0.zip. All processes and workers are terminal; the current user installation and global provider/SSH/proxy settings were not changed. Install and fully restart PyMOL. Reproducible fetch and staged native acceptance commands are in justfile and the authoritative completion record.
+
+
+## Named review filters and generation prompt — 0.14.0 (2026-10-02)
+
+Optional review.json filter_presets provide named expression/sort views. The Filter arrow offers one-click switching with the active group shown; Filter edits, saves, creates and deletes definitions. Views may overlap and can be empty; they do not assign quality labels or alter input files. Changes persist through the existing atomic review.override.json owner. Old bundles remain valid and changing sources clears unrelated presets. New preset fields require 0.14.0+.
+
+Final installed Windows PyMOL 3.1.3.1 evidence: output/16_filter_groups_20261002.json passed. Three input groups, two matched rows, one overlapping row, zero-row group, edit to one row, create/delete, override reopening, invalid-edit preservation, source isolation and unchanged inputs passed. Native Filter/menu/current-group screenshots were inspected. Seven pure contract tests and direct parsing of the documented prompt example passed. Two earlier native-menu harness failures are retained; no AI/WAN/scientific batch was repeated.
+
+The copyable artifact-generation prompt is in docs/structure_annotator_csv_walkthrough.md under 产物整理prompt（含筛选分组）. It retains hardlinks and raw-score aggregation, adds justified literal thresholds/group membership checks, and protects human overrides. No actual run-output organization is claimed without source paths. Deliverable: dist/PymolPlugins-0.14.0.zip; all handles terminal, user installation unchanged.

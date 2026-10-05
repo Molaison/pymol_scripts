@@ -25,12 +25,15 @@ and Python imports continue to work.
 | Surface | Path | Primary API / purpose |
 | --- | --- | --- |
 | Host | `pymolplugins/host/plugin.py` | Unified implementation for `pp_load`, full-manifest `pp_doctor`/`pp_capabilities`, and categorized `pp_help`; `plugins/pymol_plugins.py` is its thin Plugin Manager entry. |
-| WSL | `pymolplugins/host/manifest.py` | Declarative, uniqueness-tested canonical module and 63-command inventory. |
+| WSL | `pymolplugins/host/manifest.py` | Declarative, uniqueness-tested inventory: eight task facades plus 64 advanced commands and eight declared compatibility names. |
+| Both | `pymolplugins/tasks/commands.py` | Recommended `pp_show`, `pp_nav`, `pp_align`, `pp_orient`, `pp_contacts`, `pp_metrics`, `pp_jobs`, and `pp_undo` facades; delegates to canonical domain owners. |
+| Both | `pymolplugins/tasks/journal.py` | Bounded exact-owner operation references plus all-state representation snapshots and optional hidden same-session object identity markers for transactional `pp_show` undo. |
 | Both | `pymolplugins/core/parameters.py` | Strict PyMOL-console boundary and value parsing: one-layer paired-quote normalization for every canonical `cmd.extend` callback, plus `as_bool`, `as_int`, `as_float`, `split_names`, and `sanitize_name`. |
 | WSL | `pymolplugins/core/sequence.py` | Residue-safe sequence index and exact/bounded motif matching with original chain/resi identity. |
 | WSL | `pymolplugins/core/math3d.py` | Dependency-free TTT/homogeneous transforms, rigid validation, Horn/Kabsch fit, eigen/vector utilities. |
 | Both | `pymolplugins/targets/resolver.py` | Deterministic exact/glob/contains/regex/fuzzy object/group resolution and recursive non-molecule-safe group expansion. |
-| Host | `pymolplugins/targets/commands.py` | Preview-first object/group iteration with same-line parser completion checks: `pp_target_resolve` and `pp_foreach`. |
+| Host | `pymolplugins/targets/commands.py` | Object/group iteration with default molecule-leaf execution, explicit `commit=0` preview, and same-line parser completion checks: `pp_target_resolve` and `pp_foreach`. |
+| Both / Host UI | `pymolplugins/targets/batch_*.py` | `pp_batch`: folder/CSV fixed-reference or template/glob/regex ID pairs, ordered commands, main-thread execution, default A+B outputs, cancellation and result reports. |
 | WSL | `pymolplugins/navigation/model.py` | Pure `NavigationEntry` / `NavigationSession` state model. |
 | Host | `pymolplugins/navigation/commands.py` | Canonical file/object/root-group navigator: `pp_nav_start`, `pp_nav_next`, `pp_nav_prev`, batch, pin, hook, status, sync, and stop commands. |
 | Both | `pymolplugins/follow/commands.py` | Explicit `arm -> move driver -> apply` object-TTT propagation with rebase, stale-safe undo, and safe-default static/callback CGO policy: `pp_follow_*`. |
