@@ -45,6 +45,34 @@ class CsvDatasetSourceTests(unittest.TestCase):
             self.assertNotEqual(first_id, second_id)
             self.assertEqual(first_id, moved_id)
 
+    def test_case_distinct_csv_siblings_do_not_share_row_ids(self):
+        with tempfile.TemporaryDirectory() as root:
+            lower = os.path.join(root, "scores.csv")
+            upper = os.path.join(root, "Scores.csv")
+            content = "path,id,score\nmodel.pdb,shared,0.5\n"
+
+            self._write(lower, content)
+            legacy_entry_id = CsvDatasetSource(
+                lower, "path", id_column="id"
+            ).load().entries[0].id
+            self._write(upper, content)
+
+            lower_entry_id = CsvDatasetSource(
+                lower, "path", id_column="id"
+            ).load().entries[0].id
+            upper_entry_id = CsvDatasetSource(
+                upper, "path", id_column="id"
+            ).load().entries[0].id
+
+            self.assertNotEqual(lower_entry_id, upper_entry_id)
+            self.assertNotEqual(lower_entry_id, legacy_entry_id)
+
+            os.unlink(upper)
+            self.assertEqual(
+                CsvDatasetSource(lower, "path", id_column="id").load().entries[0].id,
+                legacy_entry_id,
+            )
+
     @staticmethod
     def _write(path, content, encoding="utf-8"):
         with open(path, "w", encoding=encoding, newline="") as handle:
@@ -304,7 +332,7 @@ class CsvDatasetSourceTests(unittest.TestCase):
                 display_columns=("score", "note"),
             )
             actual = source.load()
-            _header, rows = source._read_rows(path, ",")
+            _header, rows, _delimiter = source._read_rows(path)
             legacy_entries = csv_source_module._build_entries(
                 rows,
                 dataset_namespace=csv_source_module._dataset_namespace(path),

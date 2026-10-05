@@ -202,6 +202,8 @@ def run_benchmark(repository: str) -> Dict[str, object]:
         if panel is not None:
             panel.close()
             panel.deleteLater()
+        from pymolplugins.annotation.persistence import flush_writes
+        flush_writes()
         app.processEvents()
         if previous_history is None:
             os.environ.pop("PYMOLPLUGINS_ANNOTATOR_HISTORY", None)

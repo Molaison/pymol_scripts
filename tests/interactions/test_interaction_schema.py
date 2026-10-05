@@ -120,6 +120,7 @@ class PresetRegistryTests(unittest.TestCase):
             PRESETS.names(),
             (
                 "interchain_basic",
+                "ligand_contacts",
                 "ligand_quick",
                 "ligand_site",
                 "plip_overview",
@@ -128,6 +129,8 @@ class PresetRegistryTests(unittest.TestCase):
             ),
         )
         self.assertEqual(PRESETS.resolve("binding_site").name, "ligand_site")
+        self.assertEqual(PRESETS.resolve("contacts").name, "ligand_contacts")
+        self.assertTrue(PRESETS.resolve("ligand_contacts").limitations)
         self.assertFalse(
             PRESETS.resolve("ligand_quick").parameters.get("surface", {}).get(
                 "default", False

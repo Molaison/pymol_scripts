@@ -156,7 +156,7 @@ class WorkerContractTests(unittest.TestCase):
             self.request("/v1/analyze", data=request)
         self.assertEqual(captured.exception.code, 422)
         payload = json.loads(captured.exception.read())
-        self.assertEqual(payload["error"]["code"], "backend_error")
+        self.assertEqual(payload["error"]["code"], "backend_unavailable")
 
     def test_plip_unavailable_is_structured_422_for_valid_atom_map(self):
         if self.app.plip.health()["available"]:
@@ -193,7 +193,7 @@ class WorkerContractTests(unittest.TestCase):
             self.request("/v1/interactions/plip", data=request)
         self.assertEqual(captured.exception.code, 422)
         payload = json.loads(captured.exception.read())
-        self.assertEqual(payload["error"]["code"], "backend_error")
+        self.assertEqual(payload["error"]["code"], "backend_unavailable")
 
 
 if __name__ == "__main__":

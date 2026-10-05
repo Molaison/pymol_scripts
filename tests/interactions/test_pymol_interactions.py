@@ -22,6 +22,7 @@ from pymolplugins.interactions.schema import (
 from pymolplugins.interactions.controller import (
     InteractionController,
     RemoteInteractionSubmission,
+    RemoteInteractionStaleError,
     get_controller,
 )
 from pymolplugins.remote.client import WorkerRequestError
@@ -81,12 +82,24 @@ class FakeCmd:
         self.find_pair_calls = []
         self.get_model_calls = []
         self.group_calls = []
+        self.properties = {}
 
     def _selected_atoms(self, selection):
         text = str(selection)
+        polymer_only = "polymer" in text
+
+        def bounded(values):
+            if not polymer_only:
+                return list(values)
+            return [
+                atom
+                for atom in values
+                if atom.resn not in {"LIG", "DRG", "HOH", "ZN"}
+            ]
+
         index_values = {int(value) for value in re.findall(r"\bindex\s+(\d+)", text)}
         if index_values:
-            return [atom for atom in self.atoms if atom.index in index_values]
+            return bounded(atom for atom in self.atoms if atom.index in index_values)
         if "within" in text:
             return [atom for atom in self.atoms if atom.resn == "LYS"]
         if "not (" in text and ("resn LIG" in text or "organic" in text):
@@ -95,8 +108,15 @@ class FakeCmd:
             return [atom for atom in self.atoms if atom.resn == "LIG"]
         chain_match = re.search(r'chain\s+"([^"]*)"', text)
         if chain_match:
-            return [atom for atom in self.atoms if atom.chain == chain_match.group(1)]
-        return list(self.atoms)
+            return bounded(
+                atom for atom in self.atoms if atom.chain == chain_match.group(1)
+            )
+        chain_match = re.search(r"\bchain\s+([^\s)]+)", text)
+        if chain_match:
+            return bounded(
+                atom for atom in self.atoms if atom.chain == chain_match.group(1)
+            )
+        return bounded(self.atoms)
 
     def get_model(self, selection, state=1):
         self.get_model_calls.append((selection, state))
@@ -150,6 +170,10 @@ class FakeCmd:
         self.names.add(name)
         self.calls.append(("create", name, selection, source_state, target_state))
 
+    def pseudoatom(self, object_name, **kwargs):
+        self.names.add(object_name)
+        self.calls.append(("pseudoatom", object_name, dict(kwargs)))
+
     def distance(self, name, selection1, selection2, **kwargs):
         self.names.add(name)
         self.calls.append(("distance", name, selection1, selection2, dict(kwargs)))
@@ -168,6 +192,12 @@ class FakeCmd:
     def set(self, setting, value, selection=""):
         self.calls.append(("set", setting, value, selection))
 
+    def set_property(self, name, value, object="", state=0, proptype=6, quiet=1):
+        self.properties[(object, name)] = value
+
+    def get_property(self, name, object, state=0, quiet=1):
+        return self.properties.get((object, name))
+
     def hide(self, representation, selection=""):
         self.calls.append(("hide", representation, selection))
 
@@ -180,6 +210,17 @@ class FakeCmd:
     def delete(self, name):
         self.delete_calls.append(name)
         self.names.discard(name)
+        for key in [key for key in self.properties if key[0] == name]:
+            del self.properties[key]
+
+    def set_name(self, old, new):
+        if old not in self.names:
+            raise RuntimeError("cannot rename missing name %s" % old)
+        if new in self.names:
+            raise RuntimeError("cannot rename over existing name %s" % new)
+        self.names.remove(old)
+        self.names.add(new)
+        self.calls.append(("set_name", old, new))
 
     def extend(self, name, function):
         self.calls.append(("extend", name, function))
@@ -233,6 +274,60 @@ class PymolInteractionAdapterTests(unittest.TestCase):
             AtomRef(index, index, "A%d" % index, "C", object="complex"),
             ResidueRef(resn, "X", "", resi),
         )
+
+    def _prepare_remote_submission(
+        self,
+        controller,
+        run_id="remote-current",
+        group="ppi_remote_current",
+        state=1,
+        replace=True,
+    ):
+        def build_request(cmd_api, source, **kwargs):
+            return {
+                "run_id": run_id,
+                "source": {
+                    "object": source,
+                    "state": kwargs["state"],
+                    "sha256": "d" * 64,
+                },
+                "parameters": dict(kwargs["parameters"]),
+            }
+
+        with patch(
+            "pymolplugins.interactions.controller.build_plip_request_from_pymol",
+            side_effect=build_request,
+        ):
+            return controller.prepare_remote(
+                "plip_overview",
+                "complex",
+                partner2="resn LIG",
+                state=state,
+                group=group,
+                replace=replace,
+            )
+
+    @staticmethod
+    def _remote_payload(submission):
+        source = SourceInfo.from_dict(submission.request["source"])
+        parameters = dict(submission.request.get("parameters", {}))
+        parameters.setdefault("preset", submission.preset)
+        parameters.setdefault("site_cutoff", 5.0)
+        parameters.setdefault("interface_selection", "complex and index 1")
+        result = InteractionResult.create(
+            RunInfo(
+                submission.request["run_id"],
+                BackendInfo("plip", "3.0.0"),
+                source,
+                parameters,
+            ),
+            (
+                Partner("receptor", "complex and not resn LIG", 3),
+                Partner("ligand", "complex and resn LIG", 2),
+            ),
+            (),
+        )
+        return result.to_dict()
 
     def test_controller_is_attached_to_cmd_for_script_reload_compatibility(self):
         fake = FakeCmd(interaction_pairs=False)
@@ -292,7 +387,13 @@ class PymolInteractionAdapterTests(unittest.TestCase):
 
         manifest_names = record.manifest.created_names
         controller.clear("ppi_fixture")
-        self.assertEqual(fake.delete_calls, list(reversed(manifest_names)))
+        self.assertEqual(set(fake.delete_calls), set(manifest_names))
+        carrier = next(
+            entry.name
+            for entry in record.manifest.created
+            if entry.role == "manifest_carrier"
+        )
+        self.assertEqual(fake.delete_calls[-1], carrier)
         self.assertTrue(all("*" not in name for name in fake.delete_calls))
 
     def test_default_ligand_is_organic_and_excludes_water_and_metal(self):
@@ -307,7 +408,11 @@ class PymolInteractionAdapterTests(unittest.TestCase):
         self.assertIn("no local ligand interactions found", record.result.warnings)
 
     def test_interchain_handles_blank_chain_and_renders_local_hbond(self):
-        fake = FakeCmd(interaction_pairs=True)
+        atoms = (
+            FakeAtom(1, "NZ", "N", "LYS", "", "42", (0.0, 0.0, 0.0)),
+            FakeAtom(2, "OD1", "O", "ASP", "X", "7", (2.9, 0.0, 0.0)),
+        )
+        fake = FakeCmd(atoms=atoms, interaction_pairs=True)
         record = InteractionController(fake).run(
             "interchain_basic", "complex", state=1, group="ppi_blank_chain"
         )
@@ -413,7 +518,13 @@ class PymolInteractionAdapterTests(unittest.TestCase):
         self.assertNotIn("index 3", distance[3])
         manifest_names = record.manifest.created_names
         controller.clear("ppi_remote")
-        self.assertEqual(fake.delete_calls, list(reversed(manifest_names)))
+        self.assertEqual(set(fake.delete_calls), set(manifest_names))
+        carrier = next(
+            entry.name
+            for entry in record.manifest.created
+            if entry.role == "manifest_carrier"
+        )
+        self.assertEqual(fake.delete_calls[-1], carrier)
 
     def test_prepare_remote_builds_exact_partner_metadata_before_http(self):
         fake = FakeCmd(interaction_pairs=False)
@@ -451,6 +562,175 @@ class PymolInteractionAdapterTests(unittest.TestCase):
         self.assertEqual(
             submission.ligand_identities, (("complex", 2), ("complex", 3))
         )
+
+    def test_remote_submission_records_current_source_contract(self):
+        fake = FakeCmd(interaction_pairs=False)
+        controller = InteractionController(fake)
+
+        submission = self._prepare_remote_submission(
+            controller, state=2, group="ppi_source_contract"
+        )
+
+        self.assertEqual(submission.source_selection, "complex")
+        self.assertEqual(submission.source_objects, ("complex",))
+        self.assertEqual(submission.source_state, 2)
+        self.assertRegex(submission.source_fingerprint, r"^[0-9a-f]{64}$")
+        self.assertEqual(submission.output_group, "ppi_source_contract")
+
+    def test_remote_submission_resolves_the_automatic_output_group_once(self):
+        fake = FakeCmd(interaction_pairs=False)
+        controller = InteractionController(fake)
+        submission = self._prepare_remote_submission(
+            controller, run_id="remote-automatic", group=""
+        )
+
+        record = controller.commit_remote_result(
+            submission,
+            self._remote_payload(submission),
+            expected_current=True,
+        )
+
+        self.assertTrue(submission.output_group.startswith("ppi_complex_plip_overview_"))
+        self.assertEqual(record.manifest.root_group, submission.output_group)
+
+    def test_expected_current_gate_rejects_a_changed_submission_state_contract(self):
+        fake = FakeCmd(interaction_pairs=False)
+        controller = InteractionController(fake)
+        submission = self._prepare_remote_submission(controller, state=2)
+        payload = self._remote_payload(submission)
+        submission.request["source"]["state"] = 1
+
+        with self.assertRaises(RemoteInteractionStaleError):
+            controller.commit_remote_result(
+                submission, payload, expected_current=True
+            )
+
+        self.assertEqual(fake.group_calls, [])
+        self.assertEqual(fake.delete_calls, [])
+
+    def test_expected_current_gate_rejects_source_coordinate_atom_and_object_changes(self):
+        mutations = {
+            "coordinates": lambda fake: setattr(
+                fake.atoms[0], "coord", (99.0, 0.0, 0.0)
+            ),
+            "atoms": lambda fake: fake.atoms.pop(),
+            "object": lambda fake: [
+                setattr(atom, "model", "replacement") for atom in fake.atoms
+            ],
+            "replacement": lambda fake: setattr(
+                fake,
+                "atoms",
+                [
+                    FakeAtom(
+                        101,
+                        "CA",
+                        "C",
+                        "GLY",
+                        "A",
+                        "1",
+                        (1.0, 2.0, 3.0),
+                        model="complex",
+                    )
+                ],
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                fake = FakeCmd(interaction_pairs=False)
+                controller = InteractionController(fake)
+                submission = self._prepare_remote_submission(controller)
+                payload = self._remote_payload(submission)
+                group_calls = len(fake.group_calls)
+                delete_calls = len(fake.delete_calls)
+                names = set(fake.names)
+                mutate(fake)
+
+                with self.assertRaises(RemoteInteractionStaleError):
+                    controller.commit_remote_result(
+                        submission, payload, expected_current=True
+                    )
+
+                self.assertEqual(len(fake.group_calls), group_calls)
+                self.assertEqual(len(fake.delete_calls), delete_calls)
+                self.assertEqual(fake.names, names)
+
+    def test_expected_current_gate_uses_the_submitted_state(self):
+        fake = FakeCmd(interaction_pairs=False)
+        controller = InteractionController(fake)
+        submission = self._prepare_remote_submission(
+            controller, state=2, group="ppi_state_gate"
+        )
+        payload = self._remote_payload(submission)
+        fake.get_model_calls.clear()
+
+        controller.commit_remote_result(
+            submission, payload, expected_current=True
+        )
+
+        self.assertTrue(fake.get_model_calls)
+        self.assertTrue(all(call[1] == 2 for call in fake.get_model_calls))
+
+    def test_direct_remote_commit_keeps_sync_compatibility_without_current_gate(self):
+        fake = FakeCmd(interaction_pairs=False)
+        controller = InteractionController(fake)
+        submission = self._prepare_remote_submission(
+            controller, group="ppi_sync_compat"
+        )
+        payload = self._remote_payload(submission)
+        fake.atoms[0].coord = (50.0, 0.0, 0.0)
+
+        record = controller.commit_remote_result(submission, payload)
+
+        self.assertEqual(record.manifest.root_group, "ppi_sync_compat")
+
+    def test_remote_commit_emits_the_same_exact_completion_event(self):
+        fake = FakeCmd(interaction_pairs=False)
+        controller = InteractionController(fake)
+        submission = self._prepare_remote_submission(
+            controller, group="ppi_remote_event"
+        )
+        events = []
+        token = pymol_interactions.register_interaction_completion_listener(
+            events.append
+        )
+        try:
+            record = controller.commit_remote_result(
+                submission,
+                self._remote_payload(submission),
+                expected_current=True,
+            )
+        finally:
+            pymol_interactions.unregister_interaction_completion_listener(token)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["backend"], "plip")
+        self.assertEqual(events[0]["owner_reference"], record.owner_reference)
+        self.assertEqual(events[0]["run_id"], record.manifest.run_id)
+
+    def test_remote_replace_false_preserves_existing_group(self):
+        fake = FakeCmd(interaction_pairs=False)
+        controller = InteractionController(fake)
+        original_submission = self._prepare_remote_submission(
+            controller, run_id="remote-original", group="ppi_replace_false"
+        )
+        original = controller.commit_remote_result(
+            original_submission,
+            self._remote_payload(original_submission),
+            expected_current=True,
+        )
+        names = set(fake.names)
+        delete_calls = len(fake.delete_calls)
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            self._prepare_remote_submission(
+                controller,
+                run_id="remote-blocked",
+                group="ppi_replace_false",
+                replace=False,
+            )
+
+        self.assertEqual(controller.get("ppi_replace_false"), original)
+        self.assertEqual(fake.names, names)
+        self.assertEqual(len(fake.delete_calls), delete_calls)
 
     def test_invalid_remote_identity_creates_no_outputs(self):
         fake = FakeCmd(interaction_pairs=False)

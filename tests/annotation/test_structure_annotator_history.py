@@ -141,14 +141,33 @@ class StructureAnnotatorHistoryTests(unittest.TestCase):
         with self.assertRaisesRegex(HistoryStoreError, "unknown history field"):
             search_config_history("not-a-field", "anything")
 
+    def test_annotation_interaction_preferences_roundtrip_both_values(self):
+        for name in ("save_on_label_click", "show_source_row", "show_file_status"):
+            for enabled in (True, False):
+                config = dict(self._config(), **{name: enabled})
+                record_config_history(self.temporary.name, config)
+                self.assertIs(latest_config_snapshot()["config"][name], enabled)
+            with self.assertRaisesRegex(HistoryStoreError, name + " must be a boolean"):
+                record_config_history(self.temporary.name, dict(self._config(), **{name: "true"}))
+
     def test_records_csv_source_fields_and_fuzzy_column_history(self):
         csv_path = os.path.join(self.temporary.name, "ranked designs.csv")
         with open(csv_path, "w", encoding="utf-8") as handle:
             handle.write("structure,iptm,interface_ddg\nmodel.pdb,0.9,-3.1\n")
 
+        config = self._config()
+        config.update(
+            {
+                "csv_encoding": "gb18030",
+                "csv_delimiter": "semicolon",
+                "source_base": r"K:\portable structures",
+                "stage_root": "/home/admin/structures",
+                "stage_alias": "structures",
+            }
+        )
         record_config_history(
             "",
-            self._config(),
+            config,
             source_mode="csv",
             csv_path=csv_path,
             path_column="structure",
@@ -162,6 +181,15 @@ class StructureAnnotatorHistoryTests(unittest.TestCase):
         self.assertEqual(snapshot["csv_path"], os.path.abspath(csv_path))
         self.assertEqual(snapshot["dataset_dir"], os.path.dirname(csv_path))
         self.assertEqual(snapshot["config"]["path_column"], "structure")
+        self.assertEqual(snapshot["config"]["csv_encoding"], "gb18030")
+        self.assertEqual(snapshot["config"]["csv_delimiter"], "semicolon")
+        self.assertEqual(
+            snapshot["config"]["source_base"], r"K:\portable structures"
+        )
+        self.assertEqual(
+            snapshot["config"]["stage_root"], "/home/admin/structures"
+        )
+        self.assertEqual(snapshot["config"]["stage_alias"], "structures")
         self.assertEqual(
             snapshot["config"]["display_columns"],
             ["iptm", "interface_ddg"],
@@ -181,6 +209,24 @@ class StructureAnnotatorHistoryTests(unittest.TestCase):
         )
         self.assertEqual(
             search_config_history("mapping_profile", "xk")[0], "x_k"
+        )
+        self.assertEqual(
+            search_config_history("csv_encoding", "gb18")[0], "gb18030"
+        )
+        self.assertEqual(
+            search_config_history("csv_delimiter", "semicln")[0],
+            "semicolon",
+        )
+        self.assertEqual(
+            search_config_history("source_base", "portable")[0],
+            r"K:\portable structures",
+        )
+        self.assertEqual(
+            search_config_history("stage_root", "structres")[0],
+            "/home/admin/structures",
+        )
+        self.assertEqual(
+            search_config_history("stage_alias", "strct")[0], "structures"
         )
         summary = history_summary()
         self.assertEqual(summary["latest_source_mode"], "csv")

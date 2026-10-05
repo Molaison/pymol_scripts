@@ -7,6 +7,7 @@ from unittest import mock
 
 from pymolplugins.annotation.annotation_store import (
     ANNOTATION_SCHEMA,
+    ANNOTATION_SCHEMA_V1,
     MAX_ENTRY_ID_LENGTH,
     MAX_VALUE_LENGTH,
     AnnotationStoreError,
@@ -58,6 +59,21 @@ class RowAnnotationStoreTests(unittest.TestCase):
             r"scores_2026\.[0-9a-f]{8}\.annotations\.jsonl$",
         )
 
+    def test_case_distinct_csv_siblings_use_distinct_sidecars(self):
+        with tempfile.TemporaryDirectory() as root:
+            lower = os.path.join(root, "scores.csv")
+            upper = os.path.join(root, "Scores.csv")
+            for path in (lower, upper):
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write("structure_path\nmodel.pdb\n")
+
+            lower_sidecar = annotation_sidecar_path(lower)
+            upper_sidecar = annotation_sidecar_path(upper)
+
+            self.assertNotEqual(lower_sidecar, upper_sidecar)
+            self.assertIn(".case-", os.path.basename(lower_sidecar))
+            self.assertIn(".case-", os.path.basename(upper_sidecar))
+
     def test_set_remove_reload_snapshot_and_export_mapping(self):
         store = RowAnnotationStore(self.path)
 
@@ -96,6 +112,103 @@ class RowAnnotationStoreTests(unittest.TestCase):
         self.assertTrue(all(record.endswith(b"\n") for record in records))
         self.assertTrue(
             all(json.loads(record)["schema"] == ANNOTATION_SCHEMA for record in records)
+        )
+
+    def test_legacy_v1_log_is_read_and_new_appends_use_current_schema(self):
+        os.makedirs(os.path.dirname(self.path))
+        legacy = {
+            "schema": ANNOTATION_SCHEMA_V1,
+            "seq": 1,
+            "timestamp_utc": "2026-07-25T00:00:00+00:00",
+            "op": "set",
+            "entry_id": "row-1",
+            "label": "decision",
+            "value": "Keep",
+        }
+        with open(self.path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(legacy) + "\n")
+
+        store = RowAnnotationStore(self.path)
+        self.assertEqual(store.get("row-1", "decision"), "Keep")
+        store.set("row-2", "decision", "Reject")
+
+        with open(self.path, "r", encoding="utf-8") as handle:
+            events = [json.loads(line) for line in handle]
+        self.assertEqual(
+            [event["schema"] for event in events],
+            [ANNOTATION_SCHEMA_V1, ANNOTATION_SCHEMA],
+        )
+
+    def test_source_baseline_is_overlaid_by_events_and_undo_restores_it(self):
+        baseline = {
+            "row-1": {
+                "decision": "Needs Review = 需要复核",
+                "note": "source baseline",
+            }
+        }
+        original = json.loads(json.dumps(baseline, ensure_ascii=False))
+        store = RowAnnotationStore(self.path, baseline=baseline)
+
+        self.assertEqual(store.snapshot(), baseline)
+        changed = store.set("row-1", "decision", "Reject")
+        self.assertTrue(changed["had_previous"])
+        self.assertEqual(changed["previous"], "Needs Review = 需要复核")
+        self.assertEqual(store.get("row-1", "decision"), "Reject")
+
+        undo_set = store.undo(entry_id="row-1", label="decision")
+        self.assertEqual(undo_set["current"], "Needs Review = 需要复核")
+        removed = store.remove("row-1", "decision")
+        self.assertEqual(removed["previous"], "Needs Review = 需要复核")
+        self.assertIsNone(store.get("row-1", "decision"))
+
+        reloaded = RowAnnotationStore(self.path, baseline=baseline)
+        self.assertIsNone(reloaded.get("row-1", "decision"))
+        self.assertEqual(reloaded.get("row-1", "note"), "source baseline")
+        undo_remove = reloaded.undo(entry_id="row-1", label="decision")
+        self.assertEqual(undo_remove["current"], "Needs Review = 需要复核")
+        self.assertEqual(reloaded.snapshot(), baseline)
+        self.assertEqual(baseline, original)
+
+    def test_baseline_compaction_preserves_overrides_and_durable_tombstones(self):
+        baseline = {
+            "row-1": {"decision": "Keep", "note": "source note"},
+            "row-2": {"decision": "Review"},
+        }
+        store = RowAnnotationStore(self.path, baseline=baseline)
+        store.set("row-1", "decision", "Reject")
+        store.remove("row-1", "note")
+        store.set("row-3", "decision", "Added in sidecar")
+        before = store.snapshot()
+
+        result = store.compact()
+
+        self.assertEqual(result["previous_events"], 3)
+        self.assertEqual(result["events"], 3)
+        self.assertEqual(store.snapshot(), before)
+        self.assertEqual(store.history(), [])
+        compacted = store.history(include_baseline=True)
+        self.assertEqual(
+            [event["op"] for event in compacted],
+            ["snapshot_set", "snapshot_remove", "snapshot_set"],
+        )
+        self.assertTrue(all(event["baseline"] for event in compacted))
+        self.assertIsNone(store.undo())
+
+        self.assertEqual(
+            RowAnnotationStore(self.path, baseline=baseline).snapshot(),
+            before,
+        )
+        changed_source = {
+            "row-1": {"decision": "Changed", "note": "changed note"},
+            "row-2": {"decision": "Changed by source"},
+        }
+        self.assertEqual(
+            RowAnnotationStore(self.path, baseline=changed_source).snapshot(),
+            {
+                "row-1": {"decision": "Reject"},
+                "row-2": {"decision": "Changed by source"},
+                "row-3": {"decision": "Added in sidecar"},
+            },
         )
 
     def test_label_snapshot_and_cached_reads_reload_only_after_external_change(self):

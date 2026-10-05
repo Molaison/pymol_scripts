@@ -1,8 +1,10 @@
 import csv
 import concurrent.futures
+import gzip
 import importlib
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -46,7 +48,7 @@ class FakeCmd:
         values = list(self.types)
         return [name for name in values if name in self.enabled] if enabled_only else values
 
-    def load(self, path, name, quiet=1):
+    def load(self, path, name, quiet=1, zoom=-1):
         if self.fail_next_load:
             self.fail_next_load = False
             raise RuntimeError("synthetic annotator load failure")
@@ -80,8 +82,17 @@ class FakeCmd:
     def refresh(self):
         pass
 
-    def do(self, command):
+    def get_view(self):
+        return (0.0,) * 18
+
+    def set_view(self, view):
+        self.view = view
+
+    def do(self, command, echo=1):
         self.commands.append(command)
+        marker = re.search(r"; select (ppfe_ack_[a-f0-9]+), none, enable=0, quiet=1$", command)
+        if marker:
+            self.types[marker[1]] = "selection"
 
     def extend(self, name, callback):
         self.extensions[name] = callback
@@ -117,6 +128,23 @@ def _qt_modules():
 
 
 class StructureAnnotatorCoreTests(unittest.TestCase):
+    def test_command_failure_preserves_cursor_and_scene_without_preloading(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for name in ("a.pdb", "b.pdb"):
+                self._write_pdb(os.path.join(directory, name), name)
+            self.module.STATE.preload_enabled = False
+            self.module.sa_load_dir(directory)
+            before = self.module.STATE.current_object
+            enabled = set(self.fake.enabled)
+            self.module.STATE.step_cmd = "color cyan, {object}\nzoom {incomplete"
+            with self.assertRaisesRegex(ValueError, "Command line 2"):
+                self.module._navigate_annotation("next")
+            self.assertEqual(self.module.STATE.index, 0)
+            self.assertEqual(self.module.STATE.current_object, before)
+            self.assertEqual(self.fake.enabled, enabled)
+            self.assertIn(before, self.fake.types)
+            self.assertEqual(self.fake.commands, [])
+
     def setUp(self):
         self.history_temporary = tempfile.TemporaryDirectory()
         self.previous_history_path = os.environ.get(
@@ -297,6 +325,44 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
             with open(path, "r", encoding="ascii") as handle:
                 self.assertNotIn("PYMOL_ANNOTATOR", handle.read())
 
+    def test_empty_annotation_is_rejected_and_annotation_skips_history_rewrite(self):
+        with tempfile.TemporaryDirectory() as dataset:
+            path = os.path.join(dataset, "model.pdb")
+            self._write_pdb(path, "MODEL")
+            self.module.sa_load_dir(dataset)
+            store = self.module.STATE.row_annotation_store
+            entry_id = self.module.STATE.current_entry_id()
+
+            self.module.sa_annotate("   ")
+            self.assertEqual(store.snapshot(), {})
+            self.assertEqual(self.module.STATE.undo_history, [])
+
+            with mock.patch.object(
+                self.module, "_record_current_config_history"
+            ) as history_write:
+                self.module.sa_annotate("Keep")
+
+            self.assertEqual(store.get(entry_id, "quality"), "Keep")
+            history_write.assert_not_called()
+
+    def test_unloaded_csv_intent_is_not_reported_as_an_active_dataset(self):
+        with tempfile.TemporaryDirectory() as root:
+            csv_path = os.path.join(root, "scores.csv")
+            self.module.STATE.source_mode = "csv"
+            self.module.STATE.csv_path = csv_path
+            self.module.STATE.files = []
+            self.module.STATE.entries = []
+            self.module.STATE.navigation_session = None
+
+            status = self.module.sa_state_status()
+
+            self.assertEqual(status["status"], "inactive")
+            self.assertEqual(status["source"], "")
+            self.assertEqual(
+                status["state_path"],
+                self.module.dataset_state_path(csv_path, source_mode="csv"),
+            )
+
     def test_key_lease_is_explicit_and_restores_previous_bindings(self):
         self.assertEqual(self.fake.key_mappings, {"ALT-left": "previous user binding"})
         result = self.module.sa_bind_keys()
@@ -320,6 +386,41 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
             self.module._qt_class_enum(Scoped, "EditTrigger", "NoEditTriggers"),
             23,
         )
+
+    def test_delimited_fuzzy_completion_replaces_only_the_active_column(self):
+        self.assertEqual(
+            self.module._completion_query("design_id; interddg", ";"),
+            "interddg",
+        )
+        self.assertEqual(
+            self.module._replace_completion_token(
+                "design_id; interddg", "interface_ddg", ";"
+            ),
+            "design_id;interface_ddg",
+        )
+        self.assertEqual(
+            self.module._replace_completion_token("cartn", "cartoon"),
+            "cartoon",
+        )
+
+    def test_csv_path_edit_restores_source_widgets_only_when_identity_changes(self):
+        panel = self.module.StructureAnnotatorPanel.__new__(
+            self.module.StructureAnnotatorPanel
+        )
+        csv_path = os.path.abspath("scores.csv")
+        panel.csv_edit = types.SimpleNamespace(text=lambda: csv_path)
+        panel.source_path_edit = panel.csv_edit
+        panel.source_location = types.SimpleNamespace(source=lambda path: path)
+        panel._set_csv_source_widgets = mock.Mock()
+        panel._source_widgets_csv_path = os.path.abspath("other.csv")
+
+        panel._csv_path_edited()
+        panel._set_csv_source_widgets.assert_called_once_with(csv_path)
+
+        panel._set_csv_source_widgets.reset_mock()
+        panel._source_widgets_csv_path = csv_path
+        panel._csv_path_edited()
+        panel._set_csv_source_widgets.assert_not_called()
 
     def test_loading_dataset_creates_versioned_hidden_state(self):
         with tempfile.TemporaryDirectory() as dataset:
@@ -348,6 +449,24 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
                 [name for name in os.listdir(os.path.dirname(state_path)) if name.endswith(".tmp")],
                 [],
             )
+
+    def test_directory_load_clears_csv_specific_resolution_inputs(self):
+        with tempfile.TemporaryDirectory() as dataset:
+            path = os.path.join(dataset, "model.pdb")
+            self._write_pdb(path, "MODEL")
+            self.module.STATE.csv_encoding = "gb18030"
+            self.module.STATE.csv_delimiter = "semicolon"
+            self.module.STATE.source_base = r"K:\stale-base"
+            self.module.STATE.stage_root = "/stale/root"
+            self.module.STATE.stage_alias = "stale"
+
+            self.module.sa_load_dir(dataset)
+
+            self.assertEqual(self.module.STATE.csv_encoding, "utf-8-sig")
+            self.assertEqual(self.module.STATE.csv_delimiter, "auto")
+            self.assertEqual(self.module.STATE.source_base, "")
+            self.assertEqual(self.module.STATE.stage_root, "")
+            self.assertEqual(self.module.STATE.stage_alias, "")
 
     def test_oversized_dataset_state_is_rejected_before_replace(self):
         from pymolplugins.annotation.state_store import MAX_STATE_BYTES
@@ -388,6 +507,9 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
                 "Reject": "hide everything, {object}",
             }
             self.module.STATE.auto_advance = True
+            self.module.STATE.save_on_label_click = True
+            self.module.STATE.show_source_row = True
+            self.module.STATE.show_file_status = True
             self.module.STATE.preload_ahead = 4
             self.module.STATE.undo_history.append({"runtime_only": True})
             self.module.sa_goto(2)
@@ -395,6 +517,9 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
 
             self.module.sa_load_dir(second_dir)
             self.module.STATE.label_name = "second"
+            self.module.STATE.save_on_label_click = False
+            self.module.STATE.show_source_row = False
+            self.module.STATE.show_file_status = False
             self.module.STATE.step_cmd = "zoom {object}"
             self.module.STATE.bucket_cmds = {"Good": "orient {object}"}
             second_state_path = self.module.sa_save_state()
@@ -414,12 +539,35 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
                 },
             )
             self.assertTrue(self.module.STATE.auto_advance)
+            self.assertTrue(self.module.STATE.save_on_label_click)
+            self.assertTrue(self.module.STATE.show_source_row)
+            self.assertTrue(self.module.STATE.show_file_status)
             self.assertEqual(self.module.STATE.preload_ahead, 4)
             self.assertEqual(os.path.basename(self.module.STATE.current_file()), "b.pdb")
             self.assertEqual(self.module.STATE.index, 1)
             self.assertEqual(self.module.STATE.undo_history, [])
             self.assertEqual(len(self.fake.commands), 1)
             self.assertRegex(self.fake.commands[0], r"^color cyan, sa_00002_b_")
+
+            self.module.sa_load_dir(second_dir)
+            self.assertFalse(self.module.STATE.save_on_label_click)
+            self.assertFalse(self.module.STATE.show_source_row)
+            self.assertFalse(self.module.STATE.show_file_status)
+
+    def test_annotation_interaction_preferences_default_off_and_validate(self):
+        legacy = self.module._validate_persisted_config({"auto_advance": True})
+        self.module._apply_persisted_config(legacy)
+        for name in ("save_on_label_click", "show_source_row", "show_file_status"):
+            self.assertFalse(getattr(self.module.AnnotatorState(), name))
+            self.assertFalse(getattr(self.module.STATE, name))
+            self.assertFalse(self.module._persisted_config()[name])
+            for enabled in (True, False):
+                config = self.module._validate_persisted_config({name: enabled})
+                self.module._apply_persisted_config(config)
+                self.assertIs(getattr(self.module.STATE, name), enabled)
+                self.assertIs(self.module._persisted_config()[name], enabled)
+            with self.assertRaises(self.module.StateStoreError):
+                self.module._validate_persisted_config({name: "true"})
 
     def test_invalid_state_warns_but_does_not_block_loading(self):
         with tempfile.TemporaryDirectory() as dataset:
@@ -439,6 +587,18 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
                 repaired["schema"],
                 STATE_SCHEMA,
             )
+            corrupt = [
+                name
+                for name in os.listdir(os.path.dirname(state_path))
+                if name.startswith(os.path.basename(state_path) + ".corrupt-")
+            ]
+            self.assertEqual(len(corrupt), 1)
+            with open(
+                os.path.join(os.path.dirname(state_path), corrupt[0]),
+                "r",
+                encoding="utf-8",
+            ) as handle:
+                self.assertEqual(handle.read(), "{not-json")
 
     def test_state_position_falls_back_when_saved_file_disappears(self):
         with tempfile.TemporaryDirectory() as dataset:
@@ -923,6 +1083,50 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
                 self.module._is_remote_host_path("C:\\models\\a.pdb", "windows-host")
             )
 
+    def test_optional_cache_failure_falls_back_to_host_readable_source(self):
+        with tempfile.TemporaryDirectory() as root:
+            structure = os.path.join(root, "remote.pdb")
+            self._write_pdb(structure, "REMOTE")
+            resolution = self.module.PathResolution(
+                raw_path="/remote/remote.pdb",
+                resolved_path=structure,
+                status="available",
+                provider="sshfs-win",
+                method="mapping",
+                matched_rule="remote",
+            )
+            entry = self.module.AnnotationEntry(
+                id="cache-fallback",
+                ordinal=0,
+                display_name="remote.pdb",
+                source_path="/remote/remote.pdb",
+                source_kind="csv",
+                resolved_path=structure,
+                path_resolution=resolution,
+                availability="available",
+            )
+            context = self.module._MaterializationContext(
+                generation=self.module._materialization_generation,
+                cache_enabled=True,
+                stage_root="",
+                stage_alias="",
+            )
+            broken_cache = types.SimpleNamespace(
+                materialize=mock.Mock(
+                    side_effect=OSError("synthetic cache root failure")
+                )
+            )
+
+            with mock.patch.object(
+                self.module, "_get_copy_materializer", return_value=broken_cache
+            ):
+                materialized = self.module._materialize_entry(entry, context)
+
+            self.assertEqual(materialized.mode, "direct")
+            self.assertEqual(materialized.path, structure)
+            self.assertIsNone(materialized.cache_key)
+            broken_cache.materialize.assert_called_once()
+
     def test_wsl_stage_resolution_stats_missing_paths_and_can_be_unchecked(self):
         entry = self.module.AnnotationEntry(
             id="stage-entry",
@@ -959,6 +1163,23 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
         self.assertEqual(unchecked.status, "unchecked")
         self.assertTrue(unchecked.is_resolved)
         stat_call.assert_called_once_with("structures", "missing.pdb")
+
+    def test_text_rewrites_are_used_for_worker_resolution_and_materialization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            csv_path = os.path.join(directory, "paths.csv")
+            with open(csv_path, "w", encoding="utf-8") as handle:
+                handle.write("structure_path\nartifact:/allowed/model.pdb\n")
+            dataset = self.module.CsvDatasetSource(csv_path, "structure_path").load()
+            profile = dict(name="stage", rules=[], target_format="custom",
+                           rewrites=[dict(kind="strip_prefix", pattern="artifact:")])
+            with mock.patch.object(self.module, "_mapping_profile", return_value=profile):
+                resolved = self.module._resolve_csv_dataset(dataset, "stage", stage_root="/allowed", stage_alias="structures", require_exists=False)
+            entry = resolved.entries[0]
+            self.assertEqual(entry.source_path, "artifact:/allowed/model.pdb")
+            self.assertEqual(entry.resolved_path, "/allowed/model.pdb")
+            self.assertEqual(entry.path_resolution.provider, "wsl-stage:structures")
+            context = types.SimpleNamespace(stage_root="/allowed", stage_alias="structures")
+            self.assertEqual(self.module._stage_relative_path(entry, context), ("structures", "model.pdb"))
 
     def test_csv_load_reuses_fresh_stage_stat_for_preflight_materialization(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1598,6 +1819,9 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
 
             self.module.sa_load_csv(csv_path, "structure_path")
             self.module.sa_annotate("Keep")
+            self.assertIsNone(self.module.sa_export_csv(csv_path))
+            with open(csv_path, "rb") as handle:
+                self.assertEqual(handle.read(), source_before)
             exported = self.module.sa_export_csv(
                 os.path.join(root, "quality reviewed.csv")
             )
@@ -1623,6 +1847,589 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
             self.assertIn(
                 "pymol_annotation_quality", self.module.STATE.display_columns
             )
+
+    def test_csv_annotation_columns_are_imported_as_an_undoable_baseline(self):
+        with tempfile.TemporaryDirectory() as root:
+            structure = os.path.join(root, "model.pdb")
+            self._write_pdb(structure, "MODEL")
+            csv_path = os.path.join(root, "reviewed.csv")
+            with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(
+                    ["id", "structure_path", "pymol_annotation_quality"]
+                )
+                writer.writerow(["design-a", structure, "Needs Review = 需要复核"])
+
+            loaded = self.module.sa_load_csv(
+                csv_path, "structure_path", "id"
+            )
+            self.assertEqual(loaded["status"], "loaded")
+            entry_id = self.module.STATE.current_entry_id()
+            store = self.module.STATE.row_annotation_store
+            self.assertEqual(
+                store.get(entry_id, "quality"), "Needs Review = 需要复核"
+            )
+            self.assertEqual(self.module.STATE.annotated_indices, {0})
+
+            self.module.sa_annotate("Reject")
+            self.assertEqual(store.get(entry_id, "quality"), "Reject")
+            self.module.sa_undo()
+            self.assertEqual(
+                store.get(entry_id, "quality"), "Needs Review = 需要复核"
+            )
+
+            exported = self.module.sa_export_csv(
+                os.path.join(root, "reviewed-again.csv")
+            )
+            with open(exported, "r", encoding="utf-8-sig", newline="") as handle:
+                row = next(csv.DictReader(handle))
+            self.assertEqual(
+                row["pymol_annotation_quality"], "Needs Review = 需要复核"
+            )
+
+            reloaded = self.module.sa_load_csv(
+                exported, "structure_path", "id"
+            )
+            self.assertEqual(reloaded["status"], "loaded")
+            imported_id = self.module.STATE.current_entry_id()
+            imported_store = self.module.STATE.row_annotation_store
+            self.assertEqual(
+                imported_store.get(imported_id, "quality"),
+                "Needs Review = 需要复核",
+            )
+            imported_store.remove(imported_id, "quality")
+            self.assertIsNone(imported_store.get(imported_id, "quality"))
+            restored = imported_store.undo(
+                entry_id=imported_id, label="quality"
+            )
+            self.assertEqual(restored["current"], "Needs Review = 需要复核")
+
+    def test_case_distinct_csv_controller_sessions_never_share_mutable_state(self):
+        with tempfile.TemporaryDirectory() as root:
+            lower = os.path.join(root, "scores.csv")
+            upper = os.path.join(root, "Scores.csv")
+            if os.path.normcase(lower) == os.path.normcase(upper):
+                self.skipTest("filesystem cannot represent case-distinct CSV siblings")
+            first_structure = os.path.join(root, "first.pdb")
+            second_structure = os.path.join(root, "second.pdb")
+            self._write_pdb(first_structure, "FIRST")
+            self._write_pdb(second_structure, "SECOND")
+            with open(lower, "w", encoding="utf-8", newline="") as handle:
+                handle.write(
+                    "id,structure_path\n"
+                    f"shared,{first_structure}\n"
+                )
+
+            first_load = self.module.sa_load_csv(
+                lower, "structure_path", "id"
+            )
+            self.assertEqual(first_load["status"], "loaded")
+            lower_entry_id = self.module.STATE.current_entry_id()
+            lower_state_path = first_load["state_path"]
+            lower_annotation_path = self.module.STATE.row_annotation_store.path
+            self.module.sa_annotate("Keep lower")
+            # State is user-facing configuration and may be deleted while the
+            # durable annotation log remains. Dataset ownership must not then
+            # become ambiguous when a case-distinct sibling appears.
+            os.unlink(lower_state_path)
+
+            with open(upper, "w", encoding="utf-8", newline="") as handle:
+                handle.write(
+                    "id,structure_path\n"
+                    f"shared,{second_structure}\n"
+                )
+
+            lower_reloaded = self.module.sa_load_csv(
+                lower, "structure_path", "id"
+            )
+            self.assertEqual(lower_reloaded["status"], "loaded")
+            self.assertEqual(self.module.STATE.current_entry_id(), lower_entry_id)
+            self.assertEqual(lower_reloaded["state_path"], lower_state_path)
+            self.assertEqual(
+                self.module.STATE.row_annotation_store.path,
+                lower_annotation_path,
+            )
+            self.assertEqual(
+                self.module.STATE.row_annotation_store.get(
+                    lower_entry_id, "quality"
+                ),
+                "Keep lower",
+            )
+
+            upper_loaded = self.module.sa_load_csv(
+                upper, "structure_path", "id"
+            )
+            self.assertEqual(upper_loaded["status"], "loaded")
+            upper_entry_id = self.module.STATE.current_entry_id()
+            upper_state_path = upper_loaded["state_path"]
+            upper_annotation_path = self.module.STATE.row_annotation_store.path
+            self.assertNotEqual(upper_entry_id, lower_entry_id)
+            self.assertNotEqual(upper_state_path, lower_state_path)
+            self.assertNotEqual(upper_annotation_path, lower_annotation_path)
+            self.assertIsNone(
+                self.module.STATE.row_annotation_store.get(
+                    upper_entry_id, "quality"
+                )
+            )
+            self.module.sa_annotate("Reject upper")
+
+            for csv_path, expected_id, expected_value, expected_state in (
+                (lower, lower_entry_id, "Keep lower", lower_state_path),
+                (upper, upper_entry_id, "Reject upper", upper_state_path),
+                (lower, lower_entry_id, "Keep lower", lower_state_path),
+            ):
+                loaded = self.module.sa_load_csv(
+                    csv_path, "structure_path", "id"
+                )
+                self.assertEqual(loaded["status"], "loaded")
+                self.assertEqual(loaded["state_path"], expected_state)
+                self.assertEqual(self.module.STATE.current_entry_id(), expected_id)
+                self.assertEqual(
+                    self.module.STATE.row_annotation_store.get(
+                        expected_id, "quality"
+                    ),
+                    expected_value,
+                )
+
+    def test_directory_annotations_use_sidecar_and_preserve_every_source_byte(self):
+        with tempfile.TemporaryDirectory() as root:
+            pdb_path = os.path.join(root, "a.pdb")
+            cif_path = os.path.join(root, "b.cif")
+            gzip_path = os.path.join(root, "c.pdb.gz")
+            with open(pdb_path, "wb") as handle:
+                handle.write(b"ATOM\nEND\n")
+            with open(cif_path, "wb") as handle:
+                handle.write(b"data_model\n#\n")
+            with gzip.open(gzip_path, "wb") as handle:
+                handle.write(b"ATOM\nEND\n")
+            originals = {}
+            for path in (pdb_path, cif_path, gzip_path):
+                with open(path, "rb") as handle:
+                    originals[path] = handle.read()
+
+            self.module.sa_load_dir(root)
+            self.assertIsNotNone(self.module.STATE.row_annotation_store)
+            self.assertEqual(
+                self.module.STATE.row_annotation_store.path,
+                self.module.directory_annotation_sidecar_path(root),
+            )
+            value = "Needs Review = 需要复核"
+            entry_ids = []
+            for position in range(1, 4):
+                self.module.sa_goto(position)
+                entry_ids.append(self.module.STATE.current_entry_id())
+                self.module.sa_annotate(value)
+
+            store = self.module.STATE.row_annotation_store
+            self.assertEqual(
+                [store.get(entry_id, "quality") for entry_id in entry_ids],
+                [value, value, value],
+            )
+            for path, original in originals.items():
+                with open(path, "rb") as handle:
+                    self.assertEqual(handle.read(), original)
+
+            self.module.sa_undo()
+            self.assertIsNone(store.get(entry_ids[-1], "quality"))
+            for path, original in originals.items():
+                with open(path, "rb") as handle:
+                    self.assertEqual(handle.read(), original)
+
+            self.module.sa_load_dir(root)
+            self.assertEqual(
+                self.module.STATE.row_annotation_store.get(entry_ids[0], "quality"),
+                value,
+            )
+            self.assertEqual(
+                self.module.STATE.row_annotation_store.get(entry_ids[1], "quality"),
+                value,
+            )
+
+    def test_directory_sidecar_write_failure_never_changes_the_structure(self):
+        with tempfile.TemporaryDirectory() as root:
+            structure = os.path.join(root, "model.pdb")
+            self._write_pdb(structure, "MODEL")
+            with open(structure, "rb") as handle:
+                original = handle.read()
+            self.module.sa_load_dir(root)
+            store = self.module.STATE.row_annotation_store
+
+            with mock.patch.object(
+                store, "set", side_effect=OSError("synthetic sidecar failure")
+            ):
+                self.assertIsNone(self.module.sa_annotate("Keep"))
+
+            with open(structure, "rb") as handle:
+                self.assertEqual(handle.read(), original)
+            self.assertEqual(store.snapshot(), {})
+            self.assertEqual(self.module.STATE.annotated_indices, set())
+
+    def test_directory_sidecar_undo_failure_keeps_retry_entry(self):
+        with tempfile.TemporaryDirectory() as root:
+            structure = os.path.join(root, "model.pdb")
+            self._write_pdb(structure, "MODEL")
+            self.module.sa_load_dir(root)
+            self.module.sa_annotate("Keep")
+            store = self.module.STATE.row_annotation_store
+            entry_id = self.module.STATE.current_entry_id()
+
+            with mock.patch.object(
+                store, "undo", side_effect=OSError("synthetic undo failure")
+            ):
+                self.module.sa_undo()
+
+            self.assertEqual(len(self.module.STATE.undo_history), 1)
+            self.assertEqual(store.get(entry_id, "quality"), "Keep")
+            self.module.sa_undo()
+            self.assertEqual(self.module.STATE.undo_history, [])
+            self.assertIsNone(store.get(entry_id, "quality"))
+
+    def test_directory_default_pattern_accepts_uppercase_extensions(self):
+        with tempfile.TemporaryDirectory() as root:
+            pdb_path = os.path.join(root, "first.PDB")
+            cif_path = os.path.join(root, "second.CIF")
+            self._write_pdb(pdb_path, "FIRST")
+            with open(cif_path, "w", encoding="ascii") as handle:
+                handle.write("data_second\n#\n")
+
+            self.module.sa_load_dir(root)
+
+            self.assertEqual(
+                [entry.display_name for entry in self.module.STATE.entries],
+                ["first.PDB", "second.CIF"],
+            )
+
+    def test_directory_sidecar_reads_legacy_inline_annotations_as_baseline(self):
+        with tempfile.TemporaryDirectory() as root:
+            pdb_path = os.path.join(root, "legacy.pdb")
+            cif_path = os.path.join(root, "legacy_cif.cif")
+            gzip_path = os.path.join(root, "legacy_gzip.cif.gz")
+            with open(pdb_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(
+                    "REMARK 950 PYMOL_ANNOTATOR quality=Legacy=Keep ts=2026-01-01T00:00:00\n"
+                    "END\n"
+                )
+            with open(cif_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(
+                    "data_model\n"
+                    "# PYMOL_ANNOTATOR quality=Legacy=CIF = 值 ts=2026-01-01T00:00:00\n"
+                    "#\n"
+                )
+            with gzip.open(gzip_path, "wt", encoding="utf-8", newline="") as handle:
+                handle.write(
+                    "data_model\n"
+                    "# PYMOL_ANNOTATOR quality=Legacy=GZIP = 值 ts=2026-01-01T00:00:00\n"
+                    "#\n"
+                )
+            originals = {}
+            for path in (pdb_path, cif_path, gzip_path):
+                with open(path, "rb") as handle:
+                    originals[path] = handle.read()
+
+            self.module.sa_load_dir(root)
+            store = self.module.STATE.row_annotation_store
+            entries = {
+                entry.display_name: entry
+                for entry in self.module.STATE.dataset.entries
+            }
+            self.assertEqual(
+                store.get(entries["legacy.pdb"].id, "quality"),
+                "Legacy=Keep",
+            )
+            self.assertEqual(
+                store.get(entries["legacy_cif.cif"].id, "quality"),
+                "Legacy=CIF = 值",
+            )
+            self.assertEqual(
+                store.get(entries["legacy_gzip.cif.gz"].id, "quality"),
+                "Legacy=GZIP = 值",
+            )
+            pdb_position = next(
+                index
+                for index, entry in enumerate(self.module.STATE.entries, 1)
+                if entry.display_name == "legacy.pdb"
+            )
+            self.module.sa_goto(pdb_position)
+            entry_id = self.module.STATE.current_entry_id()
+            self.module.sa_annotate("新的 值=ok")
+            self.assertEqual(store.get(entry_id, "quality"), "新的 值=ok")
+            self.module.sa_undo()
+            self.assertEqual(store.get(entry_id, "quality"), "Legacy=Keep")
+            for path, original in originals.items():
+                with open(path, "rb") as handle:
+                    self.assertEqual(handle.read(), original)
+
+    def test_directory_table_displays_and_refreshes_sidecar_annotation(self):
+        with tempfile.TemporaryDirectory() as root:
+            structure = os.path.join(root, "model.pdb")
+            self._write_pdb(structure, "MODEL")
+            self.module.sa_load_dir(root)
+            entry = self.module.STATE.current_entry()
+
+            model = self.module._DatasetTableModel()
+            model.beginResetModel = lambda: None
+            model.endResetModel = lambda: None
+            model.index = lambda row, column: (row, column)
+            model.dataChanged = types.SimpleNamespace(emit=mock.Mock())
+            self.module.QtCore.Qt = types.SimpleNamespace(DisplayRole=0)
+            model.set_active(
+                [entry], [], "directory", "quality", {entry.id: "Keep"}
+            )
+
+            self.assertEqual(
+                model._headers,
+                ["Source row", "Status", "Structure", "Quality"],
+            )
+            self.assertEqual(model._active_value(entry, 3), "Keep")
+            self.assertEqual(model.update_annotations({entry.id: "Reject"}), (entry.id,))
+            self.assertEqual(model._active_value(entry, 3), "Reject")
+            model.dataChanged.emit.assert_called_once()
+
+    def test_annotation_only_table_refresh_does_not_resort_the_dataset(self):
+        with tempfile.TemporaryDirectory() as root:
+            structure = os.path.join(root, "model.pdb")
+            self._write_pdb(structure, "MODEL")
+            self.module.sa_load_dir(root)
+            panel = self.module.StructureAnnotatorPanel.__new__(
+                self.module.StructureAnnotatorPanel
+            )
+            source_token, signature = self.module.StructureAnnotatorPanel._current_table_identity()
+            panel._table_mode = "active"
+            panel._table_source_token = source_token
+            panel._dataset_table_signature = signature
+            panel._table_annotation_revision = None
+            panel._dataset_model = types.SimpleNamespace(
+                update_annotations=mock.Mock(),
+                row_for_entry=lambda _entry_id: -1,
+            )
+            panel.dataset_table = types.SimpleNamespace(selectRow=mock.Mock())
+            panel.view_summary_label = types.SimpleNamespace(setText=mock.Mock())
+            panel.filter_button = types.SimpleNamespace(setText=mock.Mock())
+            panel.review = types.SimpleNamespace(selection=types.SimpleNamespace(ensure_current=mock.Mock()))
+
+            with mock.patch.object(
+                self.module,
+                "_table_view_entries",
+                side_effect=AssertionError("annotation refresh resorted all rows"),
+            ):
+                panel._refresh_dataset_table()
+
+            panel._dataset_model.update_annotations.assert_called_once()
+
+    def test_directory_skip_filters_navigation_but_export_keeps_every_row(self):
+        with tempfile.TemporaryDirectory() as root:
+            first = os.path.join(root, "a.pdb")
+            second = os.path.join(root, "b.pdb")
+            self._write_pdb(first, "FIRST")
+            self._write_pdb(second, "SECOND")
+            originals = {}
+            for path in (first, second):
+                with open(path, "rb") as handle:
+                    originals[path] = handle.read()
+
+            self.module.sa_load_dir(root)
+            self.module.sa_annotate("Keep")
+            self.module.STATE.skip_annotated = True
+            self.module.sa_save_state()
+            self.module.sa_load_dir(root)
+
+            self.assertEqual(
+                [os.path.basename(path) for path in self.module.STATE.files],
+                ["b.pdb"],
+            )
+            self.assertEqual(len(self.module.STATE.all_entries), 1)
+            self.assertEqual(self.module.STATE.dataset.count, 2)
+            self.module.sa_annotate("Reject")
+            exported = self.module.sa_export_csv(
+                os.path.join(root, "complete annotations.csv")
+            )
+
+            with open(exported, "r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual([row["filename"] for row in rows], ["a.pdb", "b.pdb"])
+            self.assertEqual([row["quality"] for row in rows], ["Keep", "Reject"])
+            for path, original in originals.items():
+                with open(path, "rb") as handle:
+                    self.assertEqual(handle.read(), original)
+
+    def test_directory_export_protects_sidecars_and_publishes_atomically(self):
+        with tempfile.TemporaryDirectory() as root:
+            structure = os.path.join(root, "model.pdb")
+            self._write_pdb(structure, "MODEL")
+            self.module.sa_load_dir(root)
+            self.module.sa_annotate("Keep")
+            store = self.module.STATE.row_annotation_store
+            protected_paths = (
+                store.path,
+                self.module.dataset_state_path(root),
+            )
+
+            for protected in protected_paths:
+                with open(protected, "rb") as handle:
+                    before = handle.read()
+                self.assertIsNone(self.module.sa_export_csv(protected))
+                with open(protected, "rb") as handle:
+                    self.assertEqual(handle.read(), before)
+
+            destination = os.path.join(root, "existing.csv")
+            with open(destination, "wb") as handle:
+                handle.write(b"existing export\n")
+            with mock.patch.object(
+                self.module.os,
+                "replace",
+                side_effect=OSError("synthetic export replace failure"),
+            ):
+                self.assertIsNone(self.module.sa_export_csv(destination))
+
+            with open(destination, "rb") as handle:
+                self.assertEqual(handle.read(), b"existing export\n")
+            self.assertEqual(
+                [
+                    name
+                    for name in os.listdir(root)
+                    if name.startswith(".structure_annotations.")
+                ],
+                [],
+            )
+
+    def test_directory_sidecar_follows_dataset_move_with_stable_row_ids(self):
+        with tempfile.TemporaryDirectory() as parent:
+            original_root = os.path.join(parent, "original dataset")
+            moved_root = os.path.join(parent, "moved dataset")
+            os.mkdir(original_root)
+            structure = os.path.join(original_root, "model.pdb")
+            self._write_pdb(structure, "MODEL")
+            with open(structure, "rb") as handle:
+                source_before = handle.read()
+
+            self.module.sa_load_dir(original_root)
+            entry_id = self.module.STATE.current_entry_id()
+            self.module.sa_annotate("Keep after move")
+            os.rename(original_root, moved_root)
+
+            self.module.sa_load_dir(moved_root)
+
+            self.assertEqual(self.module.STATE.current_entry_id(), entry_id)
+            self.assertEqual(
+                self.module.STATE.row_annotation_store.get(entry_id, "quality"),
+                "Keep after move",
+            )
+            moved_structure = os.path.join(moved_root, "model.pdb")
+            with open(moved_structure, "rb") as handle:
+                self.assertEqual(handle.read(), source_before)
+
+    def test_csv_implicit_relative_base_and_sidecars_follow_dataset_move(self):
+        with tempfile.TemporaryDirectory() as parent:
+            original_root = os.path.join(parent, "original csv dataset")
+            moved_root = os.path.join(parent, "moved csv dataset")
+            os.mkdir(original_root)
+            structure = os.path.join(original_root, "model.pdb")
+            self._write_pdb(structure, "MODEL")
+            csv_path = os.path.join(original_root, "scores.csv")
+            with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write("structure_path,id,score\nmodel.pdb,a,0.9\n")
+
+            loaded = self.module.sa_load_csv(
+                csv_path, "structure_path", "id", "score"
+            )
+            self.assertEqual(loaded["status"], "loaded")
+            self.assertEqual(self.module.STATE.source_base, "")
+            entry_id = self.module.STATE.current_entry_id()
+            self.module.sa_annotate("Keep")
+
+            # Simulate the pre-fix state which persisted the derived absolute
+            # CSV parent, then move the complete portable dataset directory.
+            state_path = loaded["state_path"]
+            with open(state_path, "r", encoding="utf-8") as handle:
+                legacy_state = json.load(handle)
+            legacy_state["csv"]["source_base"] = original_root
+            legacy_state["config"]["source_base"] = original_root
+            with open(state_path, "w", encoding="utf-8") as handle:
+                json.dump(legacy_state, handle)
+            os.rename(original_root, moved_root)
+
+            moved_csv = os.path.join(moved_root, "scores.csv")
+            restored = self.module.sa_load_csv(moved_csv)
+
+            self.assertEqual(restored["status"], "loaded")
+            self.assertEqual(self.module.STATE.source_base, "")
+            self.assertEqual(
+                self.module.STATE.current_entry().resolved_path,
+                os.path.join(moved_root, "model.pdb"),
+            )
+            self.assertEqual(self.module.STATE.current_entry_id(), entry_id)
+            self.assertEqual(
+                self.module.STATE.row_annotation_store.get(entry_id, "quality"),
+                "Keep",
+            )
+
+    def test_legacy_inline_scan_is_streaming_and_reads_end_of_all_formats(self):
+        with tempfile.TemporaryDirectory() as root:
+            marker = "#" * (1024 * 1024)
+            pdb_path = os.path.join(root, "tail.pdb")
+            cif_path = os.path.join(root, "tail.cif")
+            gzip_path = os.path.join(root, "tail_gz.pdb.gz")
+            with open(pdb_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(
+                    marker
+                    + "\nREMARK 950 PYMOL_ANNOTATOR quality=PDB 值=ok "
+                    "ts=2026-01-01T00:00:00\nEND\n"
+                )
+            with open(cif_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(
+                    "data_model\n"
+                    + marker
+                    + "\n# PYMOL_ANNOTATOR quality=CIF 值=ok "
+                    "ts=2026-01-01T00:00:00\n#\n"
+                )
+            with gzip.open(gzip_path, "wt", encoding="utf-8", newline="") as handle:
+                handle.write(
+                    marker
+                    + "\nREMARK 950 PYMOL_ANNOTATOR quality=GZIP 值=ok "
+                    "ts=2026-01-01T00:00:00\nEND\n"
+                )
+
+            with mock.patch.object(
+                self.module,
+                "_read_text_file",
+                side_effect=AssertionError("legacy scan loaded the whole structure"),
+            ):
+                self.assertEqual(
+                    self.module.read_structure_annotations(pdb_path)["quality"],
+                    "PDB 值=ok",
+                )
+                self.assertEqual(
+                    self.module.read_structure_annotations(cif_path)["quality"],
+                    "CIF 值=ok",
+                )
+                self.assertEqual(
+                    self.module.read_structure_annotations(gzip_path)["quality"],
+                    "GZIP 值=ok",
+                )
+
+    def test_global_history_failure_never_blocks_sidecar_annotation(self):
+        with tempfile.TemporaryDirectory() as root:
+            structure = os.path.join(root, "model.pdb")
+            self._write_pdb(structure, "MODEL")
+            with open(structure, "rb") as handle:
+                original = handle.read()
+
+            with mock.patch.object(
+                self.module,
+                "record_config_history",
+                side_effect=OSError("synthetic global history failure"),
+            ):
+                self.module.sa_load_dir(root)
+                self.assertEqual(len(self.module.STATE.files), 1)
+                self.module.sa_annotate("Keep")
+
+            entry_id = self.module.STATE.current_entry_id()
+            self.assertEqual(
+                self.module.STATE.row_annotation_store.get(entry_id, "quality"),
+                "Keep",
+            )
+            with open(structure, "rb") as handle:
+                self.assertEqual(handle.read(), original)
 
     def test_csv_export_log_counts_existing_annotation_column_not_last(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1850,6 +2657,109 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
                 [entry.metadata["case"] for entry in self.module.STATE.entries],
                 ["design_b", "design_a"],
             )
+
+    def test_scores_sort_keeps_empty_values_last_and_table_matches_view(self):
+        with tempfile.TemporaryDirectory() as root:
+            structures = {}
+            for name in ("blank", "middle", "high"):
+                path = os.path.join(root, name + ".pdb")
+                self._write_pdb(path, name)
+                structures[name] = path
+            missing = os.path.join(root, "missing.pdb")
+            csv_path = os.path.join(root, "sort scores.csv")
+            with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["structure_path", "case", "score"])
+                writer.writerow([structures["blank"], "blank", ""])
+                writer.writerow([structures["middle"], "middle", "0.4"])
+                writer.writerow([structures["high"], "high", "0.9"])
+                writer.writerow([missing, "diagnostic", "0.7"])
+
+            loaded = self.module.sa_load_csv(
+                csv_path, "structure_path", "case", "score"
+            )
+            self.assertEqual(loaded["status"], "loaded")
+            result = self.module.sa_filter("", "score", 1)
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(
+                [entry.metadata["case"] for entry in self.module.STATE.entries],
+                ["high", "middle", "blank"],
+            )
+            self.assertEqual(
+                [
+                    entry.metadata["case"]
+                    for entry in self.module._table_view_entries(
+                        self.module.STATE.all_entries
+                    )
+                ],
+                ["high", "diagnostic", "middle", "blank"],
+            )
+            active_before = [entry.id for entry in self.module.STATE.entries]
+            invalid = self.module.sa_filter("", "socre", 1)
+            self.assertEqual(invalid["status"], "error")
+            self.assertIn("unknown sort column", invalid["error"])
+            self.assertIn("'score'", invalid["error"])
+            self.assertEqual(
+                [entry.id for entry in self.module.STATE.entries], active_before
+            )
+            self.assertEqual(self.module.STATE.sort_column, "score")
+
+    def test_csv_schema_change_recovers_stale_display_sort_and_filter_view(self):
+        with tempfile.TemporaryDirectory() as root:
+            structure = os.path.join(root, "model.pdb")
+            self._write_pdb(structure, "MODEL")
+            csv_path = os.path.join(root, "evolving scores.csv")
+            with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(
+                    ["structure_path", "id", "old_score", "cohort"]
+                )
+                writer.writerow([structure, "model", "0.8", "keep"])
+
+            loaded = self.module.sa_load_csv(
+                csv_path,
+                "structure_path",
+                "id",
+                "old_score,cohort",
+            )
+            self.assertEqual(loaded["status"], "loaded")
+            viewed = self.module.sa_filter("keep", "old_score", 1)
+            self.assertEqual(viewed["status"], "ok")
+
+            with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(
+                    ["structure_path", "id", "new_score", "cohort"]
+                )
+                writer.writerow([structure, "model", "0.95", "changed"])
+
+            restored = self.module.sa_load_csv(
+                csv_path,
+                "structure_path",
+                "id",
+                "old_score;cohort",
+            )
+
+            self.assertEqual(restored["status"], "loaded")
+            self.assertEqual(
+                self.module.STATE.display_columns,
+                ["id", "new_score", "cohort"],
+            )
+            self.assertEqual(self.module.STATE.filter_text, "")
+            self.assertEqual(self.module.STATE.sort_column, "")
+            self.assertFalse(self.module.STATE.sort_descending)
+            self.assertEqual(self.module.STATE.current_entry().metadata["id"], "model")
+            session_before = self._session_signature()
+            self.assertIsNone(
+                self.module.sa_load_csv(
+                    csv_path,
+                    "structure_path",
+                    "id",
+                    "mistyped_score",
+                )
+            )
+            self.assertEqual(self._session_signature(), session_before)
 
     def test_csv_cursor_survives_row_reorder_and_falls_back_if_id_disappears(self):
         with tempfile.TemporaryDirectory() as root:

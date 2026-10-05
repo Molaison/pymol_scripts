@@ -2,7 +2,13 @@ import threading
 from types import SimpleNamespace
 import unittest
 
-from pymolplugins.worker.backends.rosetta import RosettaBackend, RosettaBackendError
+from pymolplugins.worker.backends.rosetta import (
+    RosettaBackend,
+    RosettaBackendError,
+    RosettaRequestError,
+    RosettaScientificContractError,
+    RosettaUnavailableError,
+)
 
 
 class FakePDBInfo:
@@ -49,12 +55,20 @@ class FakePyRosetta:
         cms_value=12.5,
         bound_bunsat_value=7.0,
         interface_bunsat_value=2.0,
+        interface_dsasa_value=101.25,
+        interface_dg_value=-8.5,
+        shape_complementarity_value=0.72,
+        packstat_value=0.61,
         init_error=None,
     ):
         self.pose_chains = list(pose_chains)
         self.cms_value = cms_value
         self.bound_bunsat_value = bound_bunsat_value
         self.interface_bunsat_value = interface_bunsat_value
+        self.interface_dsasa_value = interface_dsasa_value
+        self.interface_dg_value = interface_dg_value
+        self.shape_complementarity_value = shape_complementarity_value
+        self.packstat_value = packstat_value
         self.init_error = init_error
         self.init_calls = []
         self.import_calls = []
@@ -160,16 +174,16 @@ class FakePyRosetta:
                 return owner.interface_bunsat_value
 
             def get_interface_delta_sasa(self):
-                return 101.25
+                return owner.interface_dsasa_value
 
             def get_interface_dG(self):
-                return -8.5
+                return owner.interface_dg_value
 
             def get_all_data(self):
-                return SimpleNamespace(sc_value=0.72)
+                return SimpleNamespace(sc_value=owner.shape_complementarity_value)
 
             def get_interface_packstat(self):
-                return 0.61
+                return owner.packstat_value
 
         def pose_from_pdbstring(pose, text):
             owner.import_calls.append(text)
@@ -226,6 +240,38 @@ def request_for(metrics=None, options=None):
 
 
 class RosettaBackendContractTests(unittest.TestCase):
+    def test_capabilities_are_lazy_and_unavailable_health_is_actionable(self):
+        fake = FakePyRosetta()
+        backend = backend_with(fake)
+
+        capabilities = backend.capabilities()
+
+        self.assertEqual(fake.init_calls, [])
+        self.assertFalse(capabilities["health"]["initialized"])
+
+        unavailable = RosettaBackend.__new__(RosettaBackend)
+        unavailable.init_flags = "-fake-flags"
+        unavailable._pyrosetta = None
+        unavailable._import_error = ImportError("fixture missing")
+        unavailable._initialized = False
+        unavailable._lock = threading.Lock()
+        health = unavailable.health()
+        self.assertFalse(health["available"])
+        self.assertIn("install", health["action"].lower())
+        with self.assertRaises(RosettaUnavailableError):
+            unavailable.analyze(request_for())
+
+    def test_request_validation_has_a_distinct_typed_error(self):
+        fake = FakePyRosetta()
+        backend = backend_with(fake)
+        request = request_for()
+        request["schema_version"] = 999
+
+        with self.assertRaises(RosettaRequestError):
+            backend.analyze(request)
+
+        self.assertEqual(fake.init_calls, [])
+
     def test_initialize_happens_once_across_multiple_requests(self):
         fake = FakePyRosetta()
         backend = backend_with(fake)
@@ -398,6 +444,37 @@ class RosettaBackendContractTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RosettaBackendError, "non-integral count"):
             backend.analyze(request_for(metrics=("bunsat_bound_heavy",)))
+
+    def test_every_continuous_metric_rejects_nonfinite_backend_values(self):
+        cases = (
+            ("cms", "cms_value"),
+            ("interface_dsasa", "interface_dsasa_value"),
+            ("interface_dg", "interface_dg_value"),
+            ("shape_complementarity", "shape_complementarity_value"),
+            ("packstat", "packstat_value"),
+        )
+        for metric, argument in cases:
+            for value in (float("nan"), float("inf"), float("-inf")):
+                with self.subTest(metric=metric, value=value):
+                    fake = FakePyRosetta(**{argument: value})
+                    backend = backend_with(fake)
+                    with self.assertRaisesRegex(
+                        RosettaScientificContractError, "non-finite"
+                    ):
+                        backend.analyze(request_for(metrics=(metric,)))
+
+    def test_bunsat_metrics_require_strict_integer_backend_values(self):
+        cases = (
+            ("bunsat_bound_heavy", "bound_bunsat_value"),
+            ("bunsat_interface_delta", "interface_bunsat_value"),
+        )
+        for metric, argument in cases:
+            for value in (True, 2.5, float("nan"), float("inf")):
+                with self.subTest(metric=metric, value=value):
+                    fake = FakePyRosetta(**{argument: value})
+                    backend = backend_with(fake)
+                    with self.assertRaises(RosettaScientificContractError):
+                        backend.analyze(request_for(metrics=(metric,)))
 
     def test_initialization_failure_is_a_typed_error_and_not_marked_initialized(self):
         fake = FakePyRosetta(init_error=RuntimeError("synthetic init failure"))

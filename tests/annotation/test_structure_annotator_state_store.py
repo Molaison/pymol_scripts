@@ -144,6 +144,98 @@ class StructureAnnotatorStateStoreTests(unittest.TestCase):
             self.assertTrue(first.endswith(".json"))
             self.assertTrue(second.endswith(".json"))
 
+    def test_case_distinct_csv_siblings_preserve_the_exact_legacy_owner(self):
+        with tempfile.TemporaryDirectory() as root:
+            lower = os.path.join(root, "scores.csv")
+            upper = os.path.join(root, "Scores.csv")
+            with open(lower, "w", encoding="utf-8") as handle:
+                handle.write("structure_path,id\na.pdb,a\n")
+
+            legacy_id = csv_dataset_id(lower)
+            legacy_path = write_dataset_state(
+                lower,
+                {
+                    "config": {"label_name": "legacy-review"},
+                    "position": {"index": 0, "entry_id": "legacy-entry"},
+                },
+                source_mode="csv",
+            )
+
+            with open(upper, "w", encoding="utf-8") as handle:
+                handle.write("structure_path,id\nb.pdb,b\n")
+
+            lower_id = csv_dataset_id(lower)
+            upper_id = csv_dataset_id(upper)
+            self.assertNotEqual(lower_id, upper_id)
+            self.assertEqual(lower_id, legacy_id)
+            self.assertNotIn(".case-", lower_id)
+            self.assertIn(".case-", upper_id)
+            self.assertNotEqual(
+                dataset_state_path(lower, source_mode="csv"),
+                dataset_state_path(upper, source_mode="csv"),
+            )
+
+            restored_lower = read_dataset_state(lower, source_mode="csv")
+            self.assertEqual(restored_lower["config"]["label_name"], "legacy-review")
+            self.assertIsNone(read_dataset_state(upper, source_mode="csv"))
+
+            migrated_path = write_dataset_state(
+                lower, restored_lower, source_mode="csv"
+            )
+            self.assertEqual(migrated_path, legacy_path)
+            with open(migrated_path, "r", encoding="utf-8") as handle:
+                self.assertEqual(
+                    json.load(handle)["source"]["csv_path"], lower
+                )
+
+    def test_no_case_collision_keeps_the_legacy_csv_identity(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "Scores.csv")
+            before_creation = csv_dataset_id(path)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("structure_path\na.pdb\n")
+
+            self.assertEqual(csv_dataset_id(path), before_creation)
+            self.assertNotIn(".case-", csv_dataset_id(path))
+
+    def test_identity_marker_blocks_case_variant_from_claiming_deleted_owner(self):
+        with tempfile.TemporaryDirectory() as root:
+            lower = os.path.join(root, "scores.csv")
+            upper = os.path.join(root, "Scores.csv")
+            if os.path.normcase(lower) == os.path.normcase(upper):
+                self.skipTest("filesystem cannot represent case-distinct CSV siblings")
+            with open(lower, "w", encoding="utf-8") as handle:
+                handle.write("structure_path\na.pdb\n")
+            legacy_id = csv_dataset_id(lower)
+            state_path = write_dataset_state(
+                lower,
+                {
+                    "config": {},
+                    "position": {"index": 0, "entry_id": ""},
+                },
+                source_mode="csv",
+            )
+            marker_names = [
+                name
+                for name in os.listdir(os.path.dirname(state_path))
+                if name.endswith(".identity.json")
+            ]
+            self.assertEqual(len(marker_names), 1)
+
+            os.unlink(state_path)
+            os.unlink(lower)
+            with open(upper, "w", encoding="utf-8") as handle:
+                handle.write("structure_path\nb.pdb\n")
+
+            upper_id = csv_dataset_id(upper)
+            self.assertNotEqual(upper_id, legacy_id)
+            self.assertIn(".case-", upper_id)
+
+            with open(lower, "w", encoding="utf-8") as handle:
+                handle.write("structure_path\na.pdb\n")
+            self.assertEqual(csv_dataset_id(lower), legacy_id)
+            self.assertEqual(csv_dataset_id(upper), upper_id)
+
     def test_invalid_entry_cursor_is_rejected_on_write(self):
         with tempfile.TemporaryDirectory() as dataset:
             payload = self._directory_payload()

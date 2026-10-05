@@ -2,7 +2,9 @@ import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 import unittest
+from unittest.mock import Mock, patch
 
+import pymolplugins.remote.client as worker_client
 from pymolplugins.remote.client import WorkerRequestError, worker_request
 
 
@@ -91,6 +93,72 @@ class WorkerClientTests(unittest.TestCase):
         with self.assertRaises(WorkerRequestError) as wrong_schema:
             worker_request("/ok", url=self.url, expected_schema="other/1")
         self.assertEqual(wrong_schema.exception.code, "schema_mismatch")
+
+
+class _MemoryResponse:
+    def __init__(self, body):
+        self.body = body
+        self.headers = {
+            "Content-Type": "application/json",
+            "Content-Length": str(len(body)),
+        }
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self, limit=-1):
+        return self.body if limit < 0 else self.body[:limit]
+
+
+class WorkerClientNoNetworkTests(unittest.TestCase):
+    def test_http_error_retry_policy_respects_scientific_contracts(self):
+        self.assertTrue(worker_client._http_error_retriable("request_timeout", 408))
+        self.assertTrue(worker_client._http_error_retriable("internal_error", 500))
+        self.assertFalse(
+            worker_client._http_error_retriable(
+                "scientific_contract_error", 500
+            )
+        )
+        self.assertFalse(
+            worker_client._http_error_retriable("backend_unavailable", 422)
+        )
+
+    def test_nonfinite_request_is_rejected_before_opening_http(self):
+        with patch.object(worker_client, "build_opener") as opener:
+            with self.assertRaises(WorkerRequestError) as captured:
+                worker_request("/v1/analyze", {"option": float("nan")})
+
+        self.assertEqual(captured.exception.code, "invalid_request")
+        opener.assert_not_called()
+
+    def test_timeout_must_be_finite_and_positive_before_opening_http(self):
+        for value in (False, 0, -1, float("nan"), float("inf")):
+            with self.subTest(value=value), patch.object(
+                worker_client, "build_opener"
+            ) as opener:
+                with self.assertRaisesRegex(ValueError, "timeout"):
+                    worker_request("/v1/health", timeout=value)
+                opener.assert_not_called()
+
+    def test_nonfinite_response_is_rejected_as_non_strict_json(self):
+        responses = (
+            b'{"schema":"fixture/1","metric":NaN}',
+            b'{"schema":"fixture/1","schema":"other/1"}',
+        )
+        for body in responses:
+            with self.subTest(body=body):
+                opener = Mock()
+                opener.open.return_value = _MemoryResponse(body)
+                with patch.object(
+                    worker_client, "build_opener", return_value=opener
+                ):
+                    with self.assertRaises(WorkerRequestError) as captured:
+                        worker_request("/v1/health")
+
+                self.assertEqual(captured.exception.code, "invalid_response")
 
 
 if __name__ == "__main__":

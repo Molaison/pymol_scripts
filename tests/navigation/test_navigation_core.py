@@ -28,23 +28,57 @@ class NavigationSessionTests(unittest.TestCase):
     def test_stride_grid_is_symmetric_across_batch_boundaries(self):
         session = NavigationSession(entries(12), batch_size=5, window_size=2, stride=2)
         self.assertEqual(session.next(), 2)
+        self.assertEqual(session.next(), 3)
         self.assertEqual(session.next(), 5)
+        self.assertEqual(session.previous(), 3)
         self.assertEqual(session.previous(), 2)
         self.assertEqual(session.previous(), 0)
 
+    def test_off_grid_tail_window_is_not_skipped(self):
+        session = NavigationSession(
+            entries(5), batch_size=5, window_size=2, stride=2, wrap=False
+        )
+        covered = set(session.current_indices())
+
+        for expected in (2, 3):
+            self.assertEqual(session.next(), expected)
+            covered.update(session.current_indices())
+
+        self.assertEqual(covered, set(range(5)))
+        self.assertEqual(session.next(), 3)
+
     def test_last_short_batch_has_a_complete_window_when_possible(self):
         session = NavigationSession(entries(13), batch_size=5, window_size=3, stride=1)
-        session.goto(12)
+        session.next_batch()
+        session.next_batch()
         self.assertEqual(session.cursor, 10)
         self.assertEqual(session.current_indices(), (10, 11, 12))
+
+    def test_goto_keeps_the_exact_requested_entry_even_at_a_window_tail(self):
+        session = NavigationSession(entries(13), batch_size=5, window_size=3)
+
+        session.goto(12)
+
+        self.assertEqual(session.cursor, 12)
+        self.assertEqual(session.current_indices(), (12,))
+        self.assertEqual(session.pin(), "e12")
 
     def test_non_wrapping_boundaries(self):
         session = NavigationSession(entries(4), batch_size=4, window_size=2, wrap=False)
         session.goto(3)
-        self.assertEqual(session.cursor, 2)
-        self.assertEqual(session.next(), 2)
+        self.assertEqual(session.cursor, 3)
+        self.assertEqual(session.next(), 3)
         session.goto(0)
         self.assertEqual(session.previous(), 0)
+
+    def test_nonwrapping_batch_boundaries_do_not_jump_within_the_same_batch(self):
+        session = NavigationSession(
+            entries(10), batch_size=5, window_size=2, wrap=False
+        )
+        session.goto(7)
+        self.assertEqual(session.next_batch(), 7)
+        session.goto(2)
+        self.assertEqual(session.previous_batch(), 2)
 
     def test_pins_are_visible_without_changing_cursor(self):
         session = NavigationSession(entries(8), batch_size=4, window_size=1)

@@ -27,6 +27,8 @@ class FakeCmd:
         }
         self.groups = {"assembly": ["driver", "peer", "slab"]}
         self.ttt = {name: None for name in self.types if name != "assembly"}
+        self.set_calls = []
+        self.fail_set_counts = {}
 
     def get_names(self, mode="all", enabled_only=0, selection=""):
         if selection in self.groups:
@@ -54,6 +56,11 @@ class FakeCmd:
         return self.ttt[name]
 
     def set_object_ttt(self, name, ttt, quiet=1):
+        self.set_calls.append(name)
+        remaining = self.fail_set_counts.get(name, 0)
+        if remaining:
+            self.fail_set_counts[name] = remaining - 1
+            raise RuntimeError(f"injected set failure for {name}")
         self.ttt[name] = tuple(float(value) for value in ttt)
 
     def add_object(self, name, object_type="object:cgo", group="assembly"):
@@ -183,8 +190,10 @@ class GroupFollowTests(unittest.TestCase):
         )
 
         rebased = group_follow.pp_follow_rebase()
-        self.assertEqual(rebased["status"], "armed")
+        self.assertEqual(rebased["status"], "rebased")
         self.assertEqual(rebased["apply_count"], 0)
+        self.assertEqual(rebased["previous_apply_count"], 2)
+        self.assertTrue(rebased["undo_baseline_replaced"])
         post_rebase_delta = compose_rigid(
             (0, 1, 0, -1, 0, 0, 0, 0, 1),
             (-3, 5, 0),
@@ -207,6 +216,172 @@ class GroupFollowTests(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("changed outside", result["error"])
 
+    def test_active_session_requires_explicit_replace(self):
+        first = group_follow.pp_follow_arm("driver", group="assembly")
+        old_session = group_follow._SESSION
+
+        refused = group_follow.pp_follow_arm("peer", group="assembly")
+
+        self.assertEqual(first["status"], "armed")
+        self.assertEqual(refused["status"], "error")
+        self.assertIn("already armed", refused["error"])
+        self.assertIs(group_follow._SESSION, old_session)
+        self.assertEqual(group_follow._SESSION.driver, "driver")
+
+        replaced = group_follow.pp_follow_arm(
+            "peer", group="assembly", replace=1
+        )
+        self.assertEqual(replaced["status"], "armed")
+        self.assertTrue(replaced["replaced"])
+        self.assertFalse(replaced["discarded_undo_baseline"])
+        self.assertEqual(group_follow._SESSION.driver, "peer")
+
+    def test_replacing_applied_session_reports_discarded_undo_baseline(self):
+        group_follow.pp_follow_arm("driver", group="assembly")
+        self.fake.ttt["driver"] = homogeneous_to_ttt(
+            compose_rigid(
+                (1, 0, 0, 0, 1, 0, 0, 0, 1),
+                (3, 0, 0),
+            )
+        )
+        self.assertEqual(group_follow.pp_follow_apply()["status"], "applied")
+
+        replaced = group_follow.pp_follow_arm(
+            "peer", group="assembly", replace=1
+        )
+
+        self.assertEqual(replaced["status"], "armed")
+        self.assertEqual(replaced["replaced_apply_count"], 1)
+        self.assertTrue(replaced["discarded_undo_baseline"])
+
+    def test_expected_user_errors_are_structured_without_tracebacks(self):
+        group_follow.pp_follow_arm("driver", group="assembly")
+        with patch.object(group_follow.traceback, "print_exc") as print_exc:
+            active = group_follow.pp_follow_arm("peer", group="assembly")
+        self.assertEqual(active["error_code"], "follow_session_active")
+        self.assertTrue(active["scene_preserved"])
+        self.assertIn("replace=1", active["guidance"])
+        print_exc.assert_not_called()
+
+    def test_automatic_group_inference_prefers_direct_parent_over_ancestor(self):
+        self.fake.types.update(
+            {
+                "inner": "object:group",
+                "outer": "object:group",
+            }
+        )
+        self.fake.groups = {
+            "inner": ["driver", "peer"],
+            "outer": ["inner"],
+        }
+        result = group_follow.pp_follow_arm("driver")
+
+        self.assertEqual(result["status"], "armed")
+        self.assertEqual(result["group"], "inner")
+        self.assertTrue(result["group_inferred"])
+        self.assertEqual(result["group_candidates"], ["inner", "outer"])
+        self.assertEqual(result["followers"], ["peer"])
+
+    def test_automatic_group_inference_is_visible_in_status(self):
+        result = group_follow.pp_follow_arm("driver")
+
+        self.assertEqual(result["status"], "armed")
+        self.assertTrue(result["group_inferred"])
+        self.assertEqual(result["group_candidates"], ["assembly"])
+        self.assertIn("pp_follow_apply", result["next_command"])
+
+    def test_failed_replacement_preserves_old_session_and_undo(self):
+        group_follow.pp_follow_arm("driver", group="assembly")
+        old_session = group_follow._SESSION
+        delta = compose_rigid(
+            (1, 0, 0, 0, 1, 0, 0, 0, 1),
+            (5, -2, 1),
+        )
+        self.fake.ttt["driver"] = homogeneous_to_ttt(delta)
+        self.assertEqual(group_follow.pp_follow_apply()["status"], "applied")
+        expected_before_failure = dict(old_session.expected_h)
+
+        failed = group_follow.pp_follow_arm(
+            "missing_driver", group="assembly", replace=1
+        )
+
+        self.assertEqual(failed["status"], "error")
+        self.assertIs(group_follow._SESSION, old_session)
+        self.assertEqual(old_session.apply_count, 1)
+        self.assertEqual(old_session.expected_h, expected_before_failure)
+        undone = group_follow.pp_follow_undo()
+        self.assertEqual(undone["status"], "restored")
+        self.assert_matrix_close(
+            ttt_to_homogeneous(self.fake.ttt["driver"]), identity4()
+        )
+
+    def test_identity_driver_delta_is_a_no_change_without_follower_writes(self):
+        group_follow.pp_follow_arm("driver", group="assembly")
+        before = dict(self.fake.ttt)
+        self.fake.set_calls.clear()
+
+        result = group_follow.pp_follow_apply()
+
+        self.assertEqual(result["status"], "no_change")
+        self.assertEqual(result["followers"], [])
+        self.assertEqual(result["apply_count"], 0)
+        self.assertEqual(self.fake.set_calls, [])
+        self.assertEqual(self.fake.ttt, before)
+
+    def test_repeated_apply_without_new_driver_motion_is_no_change(self):
+        group_follow.pp_follow_arm("driver", group="assembly")
+        delta = compose_rigid(
+            (1, 0, 0, 0, 1, 0, 0, 0, 1),
+            (2, 0, 0),
+        )
+        self.fake.ttt["driver"] = homogeneous_to_ttt(delta)
+        self.assertEqual(group_follow.pp_follow_apply()["status"], "applied")
+        before = dict(self.fake.ttt)
+        self.fake.set_calls.clear()
+
+        result = group_follow.pp_follow_apply()
+
+        self.assertEqual(result["status"], "no_change")
+        self.assertEqual(result["apply_count"], 1)
+        self.assertEqual(self.fake.set_calls, [])
+        self.assertEqual(self.fake.ttt, before)
+
+    def test_no_change_still_detects_an_external_follower_edit(self):
+        group_follow.pp_follow_arm("driver", group="assembly")
+        self.fake.ttt["peer"] = homogeneous_to_ttt(
+            compose_rigid(
+                (1, 0, 0, 0, 1, 0, 0, 0, 1),
+                (9, 0, 0),
+            )
+        )
+        self.fake.set_calls.clear()
+
+        result = group_follow.pp_follow_apply()
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("changed outside", result["error"])
+        self.assertEqual(self.fake.set_calls, [])
+
+    def test_returning_driver_to_baseline_restores_followers(self):
+        group_follow.pp_follow_arm("driver", group="assembly")
+        delta = compose_rigid(
+            (1, 0, 0, 0, 1, 0, 0, 0, 1),
+            (6, 0, 0),
+        )
+        self.fake.ttt["driver"] = homogeneous_to_ttt(delta)
+        self.assertEqual(group_follow.pp_follow_apply()["status"], "applied")
+        self.fake.ttt["driver"] = homogeneous_to_ttt(identity4())
+
+        result = group_follow.pp_follow_apply()
+
+        self.assertEqual(result["status"], "applied")
+        self.assert_matrix_close(
+            ttt_to_homogeneous(self.fake.ttt["peer"]), identity4()
+        )
+        self.assert_matrix_close(
+            ttt_to_homogeneous(self.fake.ttt["slab"]), identity4()
+        )
+
     def test_undo_restores_driver_and_followers(self):
         initial_driver = compose_rigid((1, 0, 0, 0, 1, 0, 0, 0, 1), (2, 3, 4))
         initial_peer = compose_rigid((1, 0, 0, 0, 1, 0, 0, 0, 1), (-2, 1, 5))
@@ -219,6 +394,33 @@ class GroupFollowTests(unittest.TestCase):
         self.assertEqual(result["status"], "restored")
         self.assertEqual(self.fake.ttt["driver"], homogeneous_to_ttt(initial_driver))
         self.assertEqual(self.fake.ttt["peer"], homogeneous_to_ttt(initial_peer))
+
+    def test_undo_set_failure_rolls_back_every_attempted_object(self):
+        group_follow.pp_follow_arm("driver", group="assembly")
+        delta = compose_rigid(
+            (1, 0, 0, 0, 1, 0, 0, 0, 1),
+            (4, 5, 6),
+        )
+        self.fake.ttt["driver"] = homogeneous_to_ttt(delta)
+        self.assertEqual(group_follow.pp_follow_apply()["status"], "applied")
+        before = {
+            name: ttt_to_homogeneous(value)
+            for name, value in self.fake.ttt.items()
+        }
+        old_expected = dict(group_follow._SESSION.expected_h)
+        self.fake.fail_set_counts["peer"] = 1
+
+        result = group_follow.pp_follow_undo()
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("injected set failure", result["error"])
+        self.assertEqual(result["rollback_failures"], [])
+        self.assertEqual(group_follow._SESSION.apply_count, 1)
+        self.assertEqual(group_follow._SESSION.expected_h, old_expected)
+        for name, expected in before.items():
+            self.assert_matrix_close(
+                ttt_to_homogeneous(self.fake.ttt[name]), expected
+            )
 
     def test_stale_undo_refuses_driver_and_follower_changes_unless_forced(self):
         group_follow.pp_follow_arm("driver", group="assembly")
@@ -336,6 +538,151 @@ class GroupFollowTests(unittest.TestCase):
         self.assert_matrix_close(
             ttt_to_homogeneous(self.fake.ttt["slab"]),
             slab_baseline,
+        )
+
+    def test_callback_apply_failure_replays_previous_state(self):
+        slab_baseline = compose_rigid(
+            (1, 0, 0, 0, 1, 0, 0, 0, 1),
+            (0, 3, 0),
+        )
+        self.fake.ttt["slab"] = homogeneous_to_ttt(slab_baseline)
+        operations = []
+
+        def rebuild(name, delta, context):
+            operations.append(context["operation"])
+            self.fake.ttt[name] = homogeneous_to_ttt(
+                mat4_multiply(delta, slab_baseline)
+            )
+            if context["operation"] == "apply":
+                raise RuntimeError("injected callback apply failure")
+
+        group_follow.register_callback_owned_object("slab", rebuild)
+        group_follow.pp_follow_arm(
+            "driver", group="assembly", cgo_policy="rebuild"
+        )
+        delta = compose_rigid(
+            (1, 0, 0, 0, 1, 0, 0, 0, 1),
+            (7, 0, 0),
+        )
+        self.fake.ttt["driver"] = homogeneous_to_ttt(delta)
+        before = {
+            name: ttt_to_homogeneous(value)
+            for name, value in self.fake.ttt.items()
+        }
+
+        result = group_follow.pp_follow_apply()
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["rollback_failures"], [])
+        self.assertEqual(operations, ["apply", "rollback"])
+        self.assertEqual(group_follow._SESSION.apply_count, 0)
+        for name, expected in before.items():
+            self.assert_matrix_close(
+                ttt_to_homogeneous(self.fake.ttt[name]), expected
+            )
+
+    def test_lost_callback_hook_is_rejected_before_follower_writes(self):
+        def rebuild(name, delta, context):
+            self.fake.ttt[name] = homogeneous_to_ttt(delta)
+
+        group_follow.register_callback_owned_object("slab", rebuild)
+        group_follow.pp_follow_arm(
+            "driver", group="assembly", cgo_policy="rebuild"
+        )
+        group_follow.unregister_callback_owned_object("slab")
+        self.fake.ttt["driver"] = homogeneous_to_ttt(
+            compose_rigid(
+                (1, 0, 0, 0, 1, 0, 0, 0, 1),
+                (8, 0, 0),
+            )
+        )
+        before = dict(self.fake.ttt)
+        self.fake.set_calls.clear()
+
+        result = group_follow.pp_follow_apply()
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("lost their rebuild hooks", result["error"])
+        self.assertEqual(result["rollback_failures"], [])
+        self.assertEqual(self.fake.set_calls, [])
+        self.assertEqual(self.fake.ttt, before)
+
+    def test_callback_undo_failure_rolls_back_driver_and_all_followers(self):
+        slab_baseline = compose_rigid(
+            (1, 0, 0, 0, 1, 0, 0, 0, 1),
+            (0, 2, 0),
+        )
+        self.fake.ttt["slab"] = homogeneous_to_ttt(slab_baseline)
+        fail_undo = {"value": False}
+        operations = []
+
+        def rebuild(name, delta, context):
+            operations.append(context["operation"])
+            self.fake.ttt[name] = homogeneous_to_ttt(
+                mat4_multiply(delta, slab_baseline)
+            )
+            if context["operation"] == "undo" and fail_undo["value"]:
+                group_follow.unregister_callback_owned_object(name)
+                raise RuntimeError("injected callback undo failure")
+
+        group_follow.register_callback_owned_object("slab", rebuild)
+        group_follow.pp_follow_arm(
+            "driver", group="assembly", cgo_policy="rebuild"
+        )
+        delta = compose_rigid(
+            (1, 0, 0, 0, 1, 0, 0, 0, 1),
+            (3, 4, 0),
+        )
+        self.fake.ttt["driver"] = homogeneous_to_ttt(delta)
+        self.assertEqual(group_follow.pp_follow_apply()["status"], "applied")
+        before = {
+            name: ttt_to_homogeneous(value)
+            for name, value in self.fake.ttt.items()
+        }
+        old_expected = dict(group_follow._SESSION.expected_h)
+        fail_undo["value"] = True
+
+        result = group_follow.pp_follow_undo()
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["rollback_failures"], [])
+        self.assertEqual(operations[-2:], ["undo", "rollback"])
+        self.assertEqual(group_follow._SESSION.apply_count, 1)
+        self.assertEqual(group_follow._SESSION.expected_h, old_expected)
+        for name, expected in before.items():
+            self.assert_matrix_close(
+                ttt_to_homogeneous(self.fake.ttt[name]), expected
+            )
+
+    def test_callback_rollback_failure_is_reported(self):
+        slab_baseline = identity4()
+
+        def rebuild(name, delta, context):
+            self.fake.ttt[name] = homogeneous_to_ttt(
+                mat4_multiply(delta, slab_baseline)
+            )
+            if context["operation"] in {"undo", "rollback"}:
+                raise RuntimeError(
+                    f"injected callback {context['operation']} failure"
+                )
+
+        group_follow.register_callback_owned_object("slab", rebuild)
+        group_follow.pp_follow_arm(
+            "driver", group="assembly", cgo_policy="rebuild"
+        )
+        delta = compose_rigid(
+            (1, 0, 0, 0, 1, 0, 0, 0, 1),
+            (1, 0, 0),
+        )
+        self.fake.ttt["driver"] = homogeneous_to_ttt(delta)
+        self.assertEqual(group_follow.pp_follow_apply()["status"], "applied")
+
+        result = group_follow.pp_follow_undo()
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(
+            [item["object"] for item in result["rollback_failures"]],
+            ["slab"],
         )
 
     def test_axes_overlay_auto_registers_and_is_safely_skipped_by_default(self):

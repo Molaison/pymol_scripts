@@ -10,10 +10,12 @@ recorded as manual; they are never converted into automatic passes.
 from __future__ import annotations
 
 import csv
+import contextlib
 import datetime
 import hashlib
 import importlib
 import importlib.util
+import io
 import json
 import math
 import os
@@ -30,7 +32,7 @@ from pymol.cgo import COLOR, SPHERE
 
 
 SCHEMA = "pymolplugins.host-smoke/1.0"
-HARNESS_VERSION = "1.3.0"
+HARNESS_VERSION = "1.6.0"
 PREFIX_ROOT = "pphs"
 TRANSLATION = (1.25, -2.0, 0.5)
 MATRIX_MODES = (0, 1, 2)
@@ -330,12 +332,80 @@ def _load_plugin_entry(suite: HostSmokeSuite) -> Dict[str, Any]:
     loaded = module.pp_load()
     check_worker = _env_bool("PP_HOST_SMOKE_CHECK_WORKER", False)
     doctor = module.pp_doctor(check_worker=int(check_worker))
+    help_default = module.pp_help()
+    help_command = module.pp_help("pp_nav_start")
+    help_fuzzy = module.pp_help("navg")
+    help_surface = module.pp_help("surface")
+    help_preset = module.pp_help("publication")
+    help_intents = {
+        query: module.pp_help(query)
+        for query in (
+            "ligand contacts", "group batch", "导航", "表面", "对齐", "配体接触"
+        )
+    }
+    help_no_match = module.pp_help("!!!")
     _require(not loaded.get("errors"), "canonical plugin modules failed to load", loaded)
+    _require(
+        loaded.get("status") == "ok",
+        "plugin modules loaded but command ownership verification failed",
+        loaded,
+    )
     _require(not doctor.get("missing_required_api"), "required Host PyMOL APIs are missing", doctor)
     _require(
         not doctor.get("missing_commands"),
         "canonical command manifest is incomplete in Host PyMOL",
         doctor,
+    )
+    _require(
+        not doctor.get("missing_compat_commands")
+        and not doctor.get("overridden_commands")
+        and not doctor.get("undeclared_commands")
+        and all((doctor.get("compat_commands") or {}).values()),
+        "declared canonical/compat command ownership is incomplete or conflicted",
+        {
+            "missing_compat_commands": doctor.get("missing_compat_commands"),
+            "overridden_commands": doctor.get("overridden_commands"),
+            "undeclared_commands": doctor.get("undeclared_commands"),
+            "compat_commands": doctor.get("compat_commands"),
+        },
+    )
+    required_help_fields = {
+        "purpose", "minimal_usage", "example", "mutates", "undo", "next"
+    }
+    _require(
+        8 <= len(help_default.get("tasks") or []) <= 12
+        and required_help_fields.issubset(help_command["matches"][0])
+        and help_command["matches"][0]["name"] == "pp_nav_start"
+        and "pp_nav" in help_fuzzy["matches"][0]["example"]
+        and "surface" in help_surface["matches"][0]["example"]
+        and help_preset["matches"][0]["name"] == "publication_light",
+        "task/command/fuzzy/preset help contract is incomplete",
+        {
+            "default": help_default,
+            "command": help_command,
+            "fuzzy": help_fuzzy,
+            "surface": help_surface,
+            "preset": help_preset,
+        },
+    )
+    expected_intents = {
+        "ligand contacts": {"interactions", "pp_contacts"},
+        "group batch": {"navigate", "pp_nav"},
+        "导航": {"navigate", "pp_nav"},
+        "表面": {"surface", "pp_show"},
+        "对齐": {"align", "pp_align"},
+        "配体接触": {"interactions", "pp_contacts"},
+    }
+    _require(
+        all(
+            (value.get("matches") or [{}])[0].get("name")
+            in expected_intents[query]
+            for query, value in help_intents.items()
+        )
+        and help_no_match.get("status") == "no_match"
+        and not help_no_match.get("tasks"),
+        "Unicode/token-complete help intent ranking failed",
+        {"intents": help_intents, "no_match": help_no_match},
     )
     keyword = getattr(cmd, "keyword", {})
     unadapted = {}
@@ -376,7 +446,17 @@ def _load_plugin_entry(suite: HostSmokeSuite) -> Dict[str, Any]:
         "api": doctor.get("api"),
         "canonical_command_count": len(doctor.get("commands") or {}),
         "console_adapted_command_count": len(doctor.get("commands") or {}),
+        "declared_compat_command_count": len(doctor.get("compat_commands") or {}),
         "missing_commands": doctor.get("missing_commands"),
+        "missing_compat_commands": doctor.get("missing_compat_commands"),
+        "overridden_commands": doctor.get("overridden_commands"),
+        "undeclared_commands": doctor.get("undeclared_commands"),
+        "help_task_count": len(help_default.get("tasks") or []),
+        "help_catalog_schema": help_default.get("catalog_schema"),
+        "help_intents": {
+            query: (value.get("matches") or [{}])[0].get("name")
+            for query, value in help_intents.items()
+        },
         "repository_root_is_unc": doctor.get("repository_root_is_unc"),
         "wsl_distro": doctor.get("wsl_distro"),
         "worker_checked": check_worker,
@@ -568,9 +648,96 @@ def _navigation_check(suite: HostSmokeSuite) -> Dict[str, Any]:
         stopped = navigation.pp_nav_stop()
         snapshots["stop"] = _json_safe(stopped)
     _enabled_assertions(_names(True), group_a_leaves + group_b_leaves + [overlay], [])
+
+    root_c = suite.name("root_group_c")
+    root_d = suite.name("root_group_d")
+    object_c = suite.name("root_group_c_object")
+    object_d = suite.name("root_group_d_object")
+    cmd.pseudoatom(object_c, name="CA", resn="GLY", resi="1", chain="G", elem="C", pos=[8, 0, 0])
+    cmd.pseudoatom(object_d, name="CA", resn="GLY", resi="1", chain="H", elem="C", pos=[12, 0, 0])
+    cmd.group(root_c, object_c)
+    cmd.group(root_d, object_d)
+    batch_entries = [root_a, root_b, root_c, root_d]
+    first_batch_leaves = group_a_leaves + group_b_leaves
+    second_batch_leaves = [object_c, object_d]
+    for name in first_batch_leaves + second_batch_leaves + [overlay]:
+        cmd.enable(name)
+    try:
+        batch_command = (
+            'pp_nav_start source=groups, entries="%s", batch_size=2, '
+            'window_size=2, stride=1, wrap=0, bind_keys=0, zoom_policy=none'
+            % ",".join(batch_entries)
+        )
+        cmd.do(batch_command)
+        batch_started = navigation.pp_nav_status(quiet=1)
+        expected_entry_ids = ["group:%s" % name for name in batch_entries]
+        _require(
+            batch_started.get("current_entry_ids") == expected_entry_ids[:2]
+            and set(batch_started.get("visible_names") or ()) == set(first_batch_leaves),
+            "group navigation did not expose the complete first batch",
+            {"command": batch_command, "status": batch_started},
+        )
+        _enabled_assertions(
+            _names(True), first_batch_leaves + [overlay], second_batch_leaves
+        )
+
+        next_batch = navigation.pp_nav_next_batch()
+        _require(
+            next_batch.get("current_entry_ids") == expected_entry_ids[2:]
+            and set(next_batch.get("visible_names") or ()) == set(second_batch_leaves),
+            "next_batch did not expose the complete second group batch",
+            next_batch,
+        )
+        _enabled_assertions(
+            _names(True), second_batch_leaves + [overlay], first_batch_leaves
+        )
+        boundary_enabled = set(_names(True))
+        next_boundary = navigation.pp_nav_next_batch()
+        _require(
+            next_boundary.get("status") == "boundary"
+            and next_boundary.get("no_change") is True
+            and set(_names(True)) == boundary_enabled,
+            "non-wrapping next_batch boundary changed or replayed the scene",
+            next_boundary,
+        )
+
+        previous_batch = navigation.pp_nav_prev_batch()
+        _require(
+            previous_batch.get("current_entry_ids") == expected_entry_ids[:2]
+            and set(previous_batch.get("visible_names") or ()) == set(first_batch_leaves),
+            "prev_batch did not restore the complete first group batch",
+            previous_batch,
+        )
+        _enabled_assertions(
+            _names(True), first_batch_leaves + [overlay], second_batch_leaves
+        )
+        boundary_enabled = set(_names(True))
+        previous_boundary = navigation.pp_nav_prev_batch()
+        _require(
+            previous_boundary.get("status") == "boundary"
+            and previous_boundary.get("no_change") is True
+            and set(_names(True)) == boundary_enabled,
+            "non-wrapping prev_batch boundary changed or replayed the scene",
+            previous_boundary,
+        )
+        snapshots["group_batches"] = {
+            "command": batch_command,
+            "first": _json_safe(batch_started),
+            "second": _json_safe(next_batch),
+            "next_boundary": _json_safe(next_boundary),
+            "restored_first": _json_safe(previous_batch),
+            "previous_boundary": _json_safe(previous_boundary),
+        }
+    finally:
+        batch_stopped = navigation.pp_nav_stop()
+        snapshots["batch_stop"] = _json_safe(batch_stopped)
+    _enabled_assertions(
+        _names(True), first_batch_leaves + second_batch_leaves + [overlay], []
+    )
     return {
         "root_a_leaves": group_a_leaves,
         "root_b_leaves": group_b_leaves,
+        "batch_entries": batch_entries,
         "snapshots": snapshots,
     }
 
@@ -606,6 +773,53 @@ def _target_iteration_check(suite: HostSmokeSuite) -> Dict[str, Any]:
     ]
     for name in leaves + [overlay]:
         cmd.enable(name)
+
+    molecule_leaves = [
+        suite.fixtures[role]
+        for role in ("driver", "multistate", "root_a_extra")
+    ]
+    default_applied = targets.pp_foreach(
+        root,
+        "show surface,{target}",
+        quiet=1,
+    )
+    _require(
+        default_applied.get("status") == "applied"
+        and default_applied.get("committed") is True
+        and default_applied.get("group_mode") == "molecules"
+        and set(default_applied.get("executed_targets") or ()) == set(molecule_leaves)
+        and not any(name.startswith("ppfe_ack_") for name in _names()),
+        "original pp_foreach command did not execute once per molecule by default",
+        default_applied,
+    )
+
+    enabled_before_preview = set(_names(True))
+    preview_output = io.StringIO()
+    with contextlib.redirect_stdout(preview_output):
+        explicit_preview = targets.pp_foreach(
+            root,
+            "disable {target}",
+            group_mode="leaves",
+            commit=0,
+        )
+    preview_text = preview_output.getvalue()
+    _require(
+        explicit_preview.get("status") == "preview"
+        and explicit_preview.get("committed") is False
+        and not explicit_preview.get("attempted_targets")
+        and not explicit_preview.get("executed_targets")
+        and set(_names(True)) == enabled_before_preview
+        and "Preview only; nothing changed" in preview_text
+        and "Apply:" in preview_text
+        and "commit=1" in str(explicit_preview.get("commit_hint") or ""),
+        "explicit foreach preview mutated the scene or omitted its next action",
+        {
+            "result": explicit_preview,
+            "output": preview_text,
+            "enabled_before": sorted(enabled_before_preview),
+            "enabled_after": sorted(_names(True)),
+        },
+    )
     preview = targets.pp_foreach(
         root,
         "disable {target}",
@@ -670,6 +884,106 @@ def _target_iteration_check(suite: HostSmokeSuite) -> Dict[str, Any]:
     )
     cmd.enable(suite.fixtures["root_a_extra"])
 
+    regex_targets = [driver, suite.fixtures["other"]]
+    for name in regex_targets:
+        cmd.enable(name)
+    quoted_regex = "^%s(?:driver|other) {0,0}$" % suite.prefix
+    quoted_regex_command = (
+        'pp_foreach "%s", "disable {target}", match=regex, kinds=object, '
+        "commit=1, quiet=1" % quoted_regex
+    )
+    cmd.do(quoted_regex_command)
+    enabled = set(_names(True))
+    _require(
+        not (set(regex_targets) & enabled) and overlay in enabled,
+        "quoted regex with whitespace/comma quantifier was split by the console parser",
+        {
+            "command": quoted_regex_command,
+            "regex": quoted_regex,
+            "expected_targets": regex_targets,
+            "enabled": sorted(enabled),
+        },
+    )
+    _require(
+        set(_names()) == names_before_commit
+        and not any(name.startswith("ppfe_ack_") for name in _names()),
+        "quoted regex foreach left a parser completion marker",
+        {"before": sorted(names_before_commit), "after": sorted(_names())},
+    )
+    for name in regex_targets:
+        cmd.enable(name)
+
+    partial_effect = targets.pp_foreach(
+        driver,
+        "disable {target}; pp_foreach_command_does_not_exist",
+        match="exact",
+        kinds="object",
+        commit=1,
+        quiet=1,
+    )
+    _require(
+        partial_effect.get("status") == "partial_error"
+        and partial_effect.get("attempted_targets") == [driver]
+        and not partial_effect.get("executed_targets")
+        and partial_effect.get("possibly_modified_targets") == [driver]
+        and partial_effect.get("partial_side_effect_possible") is True
+        and (partial_effect.get("errors") or [{}])[0].get("side_effects_possible") is True
+        and driver not in set(_names(True))
+        and set(_names()) == names_before_commit
+        and not any(name.startswith("ppfe_ack_") for name in _names()),
+        "foreach hid a partial side effect behind an empty executed-target list",
+        partial_effect,
+    )
+    cmd.enable(driver)
+
+    fuzzy_alpha = suite.name("fuzzy_mutation_alpha")
+    fuzzy_alfa = suite.name("fuzzy_mutation_alfa")
+    cmd.create(fuzzy_alpha, driver, 1, 1, quiet=1)
+    cmd.create(fuzzy_alfa, driver, 1, 1, quiet=1)
+    fuzzy_batch_query = suite.prefix + "fuzzy_mutation_alpa"
+    fuzzy_batch_names = {fuzzy_alpha, fuzzy_alfa}
+    refused_fuzzy = targets.pp_foreach(
+        fuzzy_batch_query,
+        "disable {target}",
+        match="fuzzy",
+        kinds="object",
+        fuzzy_cutoff=0.95,
+        limit=2,
+        commit=1,
+        quiet=1,
+    )
+    _require(
+        refused_fuzzy.get("status") == "error"
+        and refused_fuzzy.get("error_code") == "ambiguous_fuzzy_match"
+        and refused_fuzzy.get("scene_preserved") is True
+        and not refused_fuzzy.get("attempted_targets")
+        and fuzzy_batch_names.issubset(set(_names(True))),
+        "ambiguous fuzzy mutation was not refused before dispatch",
+        refused_fuzzy,
+    )
+    approved_fuzzy = targets.pp_foreach(
+        fuzzy_batch_query,
+        "disable {target}",
+        match="fuzzy",
+        kinds="object",
+        fuzzy_cutoff=0.95,
+        limit=2,
+        commit=1,
+        all_matches=1,
+        quiet=1,
+    )
+    _require(
+        approved_fuzzy.get("status") == "applied"
+        and set(approved_fuzzy.get("executed_targets") or ()) == fuzzy_batch_names
+        and not (fuzzy_batch_names & set(_names(True)))
+        and not any(name.startswith("ppfe_ack_") for name in _names()),
+        "all_matches=1 did not apply the intentional fuzzy batch",
+        dict(approved_fuzzy, enabled=sorted(_names(True)),
+             completion_markers=[name for name in _names() if name.startswith("ppfe_ack_")]),
+    )
+    for name in fuzzy_batch_names:
+        cmd.enable(name)
+
     names_before_errors = set(_names())
     parser_error = targets.pp_foreach(
         root,
@@ -715,17 +1029,209 @@ def _target_iteration_check(suite: HostSmokeSuite) -> Dict[str, Any]:
         "fuzzy_query": fuzzy_query,
         "fuzzy_match": fuzzy.get("matches", []),
         "group": root,
+        "default_execution": {
+            "command": "pp_foreach %s, \"show surface,{target}\"" % root,
+            "group_mode": default_applied.get("group_mode"),
+            "executed_targets": default_applied.get("executed_targets"),
+        },
+        "explicit_preview": {
+            "status": explicit_preview.get("status"),
+            "command_count": len(explicit_preview.get("commands") or ()),
+            "commit_hint": explicit_preview.get("commit_hint"),
+            "message": preview_text.splitlines()[0] if preview_text else "",
+        },
         "expanded_targets": preview.get("expanded_targets", preview.get("commands", [])),
         "command_count": len(leaves),
         "console_commands": {
             "quoted_group": console_command,
             "quoted_glob": quoted_glob_command,
+            "quoted_regex": quoted_regex_command,
+        },
+        "regex_scalar": {
+            "pattern": quoted_regex,
+            "targets": regex_targets,
+        },
+        "partial_side_effect": {
+            "attempted_targets": partial_effect.get("attempted_targets"),
+            "executed_targets": partial_effect.get("executed_targets"),
+            "possibly_modified_targets": partial_effect.get(
+                "possibly_modified_targets"
+            ),
+            "partial_side_effect_possible": partial_effect.get(
+                "partial_side_effect_possible"
+            ),
+        },
+        "fuzzy_mutation_guard": {
+            "query": fuzzy_batch_query,
+            "targets": sorted(fuzzy_batch_names),
+            "refused_error_code": refused_fuzzy.get("error_code"),
+            "approved_targets": approved_fuzzy.get("executed_targets"),
         },
         "parser_error_policy": {
             "stop_error_count": len(parser_error.get("errors", [])),
             "continue_error_count": len(command_errors.get("errors", [])),
             "completion_check": "same-line parser sentinel",
         },
+    }
+
+
+def _target_syntax_check(suite: HostSmokeSuite) -> Dict[str, Any]:
+    targets = importlib.import_module("pymolplugins.targets.commands")
+    driver, other = suite.fixtures["driver"], suite.fixtures["other"]
+    pattern = "^%s(?:driver|other)[0-9]{0,0}$" % suite.prefix
+    command = ("pp_foreach targets='%s', command=\"disable {target}; color marine, {target}\", "
+               "match=regex, kinds=object, quiet=1; enable %s" % (pattern, driver))
+    targets._execute_checked(cmd, command)
+    _require(driver in _names(True) and other not in _names(True),
+             "literal registration lost an inner or following command")
+    colors = set()
+    cmd.iterate(driver + " or " + other, "colors.add(color)", space={"colors": colors})
+    _require(colors == {cmd.get_color_index("marine")}, "quoted template lost its second command")
+    targets._execute_checked(cmd, "pp_target_resolve targets='%s', match=regex, kinds=object, quiet=1" % pattern)
+    before = set(_names())
+    rejected = False
+    try:
+        targets._execute_checked(cmd, 'pp_foreach "unterminated')
+    except targets.ForeachCommandError:
+        rejected = True
+    targets._execute_checked(cmd, "enable " + other)
+    _require(rejected and set(_names()) == before and not targets._PENDING_EXECUTIONS,
+             "invalid literal input mutated the scene or retained an acknowledgement")
+    return {"quoted_regex": pattern, "inner_and_following_semicolons": "passed",
+            "keyword_binding": "passed", "invalid_quote_and_late_ack": "passed"}
+
+
+def _representation_bits(names: Sequence[str]) -> Dict[str, List[Tuple[int, int]]]:
+    result = {}
+    for name in names:
+        rows = []
+        cmd.iterate(name, "rows.append((index, reps))", space={"rows": rows})
+        result[name] = sorted((int(index), int(reps)) for index, reps in rows)
+    return result
+
+
+def _task_facade_check(suite: HostSmokeSuite) -> Dict[str, Any]:
+    tasks = importlib.import_module("pymolplugins.tasks.commands")
+    targets = importlib.import_module("pymolplugins.targets.commands")
+    root_a = suite.fixtures["root_group_a"]
+    root_b = suite.fixtures["root_group_b"]
+    molecules = [
+        suite.fixtures[role]
+        for role in ("driver", "multistate", "root_a_extra")
+    ]
+    before = _representation_bits(molecules)
+    shown = tasks.pp_show("surface", root_a, mode="hide")
+    _require(
+        shown.get("status") == "changed" and shown.get("operation_id"),
+        "pp_show task facade did not record an undoable mutation",
+        shown,
+    )
+    restored = tasks.pp_undo(shown["operation_id"])
+    after = _representation_bits(molecules)
+    _require(
+        restored.get("status") == "restored" and after == before,
+        "pp_undo did not exactly restore atom representation bits",
+        {"show": shown, "undo": restored, "before": before, "after": after},
+    )
+
+    discrete = suite.name("discrete_show")
+    for state in (1, 2):
+        cmd.read_pdbstr(_ligand_complex_pdb(), discrete, state=state, discrete=1, quiet=1)
+    cmd.hide("everything", discrete)
+    cmd.show("surface", discrete + " and index 1")
+    discrete_before = _representation_bits([discrete])
+    total_atoms = sum(len(cmd.get_model(discrete, state).atom) for state in (1, 2))
+    _require(len(discrete_before[discrete]) == total_atoms, "snapshot omitted discrete-state atoms")
+    discrete_show = tasks.pp_show("surface", discrete)
+    surface_mask = tasks._REPRESENTATION_MASKS["surface"]
+    _require(discrete_show.get("status") == "changed" and all(
+        reps & surface_mask for _, reps in _representation_bits([discrete])[discrete]),
+        "pp_show omitted discrete-state atoms", discrete_show)
+    discrete_undo = tasks.pp_undo(discrete_show["operation_id"])
+    _require(discrete_undo.get("status") == "restored" and
+             _representation_bits([discrete]) == discrete_before,
+             "discrete-state representation undo changed atom visibility", discrete_undo)
+
+    console_show = 'pp_show surface, "%s", preview=1' % root_a
+    console_before = _representation_bits(molecules)
+    operations_before = tasks.journal.list_operations()
+    targets._execute_checked(cmd, console_show)
+    console_after = _representation_bits(molecules)
+    _require(
+        console_after == console_before
+        and tasks.journal.list_operations() == operations_before,
+        "quoted Tier-1 pp_show preview mutated the scene or operation journal",
+        {
+            "command": console_show,
+            "before": console_before,
+            "after": console_after,
+            "operations_before": operations_before,
+            "operations_after": tasks.journal.list_operations(),
+        },
+    )
+    targets._execute_checked(cmd, 'pp_help "导航"')
+
+    console_nav = (
+        'pp_nav groups, "%s,%s", window=2, page=2, wrap=0'
+        % (root_a, root_b)
+    )
+    targets._execute_checked(cmd, console_nav)
+    started = tasks.pp_nav()
+    boundary = tasks.pp_nav("next-page")
+    stopped = tasks.pp_nav("stop")
+    _require(
+        started.get("status") == "status"
+        and started.get("result", {}).get("source") == "groups"
+        and started.get("result", {}).get("count") == 2
+        and boundary.get("result", {}).get("status") == "boundary"
+        and stopped.get("result", {}).get("status") == "stopped",
+        "pp_nav facade did not preserve non-wrapping group navigation semantics",
+        {"start": started, "boundary": boundary, "stop": stopped},
+    )
+
+    source = suite.fixtures["ligand_complex"]
+    # Default CA-anchor tasks need the multi-residue fixture, not the ligand
+    # fixture's single CA atom.
+    anchor_source = suite.fixtures["c3"]
+    alignment = tasks.pp_align(anchor_source, anchor_source, preview=1)
+    orientation = tasks.pp_orient(anchor_source, axis="cyclic", preview=1)
+    contacts = tasks.pp_contacts(
+        source,
+        focus="resn LIG and chain X and resi 501",
+        preview=1,
+    )
+    jobs = tasks.pp_jobs()
+    operations = tasks.pp_undo("list")
+    _require(
+        alignment.get("status") == "preview"
+        and orientation.get("status") == "preview"
+        and contacts.get("status") == "preview"
+        and jobs.get("status") == "listed"
+        and operations.get("status") == "listed",
+        "one or more Tier-1 preview/status facades failed",
+        {
+            "alignment": alignment,
+            "orientation": orientation,
+            "contacts": contacts,
+            "jobs": jobs,
+            "operations": operations,
+        },
+    )
+    return {
+        "show_operation": shown.get("operation_id"),
+        "console_commands": {
+            "show_preview": console_show,
+            "navigation_start": console_nav,
+            "unicode_help": 'pp_help "导航"',
+        },
+        "representation_round_trip": before == after,
+        "discrete_state_atoms": total_atoms,
+        "discrete_state_undo": discrete_undo.get("status"),
+        "navigation_boundary": boundary.get("result", {}).get("status"),
+        "alignment": alignment.get("status"),
+        "orientation": orientation.get("status"),
+        "contacts": contacts.get("status"),
+        "jobs": jobs.get("status"),
     }
 
 
@@ -1282,6 +1788,7 @@ def _interaction_check(suite: HostSmokeSuite) -> Dict[str, Any]:
     ]
     interchain_group = suite.name("interaction_run_interchain")
     ligand_group = suite.name("interaction_run_ligand")
+    contacts_group = suite.name("interaction_run_contacts")
 
     interchain = controller.run(
         "interchain_basic",
@@ -1319,6 +1826,45 @@ def _interaction_check(suite: HostSmokeSuite) -> Dict[str, Any]:
         "all_organic": all_organic,
     })
     ligand_clear = _assert_exact_clear(controller, ligand, sentinels, source)
+
+    contacts = controller.run(
+        "ligand_contacts",
+        source,
+        partner2=ligand_selection,
+        state=1,
+        group=contacts_group,
+        replace=False,
+    )
+    contact_count = len(contacts.result.interactions)
+    _require(contact_count > 0, "Host heavy-atom ligand contact fixture produced no contacts", contacts.result.to_dict())
+    _require(
+        {value.type for value in contacts.result.interactions} == {"close_contact"},
+        "ligand_contacts emitted an unexpected interaction type",
+        contacts.result.to_dict(),
+    )
+    carrier = next(
+        entry.name
+        for entry in contacts.manifest.created
+        if entry.role == "manifest_carrier"
+    )
+    persisted_manifest = interactions._read_scene_manifest(cmd, carrier)
+    _require(
+        persisted_manifest == contacts.manifest,
+        "Host did not round-trip the persistent interaction manifest carrier",
+        {"carrier": carrier, "manifest": contacts.manifest.to_dict()},
+    )
+    controller._runs.pop(contacts_group)
+    recovered_groups = controller.recover_scene_manifests()
+    _require(
+        contacts_group in recovered_groups,
+        "controller could not recover a manifest already present in the Host scene",
+        {"recovered": list(recovered_groups), "carrier": carrier},
+    )
+    _require(
+        controller.get(contacts_group).result is None,
+        "scene-only manifest recovery unexpectedly invented interaction rows",
+    )
+    contacts_clear = _assert_exact_clear(controller, contacts, sentinels, source)
     return {
         "interchain_interaction_count": interchain_count,
         "interchain_summary": interchain.result.to_dict()["summary"],
@@ -1327,6 +1873,10 @@ def _interaction_check(suite: HostSmokeSuite) -> Dict[str, Any]:
         "all_organic_atom_count": all_organic,
         "ligand_summary": ligand.result.to_dict()["summary"],
         "ligand_clear": ligand_clear,
+        "contact_count": contact_count,
+        "contacts_summary": contacts.result.to_dict()["summary"],
+        "contacts_manifest_carrier": carrier,
+        "contacts_clear": contacts_clear,
     }
 
 
@@ -1523,11 +2073,31 @@ def _annotation_state_check(suite: HostSmokeSuite) -> Dict[str, Any]:
                     qt_completion_contract["panel_history_bindings"] = len(
                         panel._history_bindings
                     )
+                    qt_completion_contract["panel_history_fields"] = [
+                        binding.field for binding in panel._history_bindings
+                    ]
                     qt_completion_contract["panel_bucket_bindings"] = len(
                         panel._bucket_history_bindings
                     )
                     _require(
-                        qt_completion_contract["panel_history_bindings"] == 9
+                        qt_completion_contract["panel_history_fields"]
+                        == [
+                            "dataset_dir",
+                            "csv_path",
+                            "path_column",
+                            "id_column",
+                            "display_columns",
+                            "csv_encoding",
+                            "csv_delimiter",
+                            "source_base",
+                            "mapping_profile",
+                            "stage_root",
+                            "stage_alias",
+                            "pattern",
+                            "label_name",
+                            "values_text",
+                            "step_cmd",
+                        ]
                         and qt_completion_contract["panel_bucket_bindings"] == 2,
                         "annotation panel did not install every history completer",
                         qt_completion_contract,
@@ -1963,23 +2533,38 @@ def pp_host_smoke(output_path: str = "", keep_fixtures: Any = "") -> Dict[str, A
     output = os.path.abspath(os.path.expanduser(str(output_path or _default_output_path())))
     keep = _env_bool("PP_HOST_SMOKE_KEEP_FIXTURES", False) if keep_fixtures in ("", None) else _env_bool_value(keep_fixtures)
     suite = HostSmokeSuite(output, keep)
+    cases = (
+        ("HOST-LOAD-01", "plugin load and pp_doctor", _load_plugin_entry),
+        ("HOST-FIXTURE-01", "nested/multitype and scientific fixtures", _fixture_inventory),
+        ("HOST-NAV-01", "atomic nested-group navigation", _navigation_check),
+        ("HOST-TARGETS-01", "object/group fuzzy resolution and foreach", _target_iteration_check),
+        ("HOST-TARGET-SYNTAX-01", "quoted regex, templates and following console commands", _target_syntax_check),
+        ("HOST-TASKS-01", "Tier-1 task facades and unified undo", _task_facade_check),
+        ("HOST-ALIGNMENT-01", "sequence plus anchor/motif/ligand alignment", _sequence_alignment_check),
+        ("HOST-ORIENTATION-01", "PCA/cyclic orientation commit and undo", _orientation_commit_check),
+        ("HOST-GEOMETRY-01", "cyclic/PCA/vector axes and membrane slab", _cyclic_geometry_check),
+        ("HOST-FOLLOW-01", "follow apply/undo for matrix_mode 0/1/2", _follow_check),
+        ("HOST-STYLE-01", "style apply/revert snapshot", _style_check),
+        ("HOST-INTERACTION-01", "local interactions and exact manifest clear", _interaction_check),
+        ("HOST-PLIP-EXPORT-01", "PLIP PDB atom identity and setting restoration", _plip_export_check),
+        ("HOST-ANNOTATION-STATE-01", "annotator dataset state and global fuzzy history", _annotation_state_check),
+        ("HOST-ANNOTATION-CSV-01", "CSV metadata, row annotations, export, and restore", _annotation_csv_check),
+    )
+    requested = set(filter(None, os.environ.get("PP_HOST_SMOKE_CHECKS", "").split(",")))
+    unknown = requested - {case[0] for case in cases}
+    if unknown:
+        raise ValueError("Unknown Host checks: " + ", ".join(sorted(unknown)))
+    selected = requested | {"HOST-LOAD-01", "HOST-FIXTURE-01"}
     try:
-        suite.run_check("HOST-LOAD-01", "plugin load and pp_doctor", lambda: _load_plugin_entry(suite))
-        suite.run_check("HOST-FIXTURE-01", "nested/multitype and scientific fixtures", lambda: _fixture_inventory(suite))
-        suite.run_check("HOST-NAV-01", "atomic nested-group navigation", lambda: _navigation_check(suite))
-        suite.run_check("HOST-TARGETS-01", "object/group fuzzy resolution and foreach", lambda: _target_iteration_check(suite))
-        suite.run_check("HOST-ALIGNMENT-01", "sequence plus anchor/motif/ligand alignment", lambda: _sequence_alignment_check(suite))
-        suite.run_check("HOST-ORIENTATION-01", "PCA/cyclic orientation commit and undo", lambda: _orientation_commit_check(suite))
-        suite.run_check("HOST-GEOMETRY-01", "cyclic/PCA/vector axes and membrane slab", lambda: _cyclic_geometry_check(suite))
-        suite.run_check("HOST-FOLLOW-01", "follow apply/undo for matrix_mode 0/1/2", lambda: _follow_check(suite))
-        suite.run_check("HOST-STYLE-01", "style apply/revert snapshot", lambda: _style_check(suite))
-        suite.run_check("HOST-INTERACTION-01", "local interactions and exact manifest clear", lambda: _interaction_check(suite))
-        suite.run_check("HOST-PLIP-EXPORT-01", "PLIP PDB atom identity and setting restoration", lambda: _plip_export_check(suite))
-        suite.run_check("HOST-ANNOTATION-STATE-01", "annotator dataset state and global fuzzy history", lambda: _annotation_state_check(suite))
-        suite.run_check("HOST-ANNOTATION-CSV-01", "CSV metadata, row annotations, export, and restore", lambda: _annotation_csv_check(suite))
+        for check_id, title, function in cases:
+            if not requested or check_id in selected:
+                suite.run_check(check_id, title, lambda function=function: function(suite))
     finally:
         cleanup = suite.cleanup()
     record = suite.result(cleanup)
+    record["validation_scope"] = "selected_checks" if requested else "all_automatic_checks"
+    record["requested_checks"] = sorted(requested)
+    record["execution_surface"] = "PyMOL Qt main thread" if _env_bool("PP_HOST_SMOKE_GUI", False) else "headless PyMOL"
     written = _write_record(output, record)
     print("HOST SMOKE automatic_status=%s" % record["automatic_status"])
     print("HOST SMOKE manual checks remain pending by design")
@@ -1998,5 +2583,42 @@ def _env_bool_value(value: Any) -> bool:
 
 cmd.extend("pp_host_smoke", pp_host_smoke)
 
+
+def _run_gui_host():
+    """Run the same command checks on the real Qt/PyMOL owning thread."""
+    from pymol import gui, invocation
+    from pymol.Qt import QtCore, QtWidgets
+    from pmg_qt.pymol_qt_gui import PyMOLQtGUI
+    from pmg_qt import pymol_qt_gui
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    pymol_qt_gui._acceptance_app = app
+    app.setQuitOnLastWindowClosed(False)
+    invocation.parse_args(["pymol", "-k", "-q"])
+    window = PyMOLQtGUI()
+    gui.createlegacypmgapp = window.createlegacypmgapp
+    window.add_lineedit()
+    window.resize(1440, 900)
+    window.show()
+
+    def execute():
+        try:
+            assert QtCore.QThread.currentThread() == app.thread()
+            pp_host_smoke()
+        except Exception:
+            _write_record(_default_output_path(), {"schema": SCHEMA,
+                "automatic_status": "fail", "traceback": traceback.format_exc()})
+            traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        cmd.quit()
+
+    QtCore.QTimer.singleShot(100, execute)
+    app.exec_()
+
+
 if _env_bool("PP_HOST_SMOKE_AUTORUN", True):
-    pp_host_smoke()
+    if _env_bool("PP_HOST_SMOKE_GUI", False):
+        _run_gui_host()
+    else:
+        pp_host_smoke()
