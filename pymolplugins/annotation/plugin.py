@@ -2280,6 +2280,8 @@ def _ensure_loaded(
             STATE.managed_objects.append(obj_name)
         try:
             cmd.load(load_path_resolved, obj_name, quiet=1, zoom=-1 if focus else 0)
+            if _panel is not None and not _panel._closed:
+                _panel._invalidate_reference_candidate(obj_name)
         except Exception:
             # Some Host loaders can leave a partial object before raising. Keep
             # that name owned so a transaction rollback can delete it exactly.
@@ -5279,6 +5281,9 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._reference_object = ""
         self._reference_owner = ""
         self._reference_alignment = None
+        self._reference_cache = {}
+        self._reference_pairs = {}
+        self._reference_source = None
         self._reference_step = None
         self._reference_attempted = False
         self._reference_timer = QtCore.QTimer(self)
@@ -5317,7 +5322,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             return
         self._closed = True
         self._reference_timer.stop()
-        self._clear_reference()
+        self._clear_reference_cache()
         self.review.close()
         self._cancel_pending_task(announce=False)
         try:
@@ -5370,11 +5375,17 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         entry = STATE.current_entry()
         return {"entry_id": STATE.current_entry_id(), "object": STATE.current_object or "",
                 "column": STATE.reference_column, "generation": STATE.dataset_generation,
+                "source": STATE.csv_path,
                 "path": str(entry.metadata.get(STATE.reference_column, "") or "").strip() if entry else ""}
 
     def _queue_reference_update(self):
         if self._closed:
             return
+        source = (STATE.source_mode, STATE.csv_path, STATE.source_base, STATE.mapping_profile,
+                  STATE.mapping_target_format, STATE.mapping_wsl_distribution, STATE.stage_root, STATE.stage_alias)
+        if source != self._reference_source:
+            self._clear_reference_cache()
+            self._reference_source = source
         step = self._reference_arguments()
         if step != self._reference_step:
             self._reference_step = step
@@ -5392,6 +5403,10 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                 and STATE.current_object and self._reference_arguments()["path"]):
             self._compare_reference()
 
+    def _reference_key(self):
+        entry = STATE.current_entry()
+        return (entry.source_base if entry else "", self._reference_arguments()["path"])
+
     def _compare_reference(self):
         if self._reference_object:
             self._reference_attempted = True
@@ -5402,6 +5417,14 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                 or not STATE.current_object or not self._reference_arguments()["path"]):
             return
         self._reference_attempted = True
+        name = self._reference_cache.get(self._reference_key())
+        if name and _object_exists(name):
+            try:
+                self._show_reference(name)
+            except Exception as exc:
+                self._show_error(f"Reference comparison failed: {exc}")
+                traceback.print_exc()
+            return
         self._start_csv_task("reference", _prepare_reference, self._reference_arguments(),
             worker_arguments={"dataset": STATE.dataset, "entry": STATE.current_entry(),
                 "column": STATE.reference_column, "context": _materialization_context(),
@@ -5412,29 +5435,61 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
 
     def _clear_reference(self):
         if self._reference_object:
-            cmd.delete(self._reference_object)
+            cmd.disable(self._reference_object)
         self._reference_object = ""
         self._reference_owner = ""
         self._reference_alignment = None
 
+    def _clear_reference_cache(self):
+        for name in self._reference_cache.values():
+            cmd.delete(name)
+        self._reference_cache.clear()
+        self._reference_pairs.clear()
+        self._reference_object = ""
+        self._reference_owner = ""
+        self._reference_alignment = None
+
+    def _invalidate_reference_candidate(self, name):
+        self._reference_pairs = {key: value for key, value in self._reference_pairs.items()
+                                 if key[1] != name}
+        if self._reference_owner == name:
+            self._clear_reference()
+            self._reference_attempted = False
+
+    def _show_reference(self, name):
+        candidate = STATE.current_object
+        key = (STATE.dataset_generation, candidate)
+        previous = self._reference_pairs.get(key)
+        matrix = tuple(cmd.get_object_matrix(candidate))
+        if previous is not None and previous[:2] == (name, matrix):
+            alignment = previous[2]
+        else:
+            # Keep the reference in its input frame; transform only the display candidate.
+            alignment = cmd.align(candidate, name, quiet=1)
+            self._reference_pairs[key] = (name, tuple(cmd.get_object_matrix(candidate)), alignment)
+        cmd.enable(name)
+        cmd.zoom(f"({candidate}) or ({name})", buffer=2, animate=0)
+        self._reference_object = name
+        self._reference_owner = candidate
+        self._reference_alignment = alignment
+        self._refresh_status()
+
     def _accept_reference(self, materialized):
-        import uuid
-        name = "sa_reference_" + uuid.uuid4().hex[:12]
+        basename = ntpath.basename(self._reference_arguments()["path"])
+        label = _sanitize_token(basename, "reference")[:48]
+        name = "sa_reference_" + label + "_" + uuid.uuid4().hex[:8]
         try:
             cmd.load(_long_path(materialized.path), name, quiet=1, zoom=0)
             if cmd.count_atoms(name) == 0:
                 raise ValueError("Reference contains no atoms")
-            # Only the independently loaded reference moves; the candidate is read-only.
-            alignment = cmd.align(name, STATE.current_object, quiet=1)
             cmd.color("orange", name)
             cmd.show("cartoon", name)
+            cmd.disable(name)
         except Exception:
             cmd.delete(name)
             raise
-        self._reference_object = name
-        self._reference_owner = STATE.current_object
-        self._reference_alignment = alignment
-        self._refresh_status()
+        self._reference_cache[self._reference_key()] = name
+        self._show_reference(name)
 
     def _page_changed(self, *args):
         index = self.main_tabs.currentIndex()
@@ -7215,20 +7270,30 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                 item.setToolTip(text)
                 self.metadata_table.setItem(row, column, item)
 
-    def _refresh_status(self) -> None:
-        self._queue_reference_update()
-        entry = STATE.current_entry()
-        reference = str(entry.metadata.get(STATE.reference_column, "") or "") if entry else ""
-        self.reference_label.setVisible(bool(STATE.reference_column))
+    def _refresh_reference_status(self):
+        reference = self._reference_arguments()["path"]
+        self.reference_label.setVisible(STATE.source_mode == "csv")
         self.reference_button.setVisible(bool(STATE.reference_column))
         self.reference_button.setEnabled(bool(reference) and not self._csv_task_id)
-        self.reference_label.setText("Reference: " + (ntpath.basename(reference) or "Not supplied for this candidate"))
+        if not STATE.reference_column:
+            text = "Reference: no column configured (More → Reference column…)"
+        elif not reference:
+            text = f"Reference: no path in '{STATE.reference_column}' for this candidate"
+        else:
+            text = "Reference: " + ntpath.basename(reference)
+        self.reference_label.setText(text)
         self.reference_label.setToolTip(reference)
-        self.reference_button.setText("Hide reference" if self._reference_object else "Compare reference")
+        self.reference_button.setText("Hide reference" if self._reference_object else "Show reference")
         if self._reference_alignment is not None:
-            self.reference_label.setText(f"Reference: orange · RMSD {self._reference_alignment[0]:.3f} Å · "
+            self.reference_label.setText(f"Reference: {ntpath.basename(reference)} · fixed · "
+                f"display alignment {self._reference_alignment[0]:.3f} Å · "
                 f"{self._reference_alignment[1]} matched atoms")
-            self.reference_label.setToolTip(reference + "\nReference aligned to candidate; candidate coordinates and colors unchanged.")
+            self.reference_label.setToolTip(reference + "\nCandidate aligned to fixed reference for display; "
+                "source files and stored CSV scores are unchanged.")
+
+    def _refresh_status(self) -> None:
+        self._queue_reference_update()
+        self._refresh_reference_status()
         self._page_changed()
         busy = self._csv_task_kind in {"annotations", "annotation_undo"}
         ready = bool(STATE.files) and not self._filter_empty and self._table_mode != "preview" and not busy

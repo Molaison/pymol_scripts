@@ -49,7 +49,8 @@ jobs:
       - name: Run packaging and layout tests
         run: |
           python3 -m unittest tests.architecture.test_plugin_package \
-            tests.architecture.test_package_layout tests.host.test_updater -v
+            tests.architecture.test_package_layout tests.host.test_updater \
+            tests.annotation.test_automatic_reference -v
 
       - name: Build installable Plugin Manager ZIP
         run: python3 scripts/package_plugin.py

@@ -38,6 +38,9 @@ class AutomaticReferenceTests(unittest.TestCase):
         panel._reference_attempted = False
         panel._reference_object = panel._reference_owner = ""
         panel._reference_alignment = None
+        panel._reference_cache = {}
+        panel._reference_pairs = {}
+        panel._reference_source = None
         panel._reference_timer = mock.Mock()
         panel._maintenance_timer = mock.Mock()
         panel._source_mode_changed = mock.Mock()
@@ -63,6 +66,8 @@ class AutomaticReferenceTests(unittest.TestCase):
         self.module.QtCore.QCoreApplication = core.DummyApplication
         self.fake.count_atoms = lambda name: 1 if name in self.fake.types else 0
         self.fake.align = mock.Mock(return_value=(0.1, 1))
+        self.fake.get_object_matrix = mock.Mock(return_value=(1.0,) * 16)
+        self.fake.zoom = mock.Mock()
         self.fake.color = mock.Mock()
         self.fake.show = mock.Mock()
         result = self.module.sa_load_csv(self.csv, path_column="structure_path", id_column="id")
@@ -80,39 +85,92 @@ class AutomaticReferenceTests(unittest.TestCase):
                 error = exc
         self.panel._complete_csv_task(job_id, job, result, error)
 
-    def test_import_next_revisit_and_hide(self):
+    def test_import_next_revisit_and_hide_reuses_fixed_reference(self):
         panel, state = self.panel, self.module.STATE
         self.assertEqual(self.counter, 0)  # Candidate commits before deferred work.
         first = state.current_object
         panel._auto_reference()
         self.deliver()
-        self.assertTrue(panel._reference_object)
-        self.fake.align.assert_called_with(panel._reference_object, first, quiet=1)
+        reference = panel._reference_object
+        self.assertIn("ref_pdb", reference)
+        self.fake.align.assert_called_once_with(first, reference, quiet=1)
+        self.fake.zoom.assert_called_with(f"({first}) or ({reference})", buffer=2, animate=0)
         panel._compare_reference()
         panel._auto_reference()
         self.assertFalse(panel._reference_object)
+        self.assertIn(reference, self.fake.types)
+        self.assertNotIn(reference, self.fake.enabled)
+        panel._compare_reference()
+        self.assertEqual(panel._reference_object, reference)
+        self.assertEqual(self.fake.align.call_count, 1)
+        self.module.sa_next()
+        self.assertNotIn(reference, self.fake.enabled)
+        panel._auto_reference()
+        self.assertEqual(panel._reference_object, reference)
+        self.assertNotEqual(state.current_object, first)
+        self.fake.align.assert_called_with(state.current_object, reference, quiet=1)
+        self.module.sa_prev()
+        panel._auto_reference()
+        self.assertEqual(panel._reference_object, reference)
+        self.assertEqual(state.current_object, first)
+        self.assertEqual(self.fake.align.call_count, 2)
         self.assertEqual(self.counter, 1)
+
+    def test_candidate_reloaded_with_same_name_realigns_without_reloading_reference(self):
+        panel, state = self.panel, self.module.STATE
+        panel._auto_reference()
+        self.deliver()
+        reference, candidate = panel._reference_object, state.current_object
+        self.fake.delete(candidate)
+        self.module._load_current_structure()
+        # Same-step reload must automatically realign the newly loaded candidate.
+        panel._auto_reference()
+        self.assertEqual(panel._reference_object, reference)
+        self.fake.align.assert_called_with(candidate, reference, quiet=1)
+        self.assertEqual(self.fake.align.call_count, 2)
+        self.assertEqual(self.counter, 1)
+
+    def test_distinct_references_are_disabled_and_reused_until_source_changes(self):
+        from dataclasses import replace
+        state, panel = self.module.STATE, self.panel
+        panel._auto_reference()
+        self.deliver()
+        first_reference = panel._reference_object
+        state.entries[1] = replace(state.entries[1], metadata={"reference": "a.pdb"})
         self.module.sa_next()
         panel._auto_reference()
         self.deliver()
         second_reference = panel._reference_object
-        self.assertNotEqual(state.current_object, first)
+        self.assertNotEqual(first_reference, second_reference)
+        self.assertIn(first_reference, self.fake.types)
+        self.assertNotIn(first_reference, self.fake.enabled)
         self.module.sa_prev()
-        self.assertNotIn(second_reference, self.fake.types)
         panel._auto_reference()
-        self.deliver()
-        self.assertEqual(state.current_object, first)
-        self.assertEqual(self.counter, 3)
+        self.assertEqual(panel._reference_object, first_reference)
+        self.assertIn(second_reference, self.fake.types)
+        self.assertNotIn(second_reference, self.fake.enabled)
+        self.assertEqual(self.counter, 2)
+        state.csv_path = os.path.join(self.history_temporary.name, "other.csv")
+        panel._queue_reference_update()
+        self.assertNotIn(first_reference, self.fake.types)
+        self.assertNotIn(second_reference, self.fake.types)
+        self.assertEqual(panel._reference_cache, {})
 
     def test_blank_and_unconfigured_are_candidate_only(self):
         from dataclasses import replace
         state, panel = self.module.STATE, self.panel
+        panel.reference_label = mock.Mock()
+        panel.reference_button = mock.Mock()
         for column, path in (("", "ref.pdb"), ("reference", "  ")):
             state.reference_column = column
             state.entries[state.index] = replace(state.current_entry(), metadata={"reference": path})
             panel._queue_reference_update()
             panel._auto_reference()
             self.assertFalse(panel._reference_object)
+            panel._refresh_reference_status()
+            text = panel.reference_label.setText.call_args[0][0]
+            self.assertIn("no column configured" if not column else "no path", text)
+            panel.reference_label.setVisible.assert_called_with(True)
         self.assertEqual(self.counter, 0)
 
     def test_failure_and_cancellation_preserve_candidate_without_auto_retry(self):
@@ -162,6 +220,9 @@ class AutomaticReferenceTests(unittest.TestCase):
         self.module.STATE.reference_column = ""
         panel._queue_reference_update()
         panel._auto_reference()
+        self.assertIn(reference, self.fake.types)
+        self.assertNotIn(reference, self.fake.enabled)
+        panel._clear_reference_cache()
         self.assertNotIn(reference, self.fake.types)
 
     def test_worker_cancelled_does_not_retry(self):

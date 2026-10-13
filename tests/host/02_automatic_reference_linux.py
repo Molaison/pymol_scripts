@@ -67,7 +67,7 @@ def run(args, result):
         with table.open("w", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=["structure_path", "reference_path"])
             writer.writeheader()
-            writer.writerows(paths + [dict(paths[0], reference_path="")])
+            writer.writerows(paths + [dict(paths[0], reference_path=""), paths[0]])
         (directory / "review.json").write_text(json.dumps({
             "path_column": "structure_path", "reference_column": "reference_path",
             "step_cmd": "hide everything, {object}\nshow cartoon, {object}\nzoom {object}"}))
@@ -80,15 +80,15 @@ def run(args, result):
             assert cmd.count_atoms(reference) > 100
             assert candidate in cmd.get_names("objects", enabled_only=1)
             assert reference in cmd.get_names("objects", enabled_only=1)
-            cmd.load(paths[index]["structure_path"], "coordinate_check", quiet=1, zoom=0)
-            error = float(abs(cmd.get_coordset(candidate) - cmd.get_coordset("coordinate_check")).max())
+            cmd.load(paths[index]["reference_path"], "coordinate_check", quiet=1, zoom=0)
+            error = float(abs(cmd.get_coordset(reference) - cmd.get_coordset("coordinate_check")).max())
             cmd.delete("coordinate_check")
             assert error == 0.0, error
             colors = set()
             cmd.iterate(reference, "colors.add(color)", space={"colors": colors})
             assert colors == {cmd.get_color_index("orange")}
             return dict(paths[index], candidate_atoms=cmd.count_atoms(candidate),
-                        reference_atoms=cmd.count_atoms(reference), candidate_coordinate_error=error)
+                        reference_atoms=cmd.count_atoms(reference), reference_coordinate_error=error)
 
         result["first_import"] = check_pair(0)
         old_reference = panel._reference_object
@@ -97,23 +97,36 @@ def run(args, result):
             panel._refresh_status()
             QTest.qWait(30)
         assert not panel._reference_object and not panel._csv_task_id
-        assert old_reference not in cmd.get_names("objects")
+        assert old_reference in cmd.get_names("objects")
+        assert old_reference not in cmd.get_names("objects", enabled_only=1)
         result["manual_hide_stays_hidden"] = True
         QTest.mouseClick(panel.reference_button, QtCore.Qt.LeftButton)
         wait_for(app, lambda: bool(panel._reference_object) and not panel._csv_task_id)
-        old_reference = panel._reference_object
+        first_reference = panel._reference_object
+        assert first_reference == old_reference
         QTest.mouseClick(panel.next_btn, QtCore.Qt.LeftButton)
         wait_for(app, lambda: annotation.STATE.index == 1 and bool(panel._reference_object)
                  and panel._reference_owner == annotation.STATE.current_object and not panel._csv_task_id)
-        assert old_reference not in cmd.get_names("objects")
+        assert old_reference in cmd.get_names("objects")
+        assert old_reference not in cmd.get_names("objects", enabled_only=1)
         result["next_step"] = check_pair(1)
         old_reference = panel._reference_object
         QTest.mouseClick(panel.next_btn, QtCore.Qt.LeftButton)
         wait_for(app, lambda: annotation.STATE.index == 2 and panel._pending_navigation is None)
         QTest.qWait(100)
         assert not panel._reference_object and not panel._csv_task_id
-        assert old_reference not in cmd.get_names("objects")
-        result["blank_reference_clears_previous"] = True
+        assert old_reference in cmd.get_names("objects")
+        assert old_reference not in cmd.get_names("objects", enabled_only=1)
+        result["blank_reference_disables_previous"] = True
+        QTest.mouseClick(panel.next_btn, QtCore.Qt.LeftButton)
+        wait_for(app, lambda: annotation.STATE.index == 3 and bool(panel._reference_object)
+                 and panel._reference_owner == annotation.STATE.current_object and not panel._csv_task_id)
+        assert panel._reference_object == first_reference
+        assert old_reference not in cmd.get_names("objects", enabled_only=1)
+        result["revisit_reuses_fixed_object"] = check_pair(0)
+        result["retained_reference_objects"] = len([name for name in cmd.get_names("objects")
+                                                  if name.startswith("sa_reference_")])
+        assert result["retained_reference_objects"] == 2
         assert all(hashlib.sha256(path.read_bytes()).hexdigest() == digest
                    for path, digest in protected.items())
         result["source_files_unchanged"] = len(protected)
