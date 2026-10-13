@@ -40,8 +40,8 @@ class UpdaterTests(unittest.TestCase):
         self.module = self.root / "pymolplugins/host/updater.py"
         self.registered = self.root / "__init__.py"
         self.release = dict(version="0.15.0", newer=True, name="PymolPlugins-0.15.0.zip",
-                            archive_url=updater.DOWNLOAD_PREFIX + "v0.15.0/PymolPlugins-0.15.0.zip",
-                            checksum_url=updater.DOWNLOAD_PREFIX + "v0.15.0/SHA256SUMS")
+                            archive_url="https://github.com/Molaison/pymol_scripts/releases/download/v0.15.0/PymolPlugins-0.15.0.zip",
+                            checksum_url="https://github.com/Molaison/pymol_scripts/releases/download/v0.15.0/SHA256SUMS")
         self.archive = package_bytes()
 
     def responses(self, url, *args):
@@ -113,6 +113,7 @@ class UpdaterTests(unittest.TestCase):
 
     def test_release_identity_stable_version_and_asset_contract(self):
         payload = dict(tag_name="v0.15.0", draft=False, prerelease=False,
+                       html_url="https://github.com/Molaison/pymol_scripts/releases/tag/v0.15.0",
                        assets=[dict(name=self.release["name"], browser_download_url=self.release["archive_url"]),
                                dict(name="SHA256SUMS", browser_download_url=self.release["checksum_url"])])
         def fetch(*args):
@@ -127,6 +128,43 @@ class UpdaterTests(unittest.TestCase):
             payload["assets"][0]["browser_download_url"] = "https://example.org/update.zip"
             with self.assertRaisesRegex(ValueError, "does not belong"):
                 updater.check_release("0.14.1")
+
+    def test_repository_transfer_uses_fixed_api_identity_and_canonical_release(self):
+        for repository in ("xcflab/pymol_scripts", "Molaison/pymol_scripts"):
+            with self.subTest(repository=repository):
+                base = "https://github.com/" + repository
+                payload = dict(tag_name="v0.15.0", draft=False, prerelease=False,
+                               html_url=base + "/releases/tag/v0.15.0",
+                               assets=[dict(name=name, browser_download_url=base + "/releases/download/v0.15.0/" + name)
+                                       for name in (self.release["name"], "SHA256SUMS")])
+                with patch.object(updater, "_open", return_value=io.BytesIO(json.dumps(payload).encode())) as fetch:
+                    result = updater.check_release("0.14.1")
+                fetch.assert_called_once_with("https://api.github.com/repositories/830272878/releases/latest",
+                                              "application/vnd.github+json")
+                self.assertEqual(result["archive_url"], base + "/releases/download/v0.15.0/" + self.release["name"])
+
+    def test_canonical_release_and_assets_must_share_https_repository_tag_and_name(self):
+        canonical = "https://github.com/Molaison/pymol_scripts/releases/tag/v0.15.0"
+        payload = dict(tag_name="v0.15.0", draft=False, prerelease=False, html_url=canonical,
+                       assets=[dict(name=self.release["name"], browser_download_url=self.release["archive_url"]),
+                               dict(name="SHA256SUMS", browser_download_url=self.release["checksum_url"])])
+        def fetch(*args):
+            return io.BytesIO(json.dumps(payload).encode())
+        with patch.object(updater, "_open", side_effect=fetch):
+            for location in (canonical.replace("https:", "http:"), canonical.replace("github.com", "example.org"),
+                             canonical.replace("v0.15.0", "v0.14.1"), canonical + "?extra=1"):
+                with self.subTest(location=location):
+                    payload["html_url"] = location
+                    with self.assertRaisesRegex(ValueError, "Release URL"):
+                        updater.check_release("0.14.1")
+            payload["html_url"] = canonical
+            archive = self.release["archive_url"]
+            for asset_url in (archive.replace("Molaison", "xcflab"), archive.replace("https:", "http:"),
+                              archive.replace("v0.15.0/", "v0.14.1/"), archive.replace("0.15.0.zip", "0.14.1.zip")):
+                with self.subTest(asset_url=asset_url):
+                    payload["assets"][0]["browser_download_url"] = asset_url
+                    with self.assertRaisesRegex(ValueError, "does not belong"):
+                        updater.check_release("0.14.1")
 
     def test_download_redirects_stay_on_github_https(self):
         handler = updater.ReleaseRedirects()

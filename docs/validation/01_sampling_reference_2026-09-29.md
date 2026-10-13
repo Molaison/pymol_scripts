@@ -466,3 +466,9 @@ PLI可见性修正/最终ZIP验收句柄27682，output/15_pli_view_20261002.json
 用户授权合并PR并构建自动发布及插件自更新，随后明确选择仓库直接公开；仓库已设public。沿用本执行记录：父负责GitHub合并、main版本触发Release工作流、版本0.15.0、集成验证与发布；automatic_reference_loading负责公开Release自更新纯逻辑/Qt界面与定向测试。默认后台检查、自动安装可由用户开启；只安装校验成功的正式包，保留备份，提示重启，不热替换内存模块。现有用户配置与科学数据不改。
 
 PR #2已squash merge至2c0379d8d5e7fb803e9615970396f4e1ce880788。GraphQL首次报权限错误，REST同一head正常合并；未改分支保护。新工作在codex/automatic-release-updates。0.15.0打包/布局/更新引擎14项通过，真实Linux Qt Updates窗口与默认设置通过。仅替换引擎的模拟IO回归不冒充实际GitHub下载；后续在main自动Release成功后用 tests/host/03_release_update_linux.py 临时安装真实0.14.1包，下载公开0.15.0并在新进程Qt确认重启生效。Windows仍未实测。
+
+PR #3已合并main 977805b903b78acacc0c004cf6cd408354217190，CI通过，自动发布run38390851881成功生成v0.15.0 ZIP/SHA256SUMS。真实测试已完成旧包注册、公开下载、SHA验证、替换与备份；重开测试先后暴露测试桩askyesno、PluginInfo.mod_name和HAVE_QT遗漏，保留18系列failed JSON，测试已补全原生注册/Qt宿主标记。随后用户主动转移仓库至Molaison/pymol_scripts（ID830272878），v0.15.0固定owner资产校验出现实际失败；当前发布0.15.1修复为固定仓库ID，不能宣称0.15.0在转移后自动更新可用。
+
+用户进一步澄清reference应常驻object按需enable，并明确选择reference坐标固定、candidate对齐到它。此前删除/重载并移动reference的方法不再符合当前合同。0.15.1同时修正reference生命周期：数据源内唯一参考缓存，切步禁用/启用，候选重载重新对齐，不改变磁盘PDB或重算评分；无reference配置/空值需在面板显示原因。实际cal53审阅表5065行reference均非空且本地存在，review.json已配置reference_column、未发现本地override；用户当前Windows安装版本未得到确认，不据此猜测无显示根因。
+
+0.15.1最终包固定参考实测passed，exit0：output/19_fixed_reference_linux_20261013.json。真实cal53 0015→0017→空ref→回访0015，两个reference对象始终保留，旧ref disabled，回访同名复用；参考原始坐标最大误差0，4份PDB hash不变，候选会话对象对齐到参考。9项固定参考定向回归、16项打包/布局/更新回归通过，CI增加reference回归入口。anonymous numeric API初遇共享IP 60/h限流，重置后无token实测成功返回Molaison正式Release和匹配资产；不是endpoint缺失。下一步合并当前修复并自动发布0.15.1，然后完成真实旧包到新Release的整链路升级。

@@ -67,7 +67,7 @@ Plugin > PymolPlugins: Updates 可检查并安装公开正式版本。默认启�
 
 ## 自动参考对照
 
-review.json 设置 reference_column 后，打开结构及切换 step 会自动加载对应参考，显示为橙色并对齐到候选。Hide reference 可隐藏当前步的参考；下一步恢复自动加载。加载失败后可点 Compare reference 重试。
+review.json 设置 reference_column 后，对应参考首次使用时载入为固定橙色 object；切换 step 只 enable/disable 并重用，候选对齐到固定参考。Hide reference 可隐藏当前步的参考；下一步恢复显示。加载失败后可点 Compare reference 重试。
 
 ## 筛选分组
 

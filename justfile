@@ -28,11 +28,11 @@ test-host-commands host_python="/mnt/d/Softwares/Pymol3.1/python.exe" output="ou
     script="$(wslpath -w "$PWD/tests/host/host_smoke.py")"; record="$PWD/{{output}}"; result="$(wslpath -w "$record")"; rm -f "$record"; cd /mnt/c; '{{host_python}}' -I -u -c 'import os, runpy, sys; os.environ["PP_HOST_SMOKE_OUTPUT"] = sys.argv[2]; os.environ["PP_HOST_SMOKE_CHECK_WORKER"] = "0"; os.environ["PP_HOST_SMOKE_CHECKS"] = sys.argv[3]; os.environ["PP_HOST_SMOKE_GUI"] = "1"; runpy.run_path(sys.argv[1], run_name="__main__")' "$script" "$result" '{{checks}}'; python3 -c 'import json, sys; result = json.load(open(sys.argv[1], encoding="utf-8")); assert result["schema"] == "pymolplugins.host-smoke/1.0"; print("automatic_status=" + result["automatic_status"]); sys.exit(0 if result["automatic_status"] == "pass" else 1)' "$record"
 
 # Install the specified release ZIP in a temporary Plugin Manager directory.
-test-package package="dist/PymolPlugins-0.15.0.zip" host_python="/mnt/d/Softwares/Pymol3.1/python.exe" output="output/plugin_package.json":
+test-package package="dist/PymolPlugins-0.15.1.zip" host_python="/mnt/d/Softwares/Pymol3.1/python.exe" output="output/plugin_package.json":
     script="$(wslpath -w "$PWD/tests/host/plugin_package_smoke.py")"; archive="$(wslpath -w "$PWD/{{package}}")"; result="$(wslpath -w "$PWD/{{output}}")"; cd /mnt/c; '{{host_python}}' -I "$script" "$archive" --output "$result"
 
 # Installed desktop UI: quiet defaults, on-demand help, first import and Save and next.
-test-onboarding package="dist/PymolPlugins-0.15.0.zip" host_python="/mnt/d/Softwares/Pymol3.1/python.exe" output="output/16_filter_groups_20261002.json":
+test-onboarding package="dist/PymolPlugins-0.15.1.zip" host_python="/mnt/d/Softwares/Pymol3.1/python.exe" output="output/16_filter_groups_20261002.json":
     script="$(wslpath -w "$PWD/tests/host/plugin_package_smoke.py")"; archive="$(wslpath -w "$PWD/{{package}}")"; record="$PWD/{{output}}"; result="$(wslpath -w "$record")"; cd /mnt/c; '{{host_python}}' -I "$script" "$archive" --output "$result" --onboarding-only; python3 -c 'import json,sys; r=json.load(open(sys.argv[1],encoding="utf-8")); print(r["status"]); sys.exit(0 if r["status"] == "passed" else 1)' "$record"
 
 # Current provider + real Windows GUI command generation/edit/execute acceptance.

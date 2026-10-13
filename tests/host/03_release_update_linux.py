@@ -39,16 +39,20 @@ def qt_setup(directory):
 def reopen(directory):
     plugins, gui = qt_setup(directory)
     root = directory / "pymol_plugins"
-    info = plugins.PluginInfo("pymol_plugins", str(root / "__init__.py"))
+    info = plugins.PluginInfo("pymol_plugins", str(root / "__init__.py"),
+                              plugins.startup.__name__ + ".pymol_plugins")
     plugins.plugins["pymol_plugins"] = info
-    with patch.object(plugins, "get_pmgapp", return_value=gui):
+    with patch.object(plugins, "get_pmgapp", return_value=gui), \
+            patch.object(plugins, "HAVE_QT", True):
         assert info.load(gui)
         from pymolplugins.host.updater_widgets import controller
+        from pymolplugins import __version__
         control = controller()
         assert control.option("auto_check", True)
         assert not control.option("auto_install", False)
         wait_for(_APP, lambda: control.release is not None and not control.busy, timeout=60)
         assert not control.release["newer"], control.status
+        assert __version__ == control.release["version"]
         next(action for action in _MENU.actions() if action.text() == "PymolPlugins: Updates").trigger()
         assert control.dialog.isVisible()
         from pymol.Qt import QtWidgets
@@ -68,7 +72,10 @@ def run(args):
         plugins, gui = qt_setup(directory)
         from pymol.plugins import legacysupport
         from pymol.plugins.installation import installPluginFromFile
-        messages = SimpleNamespace(showinfo=lambda *a, **k: None)
+        def unexpected_prompt(*args, **kwargs):
+            raise AssertionError("Unexpected installer prompt: %r" % (args,))
+        messages = SimpleNamespace(showinfo=lambda *a, **k: None,
+                                   askyesno=unexpected_prompt, askokcancel=unexpected_prompt)
         with patch.object(plugins, "get_pmgapp", return_value=gui), \
                 patch.object(plugins, "HAVE_QT", True), \
                 patch.object(legacysupport, "tkMessageBox", messages):

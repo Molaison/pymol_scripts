@@ -14,9 +14,8 @@ import urllib.request
 import zipfile
 
 
-REPOSITORY = "xcflab/pymol_scripts"
-RELEASE_URL = "https://api.github.com/repos/" + REPOSITORY + "/releases/latest"
-DOWNLOAD_PREFIX = "https://github.com/" + REPOSITORY + "/releases/download/"
+REPOSITORY = "Molaison/pymol_scripts"
+RELEASE_URL = "https://api.github.com/repositories/830272878/releases/latest"
 REQUIRED = {"__init__.py", "pymolplugins/__init__.py", "plugins/pymol_plugins.py",
             "pymolplugins/host/plugin.py"}
 
@@ -63,6 +62,16 @@ def check_release(current_version):
     if tag != "v" + version:
         raise ValueError("Release tag must be vMAJOR.MINOR.PATCH")
     newer = version_tuple(version) > version_tuple(current_version)
+    # The numeric API identity survives ownership transfers; GitHub supplies
+    # the canonical repository path for this particular release.
+    location = re.fullmatch(
+        r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/releases/tag/" + re.escape(tag),
+        str(payload.get("html_url", "")),
+    )
+    if location is None:
+        raise ValueError("Release URL must identify this tag on GitHub HTTPS")
+    repository = location[1] + "/" + location[2]
+    download_prefix = "https://github.com/" + repository + "/releases/download/"
     name = "PymolPlugins-%s.zip" % version
     assets = {asset["name"]: asset for asset in payload.get("assets", [])}
     result = {"version": version, "newer": newer, "name": name}
@@ -70,8 +79,8 @@ def check_release(current_version):
         if asset_name not in assets:
             raise ValueError("Release is missing " + asset_name)
         url = str(assets[asset_name].get("browser_download_url", ""))
-        if url != DOWNLOAD_PREFIX + tag + "/" + asset_name:
-            raise ValueError("Release asset does not belong to " + REPOSITORY)
+        if url != download_prefix + tag + "/" + asset_name:
+            raise ValueError("Release asset does not belong to " + repository)
         result[key] = url
     return result
 
