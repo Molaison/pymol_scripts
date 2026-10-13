@@ -4868,8 +4868,10 @@ class _HistoryCompletionFilter(QtCore.QObject if _HAS_QT_ASYNC else object):
         self.binding = binding
 
     def eventFilter(self, obj, event):
+        if event.type() != QtCore.QEvent.KeyPress:
+            return super().eventFilter(obj, event)
         popup = self.binding.completer.popup()
-        if event.type() == QtCore.QEvent.KeyPress and popup.isVisible():
+        if popup.isVisible():
             if event.key() in (_qt_enum("Key", "Key_Tab"), _qt_enum("Key", "Key_Return"), _qt_enum("Key", "Key_Enter")):
                 index = popup.currentIndex()
                 if not index.isValid():
@@ -5277,6 +5279,11 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._reference_object = ""
         self._reference_owner = ""
         self._reference_alignment = None
+        self._reference_step = None
+        self._reference_attempted = False
+        self._reference_timer = QtCore.QTimer(self)
+        self._reference_timer.setSingleShot(True)
+        self._reference_timer.timeout.connect(self._auto_reference)
         self.review = None
         self._state_save_timer = QtCore.QTimer(self)
         self._state_save_timer.setSingleShot(True)
@@ -5309,6 +5316,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             event.ignore()
             return
         self._closed = True
+        self._reference_timer.stop()
         self._clear_reference()
         self.review.close()
         self._cancel_pending_task(announce=False)
@@ -5359,16 +5367,41 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             self._refresh_status()
 
     def _reference_arguments(self):
+        entry = STATE.current_entry()
         return {"entry_id": STATE.current_entry_id(), "object": STATE.current_object or "",
-                "column": STATE.reference_column}
+                "column": STATE.reference_column, "generation": STATE.dataset_generation,
+                "path": str(entry.metadata.get(STATE.reference_column, "") or "").strip() if entry else ""}
+
+    def _queue_reference_update(self):
+        if self._closed:
+            return
+        step = self._reference_arguments()
+        if step != self._reference_step:
+            self._reference_step = step
+            self._reference_attempted = False
+            self._clear_reference()
+            if self._csv_task_kind == "reference":
+                self._cancel_csv_task(announce=False)
+        # Defer until the candidate transaction and its UI update have finished.
+        self._reference_timer.start(0)
+
+    def _auto_reference(self):
+        if self._closed or self._csv_task_id or self._reference_attempted:
+            return
+        if (STATE.source_mode == "csv" and STATE.dataset is not None and STATE.reference_column
+                and STATE.current_object and self._reference_arguments()["path"]):
+            self._compare_reference()
 
     def _compare_reference(self):
         if self._reference_object:
+            self._reference_attempted = True
             self._clear_reference()
             self._refresh_status()
             return
-        if self._csv_task_id or STATE.current_entry() is None:
+        if (self._csv_task_id or STATE.current_entry() is None
+                or not STATE.current_object or not self._reference_arguments()["path"]):
             return
+        self._reference_attempted = True
         self._start_csv_task("reference", _prepare_reference, self._reference_arguments(),
             worker_arguments={"dataset": STATE.dataset, "entry": STATE.current_entry(),
                 "column": STATE.reference_column, "context": _materialization_context(),
@@ -5995,6 +6028,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
 
     def _queue_preload_maintenance(self):
         if not self._closed:
+            self._queue_reference_update()
             self._maintenance_timer.start(0)
 
     def _preload_maintenance(self):
@@ -6362,6 +6396,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._csv_task_kind = ""
         if not self._closed:
             self._source_mode_changed()
+            self._queue_reference_update()
 
     def _cancel_csv_task(self, *, announce: bool = True) -> None:
         job_id = self._csv_task_id
@@ -7181,8 +7216,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                 self.metadata_table.setItem(row, column, item)
 
     def _refresh_status(self) -> None:
-        if self._reference_object and self._reference_owner != STATE.current_object:
-            self._clear_reference()
+        self._queue_reference_update()
         entry = STATE.current_entry()
         reference = str(entry.metadata.get(STATE.reference_column, "") or "") if entry else ""
         self.reference_label.setVisible(bool(STATE.reference_column))

@@ -439,3 +439,24 @@ PLI可见性修正/最终ZIP验收句柄27682，output/15_pli_view_20261002.json
 最终包：dist/PymolPlugins-0.14.0.zip，475252字节，SHA-256 250fa2e16dc414fb2908a3393dc2a2e7c6fbe1f56001f00d20678a0f7051eb91。复现：WSL_INTEROP=/run/WSL/2_interop just test-onboarding dist/PymolPlugins-0.14.0.zip /mnt/d/Softwares/Pymol3.1/pythonw.exe output/16_filter_groups_rerun.json。没有重新跑AI请求、WAN或科学打分。
 失败可见：85344下拉点击超时终态，保留-menu-failed；71259因测试未在同步原生菜单循环中安排选择而阻塞，精确核对命令行后只停止owned PID9672，句柄终态255；保留-menu-blocked日志。修正仅验收脚本定时真实菜单选择后94128最终passed。该停止导致的已知临时安装目录已清理。所有句柄终态，无后台任务或并发写者；没有触碰用户当前安装/运行中的PyMOL、SSH或provider配置。
 下一步：安装0.14.0并完全重启；后续产物使用更新prompt。当前未提供实际运行目录/分数文件，因此只交付插件与生成契约，不假装已整理或分组某次实际运行产物。
+
+
+## Step自动加载reference（2026-10-13，执行中）
+
+用户明确要求导入candidate及切换step自动加载reference，不能只配列并要求点击Compare reference。父线程01a13357-0dcc-72b0-a4ff-b66b54c3d945在Linux节点的干净独立clone `/xcf26/zpzeng/gitrepo/pymol_scripts`、分支 `fix/automatic-step-reference` 实施；原其他机器工作树未修改。唯一执行记录继续使用本文，不创建重复任务库。
+
+路线：已有reference_column且当前行非空时默认自动加载，复用异步路径映射/缓存/SSH准备和原橙色reference；只移动reference作显示对齐，candidate坐标不变。当前candidate手动隐藏需保持到下一candidate；缺失/失败/取消不得循环重试或错误挂接旧reference。无reference配置的源保持candidate-only。
+
+写入归属：子代理automatic_reference_loading负责plugin.py、定向annotation回归和walkthrough；父代理负责版本、真实Linux Qt/PyMOL验收、打包及记录。当前主机已有PyMOL和PyQt5，暂无Windows Host，不能把Linux证据当Windows验收。下一步：收取局部修改、执行真实双object及切换验收，构建可安装ZIP并交付review分支。
+
+### 自动reference最终交付（0.14.1）
+
+已有reference_column时导入及切换step默认异步加载参考；候选提交后Qt主线程加载/对齐橙色reference。换步清理和取消旧请求，数据代次、路径、候选和任务epoch拒绝迟到结果；当前步Hide、失败或取消不循环重试，Compare可手动重试。无列/空值保持仅候选。实测退出暴露HistoryCompletionFilter在非按键销毁事件访问已删completer，已将popup访问限于KeyPress，未添加泛化异常吞噬。
+
+最终ZIP：dist/PymolPlugins-0.14.1.zip。最终真实验收 output/17_automatic_reference_linux_20261013.json 为passed，原生进程退出0：Linux PyMOL2.6.2/PyQt5/offscreen，从ZIP解包加载实际代码；真实cal53 0015/0017候选自动对应两份原簇最佳参考，首开/隐藏保持/手动重开/下一步/空值清理通过。候选4795/4816原子、参考4803/4813原子，候选坐标最大误差0，四份源文件hash未变。没有渲染像素或Windows安装验收，不能将其当作Windows已通过。
+
+复现：rtk proxy env QT_QPA_PLATFORM=offscreen /xcf26/zpzeng/miniconda/bin/python tests/host/02_automatic_reference_linux.py /xcf26/zpzeng/project_run_log/xyzhang_task/008_cal53_pore_blocking_binder/publish/001_cal53a19_hotspot_binder/03_physical_interface_objective/14_clustered_iptm_review/sum_scores.csv --package dist/PymolPlugins-0.14.1.zip --output output/17_automatic_reference_linux_20261013.json
+
+新增automatic_reference回归7项通过；packaging/layout 7项通过。扩展旧core/review_import存在既有FakeQt setVisible缺失和FakeCmd未执行命令完成标记问题，未将这些失败计为通过、未扩大修复。首次和第二次真实检查功能均passed但退出SIGABRT；首次证据保存在output/17_automatic_reference_linux_teardown_failed_20261013.json。最终修复后同路径检查退出0，所有本轮句柄终态、子代理完成，无后台验收任务。实际科学PDB/CSV评分和ty/ty3优化任务未修改。
+
+源码在独立codex/automatic-step-reference分支交付草稿PR，不合并main或发布Release。用户下一步安装ZIP并完全重启，再打开现有sum_scores.csv。尚未更新用户Windows安装。

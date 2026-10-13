@@ -37,6 +37,7 @@ class FakeCmd:
         self.loaded_paths = {}
         self.deleted = []
         self.extensions = {}
+        self.keyword = {}
         self.commands = []
         self.key_mappings = {"ALT-left": "previous user binding"}
         self.fail_next_load = False
@@ -96,6 +97,7 @@ class FakeCmd:
 
     def extend(self, name, callback):
         self.extensions[name] = callback
+        self.keyword[name] = [callback, 0, 0, ",", 0]
 
     def set_key(self, key, callback):
         self.key_mappings[key] = (callback, (), {})
