@@ -460,3 +460,9 @@ PLI可见性修正/最终ZIP验收句柄27682，output/15_pli_view_20261002.json
 新增automatic_reference回归7项通过；packaging/layout 7项通过。扩展旧core/review_import存在既有FakeQt setVisible缺失和FakeCmd未执行命令完成标记问题，未将这些失败计为通过、未扩大修复。首次和第二次真实检查功能均passed但退出SIGABRT；首次证据保存在output/17_automatic_reference_linux_teardown_failed_20261013.json。最终修复后同路径检查退出0，所有本轮句柄终态、子代理完成，无后台验收任务。实际科学PDB/CSV评分和ty/ty3优化任务未修改。
 
 源码在独立codex/automatic-step-reference分支交付草稿PR，不合并main或发布Release。用户下一步安装ZIP并完全重启，再打开现有sum_scores.csv。尚未更新用户Windows安装。
+
+## 自动发布与插件更新（2026-10-13，执行中）
+
+用户授权合并PR并构建自动发布及插件自更新，随后明确选择仓库直接公开；仓库已设public。沿用本执行记录：父负责GitHub合并、main版本触发Release工作流、版本0.15.0、集成验证与发布；automatic_reference_loading负责公开Release自更新纯逻辑/Qt界面与定向测试。默认后台检查、自动安装可由用户开启；只安装校验成功的正式包，保留备份，提示重启，不热替换内存模块。现有用户配置与科学数据不改。
+
+PR #2已squash merge至2c0379d8d5e7fb803e9615970396f4e1ce880788。GraphQL首次报权限错误，REST同一head正常合并；未改分支保护。新工作在codex/automatic-release-updates。0.15.0打包/布局/更新引擎14项通过，真实Linux Qt Updates窗口与默认设置通过。仅替换引擎的模拟IO回归不冒充实际GitHub下载；后续在main自动Release成功后用 tests/host/03_release_update_linux.py 临时安装真实0.14.1包，下载公开0.15.0并在新进程Qt确认重启生效。Windows仍未实测。

@@ -331,8 +331,9 @@ def _check_install(package, directory, parent, menu, *, onboarding=False, output
         if name == "pymolplugins" or name.startswith("pymolplugins."):
             Path(module.__file__).resolve().relative_to(installed.resolve())
     labels = [action.text() for action in menu.actions()]
-    assert len(labels) == 6 and "PymolPlugins: Structure Annotator" in labels, labels
+    assert len(labels) == 7 and "PymolPlugins: Structure Annotator" in labels, labels
     assert "PymolPlugins: Batch Processing" in labels, labels
+    assert "PymolPlugins: Updates" in labels, labels
     annotation = importlib.import_module("pymolplugins.annotation.plugin")
     assert callable(annotation.show_structure_annotator_panel)
     assert Path(annotation.__file__).resolve().is_relative_to(installed.resolve())

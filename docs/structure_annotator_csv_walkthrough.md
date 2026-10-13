@@ -1,5 +1,15 @@
 # Structure Annotator CSV / Path / Cache Walkthrough
 
+## 插件更新（0.15.0 起）
+
+安装一次含更新器的版本后，**Plugin > PymolPlugins: Updates** 提供检查与安装。默认在 PyMOL 启动后后台检查公开仓库 `xcflab/pymol_scripts` 的最新正式 Release；检查不阻塞启动，也不需要 GitHub token。发现新版会显示更新窗口。
+
+点 **Download and install** 可安装本次更新；勾选 **Automatically install stable updates** 后，后续启动发现新版会自动下载、校验并安装。此选项默认关闭，选择会保存在本机用户设置中。需要关闭后台检查时取消 **Check for updates when PyMOL starts**。GitHub 限流或网络错误可在该窗口查看并用 **Check now** 重试。
+
+更新器只替换 Plugin Manager 注册的 `pymol_plugins` 安装目录，拒绝开发 checkout。下载来自正式 Release，并核对 `SHA256SUMS`、ZIP 路径、包结构与版本。校验通过后在同一磁盘暂存并替换；替换失败会恢复原目录。用户设置、标注、科学源文件和当前 PyMOL 对象不参与替换。
+
+成功后请保存工作并完全退出、重启 PyMOL；不会热重载运行中的插件。上一版保留在安装目录旁的 `.pymol_plugins-backup`，下一次更新通过校验后会替换这份备份。如需手动恢复，先关闭所有 PyMOL，将当前 `pymol_plugins` 改名为 `.pymol_plugins-failed`，再把 `.pymol_plugins-backup` 改名为 `pymol_plugins` 后启动。若系统在两次目录改名之间中断，只需将备份目录改回 `pymol_plugins`。
+
 ## 连续审阅
 
 已有任务可用 **Data > Continue last review** 恢复最近的数据源、筛选和候选位置。它是显式操作，不会在启动时自动连接远端。
