@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
 PACKAGE_ROOT = ROOT / "pymolplugins"
 PLUGIN_NAME = "pymol_plugins"
-INSTALL_TEXT = """# 安装 PymolPlugins（0.14.1）
+INSTALL_TEXT = """# 安装 PymolPlugins（{version}）
 
 需要带 Qt 图形界面的 PyMOL 和 Python 3。
 
@@ -60,6 +60,10 @@ Host my-lab
 | 远端没有 Python 3 | 确认 `ssh my-lab python3 --version` 可用，必要时请管理员安装。 |
 | 表格打开但没有结构 | 选择实际包含 `.pdb`、`.cif` 或其 `.gz` 路径的 **Structure column**。 |
 | 长时间等待 | 查看连接/认证、队列、读取或下载阶段；可取消，修复连接、认证或路径后重试。 |
+
+## 插件更新
+
+Plugin > PymolPlugins: Updates 可检查并安装公开正式版本。默认启动时后台检查；启用 Automatically install updates 后自动安装。下载包会校验 SHA256，安装保留上一版本备份，完成后需完全重启 PyMOL。首次从 0.14.x 升级仍需手动安装本 ZIP。
 
 ## 自动参考对照
 
@@ -128,7 +132,7 @@ def _build(output_dir: Path = DIST) -> Path:
             destination_entry = staging / "plugins" / entry.name
             destination_entry.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(entry, destination_entry)
-        (staging / "INSTALL.md").write_text(INSTALL_TEXT, encoding="utf-8")
+        (staging / "INSTALL.md").write_text(INSTALL_TEXT.replace("{version}", version), encoding="utf-8")
 
         files = sorted(
             path.relative_to(staging).as_posix()

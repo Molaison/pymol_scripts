@@ -646,6 +646,11 @@ def show_batch_processing_from_toolkit():
     return module.show_batch_dialog()
 
 
+def show_updates_from_toolkit():
+    from .updater_widgets import show_updates
+    show_updates()
+
+
 def __init_plugin__(app=None):
     from pymol.plugins import addmenuitemqt
 
@@ -655,6 +660,9 @@ def __init_plugin__(app=None):
     addmenuitemqt("PymolPlugins: Command Help", pp_help)
     addmenuitemqt("PymolPlugins: Structure Annotator", show_structure_annotator_from_toolkit)
     addmenuitemqt("PymolPlugins: Batch Processing", show_batch_processing_from_toolkit)
+    addmenuitemqt("PymolPlugins: Updates", show_updates_from_toolkit)
+    from .updater_widgets import start_update_check
+    start_update_check()
 
 
 def _register_host_command(name, function) -> None:

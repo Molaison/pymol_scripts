@@ -17,7 +17,7 @@
 - 不重做批处理已有 A/B 配对；reference 用明确配置的表列关联，不猜路径。
 - 不安装管理工具代替开发。当前 PATH 和既知安装位置均没有可用 Beads，以下单一执行记录暂为权威任务状态。
 - 抽样仅作显式会话审阅层，重导入回到完整筛选集合；评分百分位和导出不把样本冒充全集。批处理预填A/B列，但不自动继承审阅抽样/过滤，必须先预览确认。
-- 发布走 GitHub 私有仓库 `xcflab/pymol_scripts`（origin，main）：安装包由 `.github/workflows/package.yml` 自动构建，push main 产出 Actions artifact，推 `v<version>` 标签（须等于 `pymolplugins/__init__.py` 的 `__version__`）发布 Release，含 ZIP 与 SHA256SUMS。ZIP 一律由 `scripts/package_plugin.py` 生成，不再手工打包。
+- 发布走 GitHub 公开仓库 `xcflab/pymol_scripts`（origin，main）：安装包由 `.github/workflows/package.yml` 自动构建，push main 产出 Actions artifact，推 `v<version>` 标签（须等于 `pymolplugins/__init__.py` 的 `__version__`）发布 Release，含 ZIP 与 SHA256SUMS。ZIP 一律由 `scripts/package_plugin.py` 生成，不再手工打包。
 
 ## 长期发现
 既有 Host 记录见 docs/implementation_status.md。历史已通过不等于本版本重新通过；新验收保留失败 JSON 和原生截图。
@@ -57,3 +57,5 @@ SSH桌面入口0.12.3已交付：同一权威记录末尾“SSH桌面入口修�
 证据output/16_filter_groups_20261002.json passed（最终ZIP临时安装、旧配置、3分组、重叠/空组、编辑新增删除/override重开/换源/源内容不变），7项合同单测及prompt示例真实解析通过；编辑页/菜单/当前组截图已看。保留两次验收菜单点击问题的失败日志，最终修正为模态菜单循环内定时真实点击。所有执行句柄终态，停止的仅是明确owned测试PID9672，用户PyMOL未动，遗留临时安装已清理。下一步用户安装dist/PymolPlugins-0.14.0.zip并重启，使用新prompt整理后续产物。
 
 自动参考0.14.1：reference_column现在驱动导入/切step自动加载，当前步隐藏/失败/取消不自动重试；候选不移动，仅reference对齐显示。独立Linux clone分支codex/automatic-step-reference，交付dist/PymolPlugins-0.14.1.zip；同一权威执行记录末尾“自动reference最终交付”保存复现及边界。真实Linux PyMOL2.6.2/Qt与cal53原结构通过，Windows未实测、用户安装未修改。
+
+自动发布/自更新0.15.0：用户2026-10-13明确授权仓库直接公开、合并及发布。main新版本通过package/layout/updater测试后自动创建v版本Release、ZIP与SHA256SUMS，已有Release不覆盖；PR只构建artifact。插件公开读取正式Release，默认启动后台检查，Updates中可启用自动安装，校验包后同卷替换、保留备份，需重启。沿用同一权威记录“自动发布与插件更新”。

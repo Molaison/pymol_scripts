@@ -77,6 +77,11 @@ menus = {}
 plugins.addmenuitemqt = lambda label, callback: menus.setdefault(label, callback)
 sys.modules.update({"pymol": pymol, "pymol.Qt": qt, "pymol.plugins": plugins})
 
+updates = types.ModuleType("pymolplugins.host.updater_widgets")
+updates.__file__ = str(installed / "pymol_plugins/pymolplugins/host/updater_widgets.py")
+updates.start_update_check = lambda: None
+sys.modules[updates.__name__] = updates
+
 bundle = importlib.import_module("pymol_plugins")
 bundle.__init_plugin__()
 assert set(menus) == {
@@ -84,6 +89,7 @@ assert set(menus) == {
     "PymolPlugins: Capabilities", "PymolPlugins: Command Help",
     "PymolPlugins: Structure Annotator",
     "PymolPlugins: Batch Processing",
+    "PymolPlugins: Updates",
 }, menus
 assert all(callable(callback) for callback in menus.values())
 loaded = menus["PymolPlugins: Load Toolkit"]()
