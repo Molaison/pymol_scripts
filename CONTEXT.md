@@ -65,3 +65,5 @@ SSH桌面入口0.12.3已交付：同一权威记录末尾“SSH桌面入口修�
 reference当前合同（0.15.1）：用户明确要求常驻固定对象，已替代0.14.1的删除/重载及reference跟随对齐。每源唯一参考缓存，切步enable/disable；reference原始坐标保持，candidate会话对象对齐并zoom配对，同名candidate重载会重新align。换源/关闭清理，磁盘PDB和评分不变。真实四步验证output/19_fixed_reference_linux_20261013.json通过，保留两个reference、回访同名复用、参考坐标误差0、四份源文件未改；Windows未实测。
 
 0.15.1已正式发布：https://github.com/Molaison/pymol_scripts/releases/tag/v0.15.1；PR2/3/4均合并。25项CI及真实Linux公开Release升级/新进程启动通过，证据18_release_update_linux与19_fixed_reference_linux，同一权威记录末尾“0.15.1最终发布与验收”。首次安装修正版后可启用自动安装，后续版本合入main自动发布。Windows用户安装未改、未实测。
+
+0.16.0当前合同：reference不再是专用自动启动/对齐功能。review.json.steps定义有序object/commands，固定对象差量复用，on_load_cmd只在加载或显式修改定义时运行，step_cmd及独立commands按配置执行；任意命名对象占位符在加载后可用。More/Automation的Review steps编辑器支持添加、移除、上下移动及fixed/路径列/命令；filter_text与sort_column/sort_descending可作review默认，Filter控制候选顺序。显式步骤的文件准备在worker进行，Qt按实际顺序提交；该模式不提前加载场景对象，文件缓存继续复用。普通数据保持原流程。原cal53完整CSV验证和实际编辑/保存/重开证据见同一权威记录新节，不以小样本替代完整导入。

@@ -484,3 +484,17 @@ PR #2/#3/#4均已合并；最新功能main为31022796a6a4f15a1d11c763dde9b38bd74
 复现升级：rtk proxy env -u HTTPS_PROXY -u HTTP_PROXY -u ALL_PROXY -u https_proxy -u http_proxy -u all_proxy QT_QPA_PLATFORM=offscreen /xcf26/zpzeng/miniconda/bin/python tests/host/03_release_update_linux.py dist/PymolPlugins-0.14.1.zip --output output/18_release_update_linux_20261013.json
 
 所有本轮实现代理与验收句柄终态。交付步骤：首次手动安装0.15.1并完全退出重启PyMOL，打开原sum_scores.csv；Plugin > PymolPlugins: Updates中可启用Automatically install stable updates。今后更新版本号合入main会自动测试、构建和发布。0.15.0因ownership发生在发布后，其固定旧owner校验无法自更新到转移后的资产；本次需手动安装修正版。后续Windows实际行为仍待用户环境反馈，不把本机验收当已更新用户桌面。
+
+## 可配置多object步骤与原CSV诊断（2026-10-13，执行中）
+
+用户进一步明确：reference是可自定义对象，不是通用启动/对齐功能；需要固定缓存并避免不必要enable/disable，支持候选浏览顺序和步内动作顺序。原完整CSV仍不工作，用户确认是原publish路径。父负责完整5065行实际文件诊断、科学包review配置/生成器、版本0.16.0及最终验证发布；automatic_reference_loading负责annotation通用有序对象/命令steps与编辑入口、导入/持久化和定向回归。新分支codex/configurable-review-steps，仍用本唯一记录；不新建执行任务、不修改后台优化。默认无特定reference行为；包自身显式配置参考加载/样式/对齐，旧配置继续可读。
+
+0.15.1原完整CSV基线：output/20_full_csv_baseline_20261013.json，5065行1.23秒完整导入，首次确实两个object但相同PDB（row_type=cluster_best_reference），下一步同ref有disable+enable。此为本机事实，未证明用户Windows同一现象的唯一原因。
+
+最终0.16.0 ZIP实际验证：output/21_full_csv_steps_20261013.json passed/exit0，直接打开用户指定原路径完整5065行，原CSV SHA256仍44c4d609cea3fd52a1a5df6efeb19a1a96ef883676744b97730617a6af90e7e9。新sidecar默认5039候选且按reference_path排序，26参考行通过References/All structures视图仍可查看。实际load顺序reference→candidate，然后执行本包显式align与显示命令；相邻同ref零load/enable/disable，reference坐标变化0。导入约1.47秒仅代表本次Linux本地观测，不宣称远端或Windows性能。
+
+output/22_configurable_objects_gui_20261013.json passed/exit0：任意名overlay、无align配置时没有自动变换；四步切换/回访固定对象复用，4份输入PDB不变。真实Qt编辑器将candidate上移并修改固定对象on_load颜色为magenta，保存override后立即生效，关闭重开后真实加载顺序candidate→overlay。首轮编辑/保存已通过但重开遇原workspace浮动几何在offscreen小屏的windowHandle None，保留22_configurable_objects_offscreen_geometry_failed；本次测试改用原生docked fixture，未修改生产窗口代码，也不宣称浮动窗口新验收通过。
+
+本地43项packaging/layout/updater/ordered-steps/review-import/command-template测试通过，另1项实际Qt编辑器测试通过。CI加入相关导入与模板模块。显式steps准备失败保留旧场景、取消与迟到结果不提交；固定对象定义变化只在提交时刷新受影响对象，普通相邻step不重新解析固定路径。所有源码写者已完成；核心与最终包实测边界已满足，无额外复审波次。
+
+科学包review.json、README及两个生成器已同步新合同；sum_scores.csv与分数均未重算/重写，用户override未改。下一步合并并由既有main工作流自动发布0.16.0，用户更新插件重启后重新打开原CSV。Windows未实测、当前用户安装未修改。

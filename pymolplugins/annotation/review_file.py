@@ -11,10 +11,11 @@ import tempfile
 from pymolplugins.core.windows_paths import windows_long_path
 from .command_templates import validate_commands
 from .filtering import validate_filter_presets
+from .review_steps import effective_steps, validate_steps
 from pymolplugins.remote.ssh import SshClient, is_ssh_path, parse_ssh_path, ssh_source_root
 
 
-REVIEW_KEYS = ("path_column", "display_columns", "label_column", "reference_column", "step_cmd", "bucket_cmds", "filter_presets")
+REVIEW_KEYS = ("path_column", "display_columns", "label_column", "reference_column", "step_cmd", "bucket_cmds", "filter_presets", "steps", "filter_text", "sort_column", "sort_descending")
 
 
 @dataclass(frozen=True)
@@ -32,7 +33,7 @@ def review_paths(table_path):
     return tuple(module.join(parent, name) for name in ("review.json", "review.override.json"))
 
 
-def validate_review_config(raw):
+def validate_review_config(raw, *, validate_order=True):
     """Validate exact column names and the shared PyMOL command template."""
     if not isinstance(raw, dict):
         raise ValueError("Review configuration must be a JSON object")
@@ -40,7 +41,7 @@ def validate_review_config(raw):
     if unknown:
         raise ValueError("Unknown review options: " + ", ".join(sorted(unknown)))
     result = dict(raw)
-    for name in ("path_column", "label_column", "reference_column", "step_cmd"):
+    for name in ("path_column", "label_column", "reference_column", "step_cmd", "filter_text", "sort_column"):
         if name in raw and not isinstance(raw[name], str):
             raise ValueError(name + " must be a string")
     if "path_column" in raw and not raw["path_column"].strip():
@@ -56,7 +57,13 @@ def validate_review_config(raw):
     if not isinstance(buckets, dict) or any(not isinstance(k, str) or not isinstance(v, str)
                                             for k, v in buckets.items()):
         raise ValueError("bucket_cmds must map label values to command strings")
-    validate_commands(raw.get("step_cmd", ""), buckets)
+    if "sort_descending" in raw and type(raw["sort_descending"]) is not bool:
+        raise ValueError("sort_descending must be true or false")
+    if validate_order:
+        steps = effective_steps(raw.get("steps", []), raw.get("reference_column", ""))
+        validate_steps(steps, raw.get("step_cmd", ""))
+        names = [item["name"] for item in steps if item["type"] == "object"]
+        validate_commands(raw.get("step_cmd", ""), buckets, names)
     if "filter_presets" in raw:
         result["filter_presets"] = validate_filter_presets(raw["filter_presets"])
     return result
@@ -70,6 +77,10 @@ def validate_review_columns(config, columns):
     if missing:
         raise ValueError("Review configuration names unknown table columns: " + ", ".join(dict.fromkeys(missing)))
     validate_filter_presets(config.get("filter_presets", []), columns)
+    validate_steps(effective_steps(config.get("steps", []), config.get("reference_column", "")),
+                   config.get("step_cmd", ""), columns)
+    if config.get("sort_column") and config["sort_column"] not in columns:
+        raise ValueError("Review configuration names unknown sort column: " + config["sort_column"])
 
 
 def _signature(path):
@@ -102,7 +113,7 @@ def read_review_file(table_path, *, cancel_event=None):
             if value["status"] != "missing":
                 try:
                     raw = json.loads(base64.b64decode(value["content"]).decode("utf-8-sig"))
-                    config.update(validate_review_config(raw))
+                    config.update(validate_review_config(raw, validate_order=False))
                 except (UnicodeError, ValueError) as exc:
                     raise ValueError(f"Cannot load remote {path}: {exc}") from exc
         paths = paths[1:]
@@ -114,12 +125,12 @@ def read_review_file(table_path, *, cancel_event=None):
         try:
             with open(windows_long_path(path), encoding="utf-8-sig") as handle:
                 raw = json.load(handle)
-            config.update(validate_review_config(raw))
+            config.update(validate_review_config(raw, validate_order=False))
         except (OSError, UnicodeError, ValueError) as exc:
             raise ValueError(f"Cannot load {path}: {exc}") from exc
         if _signature(path) != before:
             raise RuntimeError(f"Review configuration changed while reading: {path}")
-    return ReviewFile(config, tuple(signatures))
+    return ReviewFile(validate_review_config(config), tuple(signatures))
 
 
 def check_review_unchanged(table_path, review, *, cancel_event=None):

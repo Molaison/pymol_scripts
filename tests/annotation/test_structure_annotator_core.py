@@ -91,6 +91,10 @@ class FakeCmd:
 
     def do(self, command, echo=1):
         self.commands.append(command)
+        completion = re.search(r"\._complete_execution\('([a-f0-9]+)'\)$", command)
+        if completion:
+            from pymolplugins.targets.commands import _complete_execution
+            _complete_execution(completion[1])
         marker = re.search(r"; select (ppfe_ack_[a-f0-9]+), none, enable=0, quiet=1$", command)
         if marker:
             self.types[marker[1]] = "selection"
