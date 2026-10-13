@@ -498,3 +498,7 @@ output/22_configurable_objects_gui_20261013.json passed/exit0：任意名overlay
 本地43项packaging/layout/updater/ordered-steps/review-import/command-template测试通过，另1项实际Qt编辑器测试通过。CI加入相关导入与模板模块。显式steps准备失败保留旧场景、取消与迟到结果不提交；固定对象定义变化只在提交时刷新受影响对象，普通相邻step不重新解析固定路径。所有源码写者已完成；核心与最终包实测边界已满足，无额外复审波次。
 
 科学包review.json、README及两个生成器已同步新合同；sum_scores.csv与分数均未重算/重写，用户override未改。下一步合并并由既有main工作流自动发布0.16.0，用户更新插件重启后重新打开原CSV。Windows未实测、当前用户安装未修改。
+
+### 0.16.0最终交付
+
+PR #5已合并（main功能commit 2e5cff33890c6f504cbd3bdc7b9c7b343ae96b85），43项CI通过，自动发布run38397263655成功。正式Release https://github.com/Molaison/pymol_scripts/releases/tag/v0.16.0 ，ZIP486625字节与SHA256SUMS均已上传。最终包的完整CSV和真实Qt编辑/保存/重开证据21/22均passed、退出0；额外1项Qt编辑器测试passed。所有实现代理与验收句柄终态，用户现有PyMOL安装未改。下一步更新0.16.0并完全重启，重新打开原CSV；More → Review steps…改对象/命令/内部顺序，Filter改候选顺序。该Linux证据不冒充Windows桌面验收。

@@ -67,3 +67,5 @@ reference当前合同（0.15.1）：用户明确要求常驻固定对象，已�
 0.15.1已正式发布：https://github.com/Molaison/pymol_scripts/releases/tag/v0.15.1；PR2/3/4均合并。25项CI及真实Linux公开Release升级/新进程启动通过，证据18_release_update_linux与19_fixed_reference_linux，同一权威记录末尾“0.15.1最终发布与验收”。首次安装修正版后可启用自动安装，后续版本合入main自动发布。Windows用户安装未改、未实测。
 
 0.16.0当前合同：reference不再是专用自动启动/对齐功能。review.json.steps定义有序object/commands，固定对象差量复用，on_load_cmd只在加载或显式修改定义时运行，step_cmd及独立commands按配置执行；任意命名对象占位符在加载后可用。More/Automation的Review steps编辑器支持添加、移除、上下移动及fixed/路径列/命令；filter_text与sort_column/sort_descending可作review默认，Filter控制候选顺序。显式步骤的文件准备在worker进行，Qt按实际顺序提交；该模式不提前加载场景对象，文件缓存继续复用。普通数据保持原流程。原cal53完整CSV验证和实际编辑/保存/重开证据见同一权威记录新节，不以小样本替代完整导入。
+
+0.16.0已发布（PR5合并、main自动发布run38397263655成功）：https://github.com/Molaison/pymol_scripts/releases/tag/v0.16.0。完整原CSV5065行、默认5039candidate、固定对象零重复toggle、任意名对象无强制对齐，以及GUI改顺序/命令保存重开均实测通过。权威记录末尾0.16.0最终交付；用户安装未改，Windows未实测。
