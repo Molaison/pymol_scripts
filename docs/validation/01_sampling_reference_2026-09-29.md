@@ -472,3 +472,15 @@ PR #3已合并main 977805b903b78acacc0c004cf6cd408354217190，CI通过，自动�
 用户进一步澄清reference应常驻object按需enable，并明确选择reference坐标固定、candidate对齐到它。此前删除/重载并移动reference的方法不再符合当前合同。0.15.1同时修正reference生命周期：数据源内唯一参考缓存，切步禁用/启用，候选重载重新对齐，不改变磁盘PDB或重算评分；无reference配置/空值需在面板显示原因。实际cal53审阅表5065行reference均非空且本地存在，review.json已配置reference_column、未发现本地override；用户当前Windows安装版本未得到确认，不据此猜测无显示根因。
 
 0.15.1最终包固定参考实测passed，exit0：output/19_fixed_reference_linux_20261013.json。真实cal53 0015→0017→空ref→回访0015，两个reference对象始终保留，旧ref disabled，回访同名复用；参考原始坐标最大误差0，4份PDB hash不变，候选会话对象对齐到参考。9项固定参考定向回归、16项打包/布局/更新回归通过，CI增加reference回归入口。anonymous numeric API初遇共享IP 60/h限流，重置后无token实测成功返回Molaison正式Release和匹配资产；不是endpoint缺失。下一步合并当前修复并自动发布0.15.1，然后完成真实旧包到新Release的整链路升级。
+
+### 0.15.1最终发布与验收
+
+PR #2/#3/#4均已合并；最新功能main为31022796a6a4f15a1d11c763dde9b38bd74b1f33。25项CI通过，main自动发布run38392835768成功，正式Release：https://github.com/Molaison/pymol_scripts/releases/tag/v0.15.1 ，包含PymolPlugins-0.15.1.zip和SHA256SUMS；repo已按用户要求公开、当前owner为Molaison。固定仓库ID支持ownership转移；发布过的版本不覆盖。
+
+最终真实升级output/18_release_update_linux_20261013.json passed、进程退出0：临时Plugin Manager安装真实0.14.1包，无token读取公开numeric API，下载0.15.1正式资产、校验SHA和包结构、安装并保留旧包；用户设置不变、旧进程没有热重载。新进程实际加载0.15.1，启动后台检查显示Up to date，Updates菜单可见，自动安装复选项成功持久化。所有测试临时安装已清理，用户实际安装未修改。先前测试夹具和转移失败JSON保留，不冒充成功。
+
+固定reference最终证据仍为output/19_fixed_reference_linux_20261013.json，四步真实cal53导航、缓存enable/disable、固定参考坐标与输入文件保护通过。两份最终证据均为Linux PyMOL2.6.2/Qt，不包含Windows或渲染像素验收。
+
+复现升级：rtk proxy env -u HTTPS_PROXY -u HTTP_PROXY -u ALL_PROXY -u https_proxy -u http_proxy -u all_proxy QT_QPA_PLATFORM=offscreen /xcf26/zpzeng/miniconda/bin/python tests/host/03_release_update_linux.py dist/PymolPlugins-0.14.1.zip --output output/18_release_update_linux_20261013.json
+
+所有本轮实现代理与验收句柄终态。交付步骤：首次手动安装0.15.1并完全退出重启PyMOL，打开原sum_scores.csv；Plugin > PymolPlugins: Updates中可启用Automatically install stable updates。今后更新版本号合入main会自动测试、构建和发布。0.15.0因ownership发生在发布后，其固定旧owner校验无法自更新到转移后的资产；本次需手动安装修正版。后续Windows实际行为仍待用户环境反馈，不把本机验收当已更新用户桌面。

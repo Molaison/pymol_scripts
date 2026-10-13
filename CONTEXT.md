@@ -63,3 +63,5 @@ SSH桌面入口0.12.3已交付：同一权威记录末尾“SSH桌面入口修�
 2026-10-13用户转移ownership至Molaison/pymol_scripts，公开仓库ID830272878不变。更新源改固定numeric repository API并验证其返回的canonical Release资产，避免再次转移时失效。0.15.0首次自动Release已成功；0.15.1交付ownership修复，不覆盖旧资产。
 
 reference当前合同（0.15.1）：用户明确要求常驻固定对象，已替代0.14.1的删除/重载及reference跟随对齐。每源唯一参考缓存，切步enable/disable；reference原始坐标保持，candidate会话对象对齐并zoom配对，同名candidate重载会重新align。换源/关闭清理，磁盘PDB和评分不变。真实四步验证output/19_fixed_reference_linux_20261013.json通过，保留两个reference、回访同名复用、参考坐标误差0、四份源文件未改；Windows未实测。
+
+0.15.1已正式发布：https://github.com/Molaison/pymol_scripts/releases/tag/v0.15.1；PR2/3/4均合并。25项CI及真实Linux公开Release升级/新进程启动通过，证据18_release_update_linux与19_fixed_reference_linux，同一权威记录末尾“0.15.1最终发布与验收”。首次安装修正版后可启用自动安装，后续版本合入main自动发布。Windows用户安装未改、未实测。
