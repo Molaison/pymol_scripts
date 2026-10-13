@@ -50,7 +50,8 @@ jobs:
         run: |
           python3 -m unittest tests.architecture.test_plugin_package \
             tests.architecture.test_package_layout tests.host.test_updater \
-            tests.annotation.test_automatic_reference -v
+            tests.annotation.test_automatic_reference tests.annotation.test_review_import \
+            tests.annotation.test_command_templates -v
 
       - name: Build installable Plugin Manager ZIP
         run: python3 scripts/package_plugin.py

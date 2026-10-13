@@ -21,13 +21,38 @@ real Windows Host PyMOL. It covers a score CSV, independent row annotations,
 the default `K:` mapping, and optional WSL-only file staging. Use disposable
 inputs first; do not start with the only copy of a production score table.
 
-## 每一步自动加载参考
+## 自定义审阅步骤（0.16.0 起）
 
-CSV 的 `reference_column` 指定参考路径列后，首次导入、下一步、上一页和回访候选都会自动显示该行参考。每个参考首次在后台准备并加载为一个常驻橙色对象，名称含 `sa_reference_` 与参考文件名；同一数据源后续引用该参考时直接复用对象，不重新加载。路径映射、SSH 和文件缓存沿用候选的既有配置，不需要在 `step_cmd` 中添加命令。
+**More > Review steps…** 或 **Settings > Automation > Review steps…** 可添加对象、添加命令、上移或下移、选择路径列和 `fixed`，并编辑对象首次加载时的命令。列表顺序就是真实对象加载与命令执行顺序。保存写入 `review.override.json`，保留生成的 `review.json`；当前候选随后按新配置重新打开。
 
-参考保持输入文件的原始坐标，候选在 PyMOL 中对齐到固定参考。切步只禁用上一参考、启用当前参考，并缩放视图使当前配对可见；不会重新执行任意 step 命令。隐藏后重新显示及重复刷新不会重复施加同一对齐；候选被淘汰后同名重载会重新对齐。这里的对齐只用于显示，不改源 PDB/CIF，也不重新计算或覆盖 CSV 中的 RMSD 等科学评分。
+`candidate` 是主候选对象，列表中必须恰好出现一次，使用导入时的主结构列。其他对象名字可以自定义，例如 `scaffold`、`environment`、`reference`；名字唯一，路径来自各自的 `path_column`。`fixed: true` 表示每个路径首次加载后保留对象，同一引用相邻候选不重复 load、enable 或 disable；换引用才切换显示，回访复用原对象。未选 fixed 的对象每次进入候选时重新加载。改对象定义并保存后，受影响对象在下一次提交时刷新，其新 `on_load_cmd` 会生效。真正换数据源或关闭面板会删除插件持有的辅助对象。
 
-未配置参考列时，面板显示 **Reference: no column configured**；该行路径为空时显示 **Reference: no path…**，只显示候选。**Hide reference** 对当前候选持续有效；切换到另一个候选后恢复自动显示。**Show reference** 可手动重新显示或重试。参考准备失败或取消会保留候选并显示原因，本步不会自动反复重试。真正换数据源或关闭面板才删除插件持有的参考对象；迟到结果不会附着到新候选。
+对象项的 `on_load_cmd` 只在对象首次加载时运行；命令项可写独立的 `commands`，省略时使用现有的“**When a structure opens**”命令（`step_cmd`）。只可引用执行到当前位置已经存在的命名对象：`{candidate}`、`{scaffold}` 等；`{object}` 和 `{selection}` 始终指向已经加载的 candidate。引用尚未加载或该行没有路径的对象会明确报错。空辅助路径可跳过，不引用它的后续命令仍可运行。
+
+插件不自动 align、着色或 zoom；这些都由配置中的命令决定。下面的例子显式让候选对齐固定参考，仅改变显示，不修改结构源文件或 CSV 科学评分：
+
+```json
+{
+  "path_column": "structure_path",
+  "filter_text": "where:row_type == \"candidate\"",
+  "sort_column": "reference_path",
+  "sort_descending": false,
+  "steps": [
+    {"type": "object", "name": "reference", "path_column": "reference_path", "fixed": true,
+     "on_load_cmd": "show cartoon, {reference}\ncolor orange, {reference}"},
+    {"type": "object", "name": "candidate"},
+    {"type": "commands", "commands": "align {candidate}, {reference}"},
+    {"type": "commands"}
+  ],
+  "step_cmd": "show cartoon, {candidate}\nzoom ({candidate}) or ({reference})"
+}
+```
+
+候选浏览顺序与步内动作顺序分别设置：`sort_column` / `sort_descending` 控制候选排序，`steps` 控制当前候选内的对象和动作顺序。`filter_text` 的表达式需以 `where:` 开头；Filter 界面仍可修改过滤与排序并保存。以上列名和筛选值只是例子，需与实际表一致。
+
+显式步骤先在后台准备全部必需文件，再由 Qt 主线程按顺序提交。固定对象已准备的路径复用缓存，不逐步重新 SSH stat。准备失败或取消会保留旧场景；迟到结果不会提交到另一个候选或数据源。显式步骤不提前加载场景中的候选对象，原有预加载设置保留，文件缓存仍生效。
+
+未配置 `steps` 时沿用“candidate → step_cmd”。旧 `reference_column` 可继续使用，它只映射成名为 reference 的通用固定对象，不再附带自动对齐、颜色或视图动作，也不作为通用启动项常驻展示。
 
 ## 新用户快速开始
 
@@ -85,7 +110,7 @@ The current GUI/performance evidence is in
 {"schema":"pymolplugins.ai-commands/1","steps":[{"step_id":"on_open","commands":["show cartoon, {object}","zoom {selection}"],"note":""},{"step_id":"after_label/Good","commands":["color cyan, {object}","show sticks, {selection}"],"note":""}]}
 ```
 
-`{selection}`等于`{object}`，随导航指向当前candidate；还支持现有`{file}`、`{index}`（从0开始）、`{count}`、`{entry_id}`、`{row_number}`。标签触发额外有`{label}`和`{value}`。没有`{reference}`、`{A}`、`{B}`；比较对象必须使用当前真实对象名。AI prompt包含准确契约、当前对象、所选step、合法示例和禁止Markdown/额外文字的要求；结构化API参数只是附加约束。
+`{selection}`等于`{object}`，随导航指向当前candidate；还支持现有`{file}`、`{index}`（从0开始）、`{count}`、`{entry_id}`、`{row_number}`。标签触发额外有`{label}`和`{value}`。使用自定义steps时，还支持此前步骤已加载的命名对象占位符（如`{reference}`）；`{A}`、`{B}`只有被明确配置成对象名字后才可用。AI prompt包含准确契约、当前对象、所选step、合法示例和禁止Markdown/额外文字的要求；结构化API参数只是附加约束。
 
 AI草稿支持show/hide/color、util.cbc/cnc/cbag/cbac、zoom/orient/center/align/super，以及对象范围内的set和spectrum明确子集，不支持任意Python、文件/系统操作或分号串联。原生解析和当前选择检查不等于保证今后每个结构都适用；例如某条链在后续结构缺失，仍由现有执行错误反馈报告。所有手写命令保持原能力。
 

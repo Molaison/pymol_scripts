@@ -3,7 +3,7 @@
 from string import Formatter
 
 
-STEP_FIELDS = {"object", "selection", "file", "index", "count", "entry_id", "row_number"}
+STEP_FIELDS = {"object", "selection", "candidate", "file", "index", "count", "entry_id", "row_number"}
 BUCKET_FIELDS = STEP_FIELDS | {"label", "value"}
 
 VIEW_PRESETS = {
@@ -87,6 +87,7 @@ def format_commands(template, context):
     values = dict(context)
     if "object" in values:
         values["selection"] = values["object"]
+        values["candidate"] = values["object"]
     lines = []
     for number, raw in enumerate(str(template or "").splitlines(), 1):
         line = raw.strip()
@@ -110,10 +111,10 @@ def format_commands(template, context):
     return lines
 
 
-def validate_commands(step, buckets):
-    format_commands(step, {name: "sa_current_structure" for name in STEP_FIELDS})
+def validate_commands(step, buckets, object_names=()):
+    format_commands(step, {name: "sa_current_structure" for name in STEP_FIELDS | set(object_names)})
     for label, template in buckets.items():
         try:
-            format_commands(template, {name: "sa_current_structure" for name in BUCKET_FIELDS})
+            format_commands(template, {name: "sa_current_structure" for name in BUCKET_FIELDS | set(object_names)})
         except ValueError as exc:
             raise ValueError("After annotation %r: %s" % (label, exc)) from exc

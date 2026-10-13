@@ -65,9 +65,9 @@ Host my-lab
 
 Plugin > PymolPlugins: Updates 可检查并安装公开正式版本。默认启动时后台检查；启用 Automatically install updates 后自动安装。下载包会校验 SHA256，安装保留上一版本备份，完成后需完全重启 PyMOL。首次从 0.14.x 升级仍需手动安装本 ZIP。
 
-## 自动参考对照
+## 可配置审阅步骤
 
-review.json 设置 reference_column 后，对应参考首次使用时载入为固定橙色 object；切换 step 只 enable/disable 并重用，候选对齐到固定参考。Hide reference 可隐藏当前步的参考；下一步恢复显示。加载失败后可点 Compare reference 重试。
+review.json 的 steps 列表定义命名对象和命令的执行顺序。固定对象只加载一次，同一路径连续使用保持启用；对齐、配色和显示均由命令决定。Steps 编辑器可添加、编辑及上下移动动作；候选浏览顺序在 Filter 中设置。未配置 steps 的普通数据继续使用原 step_cmd。
 
 ## 筛选分组
 
