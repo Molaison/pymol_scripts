@@ -11,6 +11,12 @@ real Windows Host PyMOL. It covers a score CSV, independent row annotations,
 the default `K:` mapping, and optional WSL-only file staging. Use disposable
 inputs first; do not start with the only copy of a production score table.
 
+## 每一步自动加载参考
+
+CSV 的 `reference_column` 指定参考路径列后，首次导入、下一步、上一页和回访候选都会自动加载该行参考。参考沿用候选的路径映射、SSH 和缓存，在后台准备；成功后显示为橙色，并只移动参考来对齐当前候选。候选坐标和颜色保持不变，不需要在 `step_cmd` 中添加命令。
+
+未配置参考列或该行为空时，只显示候选。**Hide reference** 对当前候选持续有效；切换到另一个候选后恢复自动加载。**Compare reference** 可手动重新显示或重试。参考准备失败或取消会保留候选并显示原因，本步不会自动反复重试。换候选、换数据源或关闭面板会清理旧参考；迟到结果不会附着到新候选。
+
 ## 新用户快速开始
 
 **0.12.4** 打开页只保留必要控件。右上角 **?** 可查看帮助；没有服务器可选时，点 **Set up SSH… > First SSH connection…**。SSH 登录程序在 **Advanced** 中按需展开。

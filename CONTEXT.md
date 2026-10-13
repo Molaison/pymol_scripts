@@ -55,3 +55,5 @@ SSH桌面入口0.12.3已交付：同一权威记录末尾“SSH桌面入口修�
 0.14.0筛选分组已交付：review.json可选filter_presets（name/expression及sort_column/sort_descending），使用现有安全表达式引擎和唯一STATE导航。Filter箭头一键切组、当前组名/菜单勾选；Filter页编辑/保存/新增/删除。可重叠、不自动标注、不移动结构，空组保持0；人的修改原子写review.override.json，不覆盖生成配置，数组整体覆盖，[]可清空。换数据源清旧分组，旧review.json不需要修改；新字段要求0.14.0+。
 完整产物prompt在docs/structure_annotator_csv_walkthrough.md末尾，保留hardlink/raw打分不重算/代表性label/4–6关键指标，加入有依据的具体阈值、表达式合同、重叠/缺失/未覆盖计数和不覆盖人工override。未给实际运行路径，本轮不生成科学产物。
 证据output/16_filter_groups_20261002.json passed（最终ZIP临时安装、旧配置、3分组、重叠/空组、编辑新增删除/override重开/换源/源内容不变），7项合同单测及prompt示例真实解析通过；编辑页/菜单/当前组截图已看。保留两次验收菜单点击问题的失败日志，最终修正为模态菜单循环内定时真实点击。所有执行句柄终态，停止的仅是明确owned测试PID9672，用户PyMOL未动，遗留临时安装已清理。下一步用户安装dist/PymolPlugins-0.14.0.zip并重启，使用新prompt整理后续产物。
+
+自动参考0.14.1：reference_column现在驱动导入/切step自动加载，当前步隐藏/失败/取消不自动重试；候选不移动，仅reference对齐显示。独立Linux clone分支codex/automatic-step-reference，交付dist/PymolPlugins-0.14.1.zip；同一权威执行记录末尾“自动reference最终交付”保存复现及边界。真实Linux PyMOL2.6.2/Qt与cal53原结构通过，Windows未实测、用户安装未修改。

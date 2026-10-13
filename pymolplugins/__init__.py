@@ -5,4 +5,4 @@ PyMOL.  Host-only modules import :mod:`pymol` lazily or behind an explicit
 adapter boundary; pure computation lives under :mod:`pymolplugins.core`.
 """
 
-__version__ = "0.14.0"
+__version__ = "0.14.1"

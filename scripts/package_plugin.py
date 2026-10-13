@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
 PACKAGE_ROOT = ROOT / "pymolplugins"
 PLUGIN_NAME = "pymol_plugins"
-INSTALL_TEXT = """# 安装 PymolPlugins（0.14.0）
+INSTALL_TEXT = """# 安装 PymolPlugins（0.14.1）
 
 需要带 Qt 图形界面的 PyMOL 和 Python 3。
 
@@ -60,6 +60,10 @@ Host my-lab
 | 远端没有 Python 3 | 确认 `ssh my-lab python3 --version` 可用，必要时请管理员安装。 |
 | 表格打开但没有结构 | 选择实际包含 `.pdb`、`.cif` 或其 `.gz` 路径的 **Structure column**。 |
 | 长时间等待 | 查看连接/认证、队列、读取或下载阶段；可取消，修复连接、认证或路径后重试。 |
+
+## 自动参考对照
+
+review.json 设置 reference_column 后，打开结构及切换 step 会自动加载对应参考，显示为橙色并对齐到候选。Hide reference 可隐藏当前步的参考；下一步恢复自动加载。加载失败后可点 Compare reference 重试。
 
 ## 筛选分组
 
