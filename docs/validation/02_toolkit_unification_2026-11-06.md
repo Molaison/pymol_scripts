@@ -127,3 +127,23 @@ python -m unittest tests.annotation.test_ssh_otp -v
 python scripts/package_plugin.py
 & 'D:/Softwares/Pymol3.1/python.exe' -I -u tests/host/plugin_package_smoke.py dist/PymolPlugins-0.17.0.zip --output output/12_package_install.json
 ```
+
+## 2026-11-07 主分支合并与自动更新交付
+
+用户随后授权合并到主分支，并要求配置自动或便捷更新。`66060ee` 已快进进入 GitHub `Molaison/pymol_scripts` 的 `main`；[构建与发布 42248314684](https://github.com/Molaison/pymol_scripts/actions/runs/42248314684) 成功，发布了 v0.17.0。原旧工作树持有的本地 main 和未提交文件保持原状；合并目标是远端主分支。
+
+实际配置更新时，旧 0.16.0 更新器遇到 GitHub 匿名 API 403，响应明确 `X-RateLimit-Remaining=0`，公开 Release 下载仍成功。`72d9d0f` 增加仅限 API 配额耗尽时使用公开 `releases/latest`、稳定 tag 与 SHA256SUMS 的检查路径，继续验证版本、ZIP 路径和 SHA256；不要求用户添加 token。该修复已进入 main，[构建与发布 42249640595](https://github.com/Molaison/pymol_scripts/actions/runs/42249640595) 成功，[v0.17.1 已正式发布](https://github.com/Molaison/pymol_scripts/releases/tag/v0.17.1)。使用方式依据 GitHub 官方 [限流说明](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api) 和 [Release 链接说明](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)。
+
+本机实际安装 `D:/Softwares/Pymol3.1/Lib/site-packages/pmg_tk/startup/pymol_plugins` 已从 0.16.0 升到 0.17.1，旧版保存在同级 `.pymol_plugins-backup`。首次升级由修复后的更新器通过公开稳定版入口引导完成，读取正式 Release、校验 SHA256/版本并执行原子替换；没有声称旧更新器已经能够自行克服限流。新进程从实际 Plugin Manager 注册路径加载 0.17.1，启动检查返回 `Up to date: 0.17.1`，OTP 原生组件存在。
+
+用户配置 `C:/Users/ADMIN/AppData/Roaming/PymolPlugins/Workspaces.ini` 中的 `updates/auto_check`、`updates/auto_install` 均已设为 true，插件 autoload 为 true。此为本机设置；其他用户的默认值仍是启动检查开启、自动安装关闭。入口为 **Plugin → PymolPlugins: Updates**，可手动 **Check now / Download and install**。未来稳定版在启动检查后自动安装，完整退出并重开 PyMOL 后生效。检查时没有正在运行的本机 PyMOL 进程；未关闭用户会话。
+
+| 检查 | 实际结果与证据 |
+| --- | --- |
+| 旧版真实网络失败与公开下载 | API 403/remaining=0、Release 清单 HTTP 200；`output/13_update_network_probe.json`，已去除临时下载 URL 的签名参数 |
+| 更新器定向与规定检查 | 12 项更新器检查、46 项规定检查通过；`output/14_updater_tests.log`、`output/14_package_checks.log`；CI 同样成功 |
+| 正式版真实安装 | 0.17.1 校验后替换、备份版本 0.16.0；`output/14_install_stable.json` |
+| 已安装版真实 Qt 启动检查 | 版本、注册路径、持久配置、autoload、最新状态通过；`output/15_confirm_updates.json`，对应 PNG 已查看 |
+| 用户文档 | GPT-6.1 Terra 原会话同步首页、完整指南和包内 INSTALL；`output/14_terra_updates_result.md` |
+
+当前发布与本机更新已完成，无待监督进程。以后使用 Updates 入口即可；真实 F101 OTP 登录仍需按该 Host 的密钥配置完成后验收。
