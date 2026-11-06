@@ -1,6 +1,6 @@
 # 用 Structure Annotator 审阅评分表和结构
 
-打开本地或 SSH 上的 CSV/TSV 和 PDB/CIF，在 PyMOL 中查看分数、筛选、标注并继续审阅。需要已安装带 Qt 的插件和自己的结构文件；首次安装见 [快速开始](structure_annotator_quickstart.md)。本页面向 0.17.0 候选；正式版功能以所安装版本为准。
+打开本地或 SSH 上的 CSV/TSV 和 PDB/CIF，在 PyMOL 中查看分数、筛选、标注并继续审阅。需要已安装带 Qt 的插件和自己的结构文件；首次安装见 [快速开始](structure_annotator_quickstart.md)。0.17.0 已正式发布，正式版及其安装包见 [最新 Release](https://github.com/Molaison/pymol_scripts/releases/latest)。
 
 ## 打开评分表
 
@@ -137,7 +137,15 @@ sa_cache_status 1
 
 ## 更新插件
 
-使用 **Plugin → PymolPlugins: Updates** 检查正式 Release。启动时后台检查默认开启，自动安装默认关闭；可在设置中更改。更新器校验 Release 的 `SHA256SUMS`、ZIP 结构和版本，替换失败恢复原目录；安装后完全退出并重启 PyMOL。设置、标注和科学源文件不参与替换。上一版保存在安装目录旁的 `.pymol_plugins-backup`；需要恢复时先关闭 PyMOL，再将备份改回 `pymol_plugins`。
+打开 **Plugin → PymolPlugins: Updates**，点击 **Check now** 检查正式版本；发现更新后点击 **Download and install**。安装完成后完全退出并重新打开 PyMOL；插件不会在当前会话热重载。
+
+在同一窗口，**Check for updates when PyMOL starts** 控制启动时检查，默认开启；**Automatically install stable updates (restart required)** 控制自动安装稳定版本，默认关闭。两项可分别设置；自动安装后同样需要完全重启。
+
+0.17.1 起，如果 GitHub API 返回匿名额度耗尽的限流错误，更新器会尝试从公开的 [最新 Release](https://github.com/Molaison/pymol_scripts/releases/latest) 获取稳定版本和 `SHA256SUMS`，无需用户提供 GitHub token。此回退仅针对 API 限流；公开页面或下载不可访问等其他网络错误仍需处理。
+
+更新器继续校验 SHA256、版本和 ZIP 路径，在同一卷暂存和替换，失败时恢复原目录。设置、标注和科学源文件不参与替换。上一版保存在安装目录旁的 `.pymol_plugins-backup`；需要恢复时先关闭 PyMOL，再将备份改回 `pymol_plugins`。
+
+如果旧版更新器因 API 限流无法检查，可在 [最新 Release](https://github.com/Molaison/pymol_scripts/releases/latest) 提供 0.17.1 或更新版本后，下载 `PymolPlugins-<version>.zip`，在 **Plugin → Plugin Manager → Install New Plugin** 选择 ZIP，完成后完全退出并重启。
 
 <details>
 <summary>旧标题及详细条款索引</summary>

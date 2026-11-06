@@ -12,9 +12,11 @@
 2. 在 PyMOL 选择 **Plugin → Plugin Manager → Install New Plugin**，选择下载的 ZIP。
 3. 完全退出并重启 PyMOL。Plugin 菜单中出现 **PymolPlugins: Structure Annotator** 和 **PymolPlugins: Batch Processing**。
 
-本工作树的文档包含尚未正式发布的 0.17.0 候选功能：场景 group 审阅、候选及派生产物整组切换、统一补全和六个样式。正式版以 [Release](https://github.com/Molaison/pymol_scripts/releases/latest) 为准；候选功能见 [操作指南](docs/01_group_interaction_styles.md) 和 [验收记录](docs/validation/02_toolkit_unification_2026-11-06.md)。
+0.17.0 已正式发布，引入场景 group 审阅、候选及派生产物整组切换、interaction 改进、统一补全、六个样式和内置 SSH OTP。功能用法见 [操作指南](docs/01_group_interaction_styles.md) 和 [SSH 指南](docs/structure_annotator_csv_walkthrough.md#连接-ssh-数据源)。
 
-安装带更新器的版本后，可在 **Plugin → PymolPlugins: Updates** 检查正式版本。启动时后台检查默认开启，自动安装默认关闭；更新后仍需完全重启。
+更新插件时，打开 **Plugin → PymolPlugins: Updates**，点击 **Check now**，再点击 **Download and install**。也可启用 **Automatically install stable updates (restart required)**；**Check for updates when PyMOL starts** 默认开启，自动安装默认关闭。更新后完全退出并重新打开 PyMOL，当前会话不会热重载。
+
+0.17.1 起，遇到 GitHub API 匿名限流时，更新器会尝试公开 Release 页面并继续校验，无需 GitHub token；其他网络错误仍会报告。如果旧版更新器因 API 限流无法检查，可在 [最新正式 Release](https://github.com/Molaison/pymol_scripts/releases/latest) 提供 0.17.1 或更新版本后下载插件 ZIP，并按上述步骤安装。
 
 ## 第一次审阅
 
@@ -24,7 +26,7 @@
 4. 在 **Review** 查看当前结构和分数，选择标签并点 **Save and next**。你会看到下一条候选；普通点选是草稿，保存后才写入标注。
 5. 下次从 **Data → Continue last review** 恢复。无法判断时可用 **More → Mark current for later** 留待复核。
 
-源结构和评分表不会被标注流程改写；本地审阅状态和标注另存。SSH 数据源使用本机 SSH 配置，远端需 Python 3，原表和结构只读。0.17.0 候选版可在 **Connections…** 为服务器启用内置 **Automatic OTP**；填写认证器的 Base32 设置密钥，留空 SSH program，无需安装额外 wrapper。首次操作与截图见 [快速开始](docs/structure_annotator_quickstart.md)，设置和保存边界见 [SSH 指南](docs/structure_annotator_csv_walkthrough.md#连接-ssh-数据源)。
+源结构和评分表不会被标注流程改写；本地审阅状态和标注另存。SSH 数据源使用本机 SSH 配置，远端需 Python 3，原表和结构只读。0.17.0 起可在 **Connections…** 为服务器启用内置 **Automatic OTP**；填写认证器的 Base32 设置密钥，留空 SSH program，无需安装额外 wrapper。首次操作与截图见 [快速开始](docs/structure_annotator_quickstart.md)，设置和保存边界见 [SSH 指南](docs/structure_annotator_csv_walkthrough.md#连接-ssh-数据源)。
 
 ## 使用命令
 
@@ -52,7 +54,7 @@ pp_undo
 | 导入 CSV、SSH、筛选、Review steps、导出和缓存 | [Structure Annotator 完整指南](docs/structure_annotator_csv_walkthrough.md) |
 | 让 agent 整理已有结果，再导入和标注 | [整理并审阅运行产物](docs/02_agent_review.md) |
 | 成对处理结构、预览并保存结果 | [Batch Processing](docs/batch_processing_specification.md#usage) |
-| 切换场景 group、查看接触和使用绘图样式 | [0.17.0 候选版指南](docs/01_group_interaction_styles.md) |
+| 切换场景 group、查看接触和使用绘图样式 | [Group、interaction 和样式指南](docs/01_group_interaction_styles.md) |
 | 配置可选 PLIP / PyRosetta 计算服务 | [WSL worker](docs/wsl_worker.md) |
 | 查找旧设计和验收证据 | [历史与验收索引](docs/03_history_index.md) |
 

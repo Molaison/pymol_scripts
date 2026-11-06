@@ -20,6 +20,10 @@ REQUIRED = {"__init__.py", "pymolplugins/__init__.py", "plugins/pymol_plugins.py
             "pymolplugins/host/plugin.py"}
 
 
+class ReleaseRateLimit(RuntimeError):
+    """GitHub's public API quota is exhausted; release downloads still work."""
+
+
 def version_tuple(version):
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", str(version)):
         raise ValueError("Expected a stable major.minor.patch version")
@@ -47,14 +51,19 @@ def _open(url, accept="application/octet-stream"):
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             raise RuntimeError("No public stable release is available yet") from None
+        if exc.code == 429 or (exc.code == 403 and exc.headers.get("X-RateLimit-Remaining") == "0"):
+            raise ReleaseRateLimit("GitHub API rate limit reached") from None
         if exc.code == 403:
             raise RuntimeError("GitHub refused this request or its API rate limit was reached; try later") from None
         raise RuntimeError("GitHub update request failed (HTTP %s)" % exc.code) from None
 
 
 def check_release(current_version):
-    with _open(RELEASE_URL, "application/vnd.github+json") as response:
-        payload = json.load(response)
+    try:
+        with _open(RELEASE_URL, "application/vnd.github+json") as response:
+            payload = json.load(response)
+    except ReleaseRateLimit:
+        return _check_public_release(current_version)
     if payload.get("draft") or payload.get("prerelease"):
         raise ValueError("The update is not a published stable release")
     tag = str(payload.get("tag_name", ""))
@@ -85,6 +94,28 @@ def check_release(current_version):
     return result
 
 
+def _check_public_release(current_version):
+    """Resolve GitHub's stable-release page when its anonymous API is limited."""
+    with _open("https://github.com/" + REPOSITORY + "/releases/latest", "text/html") as response:
+        canonical = response.geturl()
+    location = re.fullmatch(
+        r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/releases/tag/v([0-9]+\.[0-9]+\.[0-9]+)",
+        canonical,
+    )
+    if location is None:
+        raise ValueError("Latest release must resolve to a stable GitHub tag")
+    version = location[3]
+    name = "PymolPlugins-%s.zip" % version
+    base = "https://github.com/%s/%s/releases/download/v%s/" % location.groups()
+    with _open(base + "SHA256SUMS") as response:
+        checksum_text = response.read(65537).decode("utf-8")
+    if len(checksum_text) > 65536:
+        raise ValueError("Release checksum manifest exceeds the size limit")
+    _expected_checksum(checksum_text, name)
+    return dict(version=version, newer=version_tuple(version) > version_tuple(current_version),
+                name=name, archive_url=base + name, checksum_url=base + "SHA256SUMS")
+
+
 def installation_root(module_file, registered_init):
     """Match the running code to PyMOL's registered PluginInfo.filename."""
     root = Path(module_file).absolute().parents[2]
@@ -105,8 +136,7 @@ def _package_version(path):
     return match[1]
 
 
-def _extract_verified(archive, checksum_text, expected_version, staging):
-    name = "PymolPlugins-%s.zip" % expected_version
+def _expected_checksum(checksum_text, name):
     checksums = []
     for line in checksum_text.splitlines():
         parts = line.split()
@@ -114,11 +144,17 @@ def _extract_verified(archive, checksum_text, expected_version, staging):
             checksums.append(parts[0].lower())
     if len(checksums) != 1 or not re.fullmatch(r"[0-9a-f]{64}", checksums[0]):
         raise ValueError("SHA256SUMS must contain exactly one checksum for " + name)
+    return checksums[0]
+
+
+def _extract_verified(archive, checksum_text, expected_version, staging):
+    name = "PymolPlugins-%s.zip" % expected_version
+    expected_checksum = _expected_checksum(checksum_text, name)
     digest = hashlib.sha256()
     with open(archive, "rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
-    if digest.hexdigest() != checksums[0]:
+    if digest.hexdigest() != expected_checksum:
         raise ValueError("Downloaded ZIP failed SHA256 verification")
     with zipfile.ZipFile(archive) as package:
         names = set()

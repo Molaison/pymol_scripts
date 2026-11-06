@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import urllib.request
+import urllib.error
 import zipfile
 
 from pymolplugins.host import updater
@@ -175,6 +176,47 @@ class UpdaterTests(unittest.TestCase):
         for url in ("http://github.com/file", "https://example.org/file"):
             with self.assertRaises(ValueError):
                 handler.redirect_request(request, None, 302, "Found", {}, url)
+
+    def test_api_rate_limit_uses_public_stable_release_and_canonical_assets(self):
+        page = io.BytesIO()
+        page.geturl = lambda: "https://github.com/new-owner/pymol_scripts/releases/tag/v0.15.0"
+        checksum = io.BytesIO(("a" * 64 + "  PymolPlugins-0.15.0.zip\n").encode())
+        with patch.object(updater, "_open", side_effect=[updater.ReleaseRateLimit(), page, checksum]) as fetch:
+            release = updater.check_release("0.14.1")
+        self.assertTrue(release["newer"])
+        self.assertEqual(release["version"], "0.15.0")
+        self.assertEqual(release["archive_url"], "https://github.com/new-owner/pymol_scripts/releases/download/v0.15.0/PymolPlugins-0.15.0.zip")
+        self.assertEqual(fetch.call_args_list[1].args, ("https://github.com/Molaison/pymol_scripts/releases/latest", "text/html"))
+        self.assertEqual(fetch.call_args_list[2].args, (release["checksum_url"],))
+
+    def test_public_fallback_rejects_unstable_tags_and_mismatched_checksums(self):
+        for target in ("https://example.org/releases/tag/v0.15.0",
+                       "https://github.com/Molaison/pymol_scripts/releases/tag/v0.15.1-rc1",
+                       "https://github.com/Molaison/pymol_scripts/releases/latest"):
+            page = io.BytesIO()
+            page.geturl = lambda: target
+            with patch.object(updater, "_open", side_effect=[updater.ReleaseRateLimit(), page]), self.assertRaises(ValueError):
+                updater.check_release("0.14.1")
+        page = io.BytesIO()
+        page.geturl = lambda: "https://github.com/Molaison/pymol_scripts/releases/tag/v0.15.0"
+        wrong = io.BytesIO(("a" * 64 + "  PymolPlugins-0.14.0.zip\n").encode())
+        with patch.object(updater, "_open", side_effect=[updater.ReleaseRateLimit(), page, wrong]), self.assertRaisesRegex(ValueError, "exactly one checksum"):
+            updater.check_release("0.14.1")
+
+    def test_only_rate_limit_errors_activate_public_fallback(self):
+        for code, remaining, expected in ((403, "0", updater.ReleaseRateLimit),
+                                           (429, None, updater.ReleaseRateLimit),
+                                           (403, "59", RuntimeError)):
+            error = urllib.error.HTTPError(updater.RELEASE_URL, code, "refused", {"X-RateLimit-Remaining": remaining}, None)
+            with patch.object(urllib.request.OpenerDirector, "open", side_effect=error):
+                with self.assertRaises(expected) as caught:
+                    updater._open(updater.RELEASE_URL)
+                if remaining == "59":
+                    self.assertNotIsInstance(caught.exception, updater.ReleaseRateLimit)
+        with patch.object(updater, "_open", side_effect=RuntimeError("denied")) as fetch:
+            with self.assertRaisesRegex(RuntimeError, "denied"):
+                updater.check_release("0.14.1")
+        fetch.assert_called_once()
 
 
 if __name__ == "__main__":

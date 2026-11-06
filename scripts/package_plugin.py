@@ -75,7 +75,9 @@ Host my-lab
 
 ## 插件更新
 
-Plugin > PymolPlugins: Updates 可检查并安装公开正式版本。默认启动时后台检查；启用 Automatically install updates 后自动安装。下载包会校验 SHA256，安装保留上一版本备份，完成后需完全重启 PyMOL。首次从 0.14.x 升级仍需手动安装本 ZIP。
+打开 **Plugin > PymolPlugins: Updates**，点击 **Check now**；发现更新后点击 **Download and install**。**Check for updates when PyMOL starts** 默认开启；**Automatically install stable updates (restart required)** 默认关闭，可在同一窗口启用。安装后完全退出并重新打开 PyMOL，当前会话不会热重载。
+
+0.17.1 起，GitHub API 匿名限流时更新器会尝试从公开 Release 页面获取稳定版本和 SHA256SUMS，无需 GitHub token；其他网络错误仍需处理。下载包继续校验 SHA256、版本和 ZIP 路径，同卷替换时保留备份，失败则恢复。若旧版更新器因 API 限流无法检查，可在 https://github.com/Molaison/pymol_scripts/releases/latest 提供 0.17.1 或更新版本后下载插件 ZIP，使用 Plugin Manager 安装并重启。首次从 0.14.x 升级仍需手动安装本 ZIP。
 
 ## 可配置审阅步骤
 
