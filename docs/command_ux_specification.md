@@ -1,236 +1,61 @@
-# PymolPlugins task-oriented command UX specification
+# 维护命令帮助与任务体验
 
-Status: active specification, 2026-07-27 (Asia/Shanghai)
+修改 PyMOL 命令、帮助、补全或错误提示时，用本页确定用户应如何发现、执行和恢复操作。先确认当前 manifest、实际签名和受影响的 Host 边界；提交前按下方流程核对可复制示例与返回结果。原始评分表、逐项 P0 回归和历史范围保留在 [详细规格](11_reference_command_ux_2026-11-06.md)。
 
-This document treats command efficiency as user efficiency: how quickly a new
-or returning user can discover the right workflow, predict its side effects,
-recover from an error, and obtain a scientifically useful result. Runtime
-performance remains important but is not a substitute for this contract.
+## 修改前确定用户任务
 
-## 1. Baseline problem
+1. 写出用户要完成的任务、实际输入、会改变的对象和最短成功路径。
+2. 查 `pp_help`、命令签名、manifest 和已有 canonical owner；优先调用已有状态机，不建立第二个导航游标、缓存、变换或 interaction 模型。
+3. 区分无需 mutation 的预览、真实执行、撤销/清理和不支持的操作；不把历史提案当作已交付能力。
 
-Before this iteration the manifest exposed 63 canonical `pp_*` commands.
-Including optional Structure Annotator console commands, the package defined 85
-`pp_*`/`sa_*` functions. Of the 63 canonical callbacks, 37 had no function
-docstring and 15 exposed at least eight parameters. `pp_help` returned only a
-category/name inventory, without usage, examples, side effects, recovery, or a
-recommended next action. Four grouping commands were loaded by `pp_load` but
-were absent from the manifest and bypassed the shared console adapter.
+默认帮助按任务列出不超过 12 个推荐入口，再提供类别和高级原语。原规范要求常用任务发现加执行不超过三条命令，推荐入口最多四个必需参数；具体 scientific 参数放在明确 preset 或高级帮助。
 
-Several safe low-level commands used action verbs while defaulting to preview.
-`pp_foreach` now executes by default after the exact no-op repro; explicit
-`commit=0` is its preview form. Advanced alignment and orientation primitives
-retain preview/commit records. A boolean such as `committed: false` is not an
-adequate human explanation: the first visible line must say that nothing was
-changed and show the shortest way to apply the reviewed result.
+## 编写帮助和结果
 
-## 2. Evaluation rubric
+`pp_help` 应能处理任务词、类别、preset、精确或模糊命令名；同一概念使用相同术语。帮助说明目的、最小语法、真实示例、场景影响、撤销和后续诊断。机器返回保持现有字典 schema，不为文案变化破坏调用者。
 
-Every task and public entry point is scored from 1 (unusable) to 5 (excellent):
+预览应说明没有改变，并给出实际执行方式；成功结果说明受影响目标和可用 undo/clear/stop。预期输入错误应指出错误参数、允许形式及修复方向，并保留旧状态；traceback 可供调试，不能是唯一解释。支持 `quiet=1` 的命令只抑制人类输出，不改变返回合同。
 
-| Dimension | 1 | 3 | 5 |
-| --- | --- | --- | --- |
-| Discoverability | requires source/docs search | category help finds a command | task phrase finds a runnable example |
-| Steps to success | more than five remembered actions | two to four documented actions | one command, or preview plus one apply |
-| Parameter clarity | internal names and many required knobs | defaults work but advanced knobs are exposed | task words, inferred inputs, advanced options hidden |
-| Outcome predictability | side effects are surprising or silent | structured status exists | first line states changed/unchanged targets and undo |
-| Error recovery | traceback/empty result only | error identifies bad value | actionable fix, fuzzy suggestion, state preserved |
-| Scientific usefulness | produces unclear/dead output | useful with manual interpretation | preset matches a real decision and explains provenance |
+`pp_nav objects` / `groups` 默认 Left/Right 前后、Ctrl+Left/Right 翻页；空命令行接收导航，有文字时保留光标编辑；`keys=0` 禁用绑定，`pp_nav stop` 恢复原快捷键与可见性。Annotator 的 Alt+Left/Right 是独立操作。修改帮助时同时核对任务和命令条目及搜索词。
 
-No workflow is accepted below 4 for outcome predictability or error recovery.
-A recommended workflow must reach at least 4 in every dimension.
+## 验证用户路径
 
-## 3. Progressive disclosure
+按发现、成功步骤、参数清晰度、结果可预测性、错误恢复和科学用途各评 1–5 分；原合同要求结果可预测性和错误恢复至少 4 分，推荐任务所有维度至少 4 分。检查这些路径：安装与 Host/WSL 边界；文件/对象/group 导航；目标迭代；表格导入、标注、撤销与导出；序列/配体对齐；轴、膜、跟随；样式；相互作用；可选 worker。
 
-The command surface has three levels:
+用真实 PyMOL `cmd.do` 检查引号、布尔、路径、选择表达式与实际注册；Qt 和场景行为用真实 Host，普通 Python 测试不能替代。检查空查询、未知查询、中文/英文别名及合理拼写错误；无关查询应得到 `no_match`。模糊匹配不能静默执行有歧义的破坏性操作。验收具体清单见 [Windows Host](windows_host_acceptance.md)。
 
-1. **Tasks**: at most twelve recommended workflows shown by default. Each has a
-   plain-language purpose and one copyable minimal example.
-2. **Categories**: navigation, objects/groups, annotation, alignment, geometry,
-   styles, interactions, and worker metrics. Category help shows the normal
-   workflow first and optional variations second.
-3. **Advanced primitives**: existing `pp_nav_*`, `pp_align_*`, `pp_axis_*`,
-   `pp_interact_*`, `sa_*`, and compatibility commands. They remain callable
-   for scripts but no longer dominate first-run help.
+## 区分命令默认值
 
-Existing command names and return schemas remain compatible unless a reproduced
-correctness bug makes that impossible. New task facades delegate to canonical
-implementations; they must not create a second cursor, transform store, cache,
-or interaction result model.
+任务级动作通常直接执行，支持的非破坏预览使用 `preview=1`；高级科学原语可有各自预览/提交合同。`pp_foreach` 的预览是 `commit=0`。自动识别只能在类型或目标无歧义时进行，多匹配应要求明确选择或显式 all-matches。所有示例中的对象与路径须说明前提，不能宣称占位文件存在。
 
-## 4. Common task acceptance
+历史 P0 重现、原始命令 UX 评分、版本特定的命令数量与未通过 Host 门禁均在 [详细规格](11_reference_command_ux_2026-11-06.md) 中按当时记录保留；当前证据见 [历史索引](03_history_index.md)。
 
-The default guide must cover these tasks without requiring source-code reading:
+<details>
+<summary>旧标题及详细条款索引</summary>
 
-1. verify installation and understand the Windows Host versus WSL boundary;
-2. browse files, existing objects, or root groups and move next/previous;
-3. apply a PyMOL action to one object, fuzzy-matched objects, or group members;
-4. open Structure Annotator, import a score CSV, annotate, undo, and export;
-5. align a payload by selections, sequence motif, or ligand;
-6. orient by PCA/cyclic symmetry, draw a membrane slab, or move a group rigidly;
-7. apply/revert a named visualization style;
-8. inspect protein/protein or protein/ligand interactions and clear/export them;
-9. diagnose and run optional WSL PLIP/Rosetta/ANVIL backends.
+原地址保留为兼容入口；以下条目指向重写前的详细参考。
 
-For the normal case, discovery plus execution is at most three commands and no
-recommended command has more than four required arguments. Optional scientific
-parameters live in a named preset/profile or advanced help.
+<a id="1-baseline-problem"></a>
+- [1. Baseline problem](11_reference_command_ux_2026-11-06.md#1-baseline-problem)
+<a id="2-evaluation-rubric"></a>
+- [2. Evaluation rubric](11_reference_command_ux_2026-11-06.md#2-evaluation-rubric)
+<a id="3-progressive-disclosure"></a>
+- [3. Progressive disclosure](11_reference_command_ux_2026-11-06.md#3-progressive-disclosure)
+<a id="4-common-task-acceptance"></a>
+- [4. Common task acceptance](11_reference_command_ux_2026-11-06.md#4-common-task-acceptance)
+<a id="5-help-and-result-contract"></a>
+- [5. Help and result contract](11_reference_command_ux_2026-11-06.md#5-help-and-result-contract)
+<a id="6-parameter-and-naming-contract"></a>
+- [6. Parameter and naming contract](11_reference_command_ux_2026-11-06.md#6-parameter-and-naming-contract)
+<a id="7-bug-and-environment-gates"></a>
+- [7. Bug and environment gates](11_reference_command_ux_2026-11-06.md#7-bug-and-environment-gates)
+<a id="8-iteration-policy"></a>
+- [8. Iteration policy](11_reference_command_ux_2026-11-06.md#8-iteration-policy)
+<a id="9-reproduced-implementation-backlog"></a>
+- [9. Reproduced implementation backlog](11_reference_command_ux_2026-11-06.md#9-reproduced-implementation-backlog)
+<a id="10-tier-1-facade-specification"></a>
+- [10. Tier-1 facade specification](11_reference_command_ux_2026-11-06.md#10-tier-1-facade-specification)
+<a id="11-current-validation-boundary"></a>
+- [11. Current validation boundary](11_reference_command_ux_2026-11-06.md#11-current-validation-boundary)
 
-## 5. Help and result contract
-
-`pp_help` must accept a task phrase, category, preset, or exact/fuzzy command
-name. Its human output includes:
-
-- purpose and whether the command reads, previews, or mutates state;
-- minimal syntax with defaults omitted;
-- one realistic example and its expected visible result;
-- apply/commit and undo/clear/stop instructions where relevant;
-- environment requirements and the next diagnostic for optional backends;
-- related task-level and advanced commands.
-
-Machine-readable results remain returned as dictionaries. Human console output
-leads with one concise outcome line. Preview results must literally say
-`Preview only; nothing changed` and supply an actionable next step. Successful
-mutations state the number and names of affected targets plus the available
-undo/clear/stop command. Expected input errors lead with the invalid field,
-accepted forms, fuzzy alternatives when possible, and confirmation that prior
-state was preserved. Detailed tracebacks may follow for debugging but may not
-be the only explanation. `quiet=1` suppresses human output without changing the
-return schema.
-
-## 6. Parameter and naming contract
-
-- Task-level commands use user concepts (`target`, `group`, `file`, `motif`,
-  `ligand`, `axis`, `membrane`, `style`, `contacts`) rather than controller
-  internals.
-- The same concept uses the same parameter name across task commands.
-- Auto detection may select files/objects/groups only when unambiguous; the
-  result reports what was inferred. Ambiguity returns choices instead of
-  guessing a destructive action.
-- Fuzzy matching is convenient but bounded. A mutating task may auto-accept
-  only one high-confidence match; multiple matches require preview or an
-  explicit all-matches option.
-- Task-level action names execute by default; supported non-mutating checks use
-  `preview=1`. Advanced scientific primitives retain their preview defaults,
-  while `pp_foreach` intentionally uses explicit `commit=0` after its reproduced
-  default-no-op failure.
-- Boolean tokens use the shared strict parser. Lists, Windows paths, UNC paths,
-  selections, regexes, and templates use the shared quote normalization and
-  have real PyMOL parser regressions.
-
-## 7. Bug and environment gates
-
-Every P0/P1 fix starts with an exact user-facing repro and a regression at the
-lowest faithful boundary. Parser, Qt, object-type, matrix, or Host/WSL bugs must
-also pass their real boundary gate; WSL fake-command tests are not evidence of
-Windows Host behavior. The minimum final matrix is:
-
-- complete WSL standard-library/fake-PyMOL suite;
-- Windows Python bundled with the reviewed PyMOL build;
-- real bundled Qt for command guide/Structure Annotator behavior;
-- real Windows PyMOL smoke through `cmd.do` for parser and scene mutation;
-- explicit open gate for PyMOL 2.x until that runtime is available.
-
-## 8. Iteration policy
-
-Work proceeds in small, reviewable batches: reproduce, specify, implement,
-regress, run the relevant Host boundary, independently review, then commit.
-After each batch, the same rubric is rescored and the next highest user-impact
-failure is selected. Runtime micro-optimizations do not take priority over a
-workflow that users cannot discover or correctly execute.
-
-## 9. Reproduced implementation backlog
-
-The first parallel audit produced the following historical input backlog; later
-sections record the implemented command/help surface. `P0` means a
-normal user path can lose data, delete/overwrite unrelated scene state, commit
-a scientifically stale result, or become impossible to recover without
-reloading the session.
-
-| ID | Priority | Reproduced failure | Minimum acceptance |
-| --- | --- | --- | --- |
-| ANNO-U01 | P0 | CSV files differing only by basename case share row IDs/state/annotation sidecars | Distinct files never share mutable state; legacy state migration is explicit |
-| ANNO-U02 | P0 | Re-imported exported annotation is treated only as metadata and the next export overwrites it blank | Export/import/export preserves reviewed values without a sidecar |
-| ANNO-U03 | P0 | Directory annotation rewrites source PDB/CIF in place; failure truncates it and values containing spaces are cut | Atomic replace with validated backup/rollback; complete value round-trip |
-| GROUP-U01 | P0 | `replace=1` deletes a non-group object with the requested group name | Only an owned/real group may be replaced; all other conflicts leave scene unchanged |
-| GROUP-U02 | P0 | `align_in_groups valid_group` does nothing while a typo can fall back to all groups | Exact selected groups only; no-match is an error; deterministic/explicit reference |
-| GEO-U01 | P0 | Axis/membrane drawing deletes an unrelated same-name object | Ownership manifest, collision preflight, transaction, owned-only clear/replace |
-| GEO-U02 | P0 | Orientation undo silently overwrites a later manual transform | Committed fingerprint, operation ID, stale refusal, explicit force |
-| GEO-U03 | P0 | Cyclic auto merges same chain IDs across objects and C2 trusts raw atom order | Explicit subunit identity and residue correspondence; ambiguity rejected |
-| GEO-U04 | P0 | Follow undo/rebuild failure leaves only part of a group restored | All-or-nothing TTT/hook rollback with structured rollback failures |
-| SEQ-U01 | P0 | Bounded wildcards enumerate hundreds of thousands of matches before `first`/`unique` returns | Streaming early stop plus bounded `all`/truncation/cancel contract |
-| INT-U01 | P0 | Async PLIP result commits after the source object was replaced under the same name | Main-thread current source fingerprint gate before any output mutation |
-| INT-U02 | P0 | Older async request finishing late overwrites a newer result for the same output group | Per-output latest epoch plus source fingerprint; independent groups unaffected |
-| ROS-U01 | P0 | NaN/Inf, empty metrics, wrong source hash or wrong partners can pass the response path | Exact request-bound finite typed scientific result validation end to end |
-| NAV-U01 | P0 | Invalid stop option/key restore failure drops controller but leaves owned file objects/keys | Validate before mutation; best-effort cleanup; retain retryable degraded ownership |
-| TARGET-U01 | P0 | A semicolon template can mutate before failure while reporting zero executed targets | Report non-atomic/possibly modified targets or disallow compound task-level actions |
-| CMD-U01 | P0 | Live plugin registers 71 commands while help/doctor declare 63; four grouping callbacks bypass parsing adapter | Declared canonical/legacy inventory equals live surface and callback identity is checked |
-
-The next wave covers navigation focus/coverage and boundary hooks, regex/list
-parsing, alignment preview/undo record selection, worker security/readiness/job
-history, interaction preset parameters, style scope reporting, and task-level
-facades. These remain important, but they do not precede the P0 integrity work
-above.
-
-## 10. Tier-1 facade specification
-
-The implemented public inventory is now 71 canonical commands: eight Tier-1
-facades plus the unchanged 63 advanced primitives. Eight compatibility names
-remain separately declared, for a total live declared surface of 79. Only the
-eight English facade names are new; translated phrases are help aliases and do
-not occupy additional PyMOL command names.
-
-The manually loaded `screen_boost.py` and `file_management.py` adapters are
-outside that declared/autoloaded 79-command surface. They add historical aliases
-only when explicitly loaded, share the canonical navigation session, and remain
-documented as compatibility—not Tier-1 discovery targets.
-
-| Facade | Normal form | Safe default and forbidden inference |
-| --- | --- | --- |
-| `pp_show` | `pp_show surface, TARGET` | `target=all` still resolves only molecule objects/recursive group molecule leaves; commit snapshots every state and adds a hidden same-session object identity property when the Host supports it; rejects non-molecules and implicit multi-match |
-| `pp_nav` | `pp_nav TARGET`; `pp_nav next` | No arguments report status; source auto-detection must resolve wholly to files, groups, or molecules; never replaces an active session implicitly; control actions reject start-only options rather than ignoring them |
-| `pp_align` | `pp_align MOBILE, REFERENCE, motif=GGH` | Executes by default, `preview=1` is explicit; motif and ligand are mutually exclusive and ambiguous scientific anchors are rejected by the canonical primitive |
-| `pp_orient` | `pp_orient TARGET` | Requires an explicit object/group or explicit `all`; executes PCA-to-Z by default, accepts cyclic/explicit vector, and keeps canonical confidence/stale-undo gates |
-| `pp_contacts` | `pp_contacts COMPLEX, focus=organic` | Auto uses local contacts only and requires one ligand or two explicit partners; async PLIP is inspected with `pp_jobs`, then its exact completed run is added to `pp_undo` |
-| `pp_metrics` | `pp_metrics COMPLEX, target=A, binder=B` | Source, target, and binder are mandatory; `preview=1` resolves the one molecule and request plan without PDB export/network; GUI default submits asynchronously without a synchronous capabilities probe, and backend/readiness failures remain in `pp_jobs` history; `wait=1` is the deliberate blocking path |
-| `pp_jobs` | `pp_jobs`; `pp_jobs JOB_ID`; `pp_jobs cancel, JOB_ID` | Human output is bounded and includes recent terminal failures; cancellation is result suppression, not backend termination |
-| `pp_undo` | `pp_undo`; `pp_undo OPERATION_ID`; `pp_undo list` | Resolves one journal operation, delegates its exact stored canonical reference, refuses stale state by default, and marks it undone only after verified restoration |
-
-All facade responses use `pymolplugins.task-command/1.0` with `task`, `status`,
-`delegated_command`, and `result`. A successful journaled scene mutation also
-returns an `operation_id` and copyable `undo`. `pp_show`, `pp_align`,
-`pp_orient`, `pp_contacts`, `pp_metrics`, and `pp_undo` expose `preview`; status/job facades do
-not invent one, and no facade exposes `commit`. Their journal points to canonical alignment,
-orientation, style, and interaction records; it does not duplicate those state
-machines. `pp_show` alone owns a bounded all-state representation snapshot
-because no canonical PyMOL show/hide undo record exists. On property-capable
-Hosts it also adds a hidden object identity marker at commit; older APIs retain
-the atom/source fingerprint fallback and report that weaker identity mode. An
-async PLIP submission has no undo before it renders; its owner-qualified
-completion event then adds exactly one journal entry. Stable-group replacement
-supersedes the older entry, so an old operation can never clear a newer run.
-
-Help search normalizes with Unicode NFKC and `casefold`, retains Unicode words,
-and ranks exact aliases then full token coverage before prefix/fuzzy matches.
-Search results report `matched_by`, `matched_terms`, and `unmatched_terms`.
-Curated natural-language aliases route common intent (`browse groups`,
-`sequence selection`, `structure align`, `axis align`, and `ligand contact`)
-before nearby advanced primitives. Results below the 0.50 catalog confidence
-boundary are omitted, so arbitrary text does not become confident-looking but
-unrelated advice.
-Only a truly empty help argument opens the default task guide; a nonempty
-unrecognized Unicode or punctuation query returns `no_match`.
-
-## 11. Current validation boundary
-
-The facade/journal, registration, help ranking, Unicode behavior, rollback,
-all-state representation, object-marker fallback, async job-history, and
-stale-undo paths pass the 619-test non-loopback WSL subset on both Python 3.12
-and 3.13. The four socket-bound worker modules remain a separately recorded
-sandbox gate. Host
-harness 1.5.0 contains a state-1 representation round trip, but does not yet
-exercise the newer all-state/property-marker or asynchronous backend-failure
-history gates. The 2026-07-27 task-facade Host launch is not passed: this run is
-inside an isolated network/user namespace and cannot reach WSL's Windows
-interop socket (`UtilConnectUnix` / `UtilBindVsockAnyPort`). Therefore none of
-the target UX scores are promoted to Host-verified status yet.
+</details>

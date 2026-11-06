@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class PackageLayoutTests(unittest.TestCase):
     def test_manifest_has_unique_task_plus_advanced_commands(self):
-        self.assertEqual(command_count(), 72)
+        self.assertEqual(command_count(), 75)
         self.assertTrue(
             all(name.startswith("pymolplugins.") for name in CANONICAL_MODULES)
         )
@@ -65,7 +65,7 @@ import pymolplugins.host.plugin
 from pymolplugins.host.manifest import CANONICAL_COMMANDS
 
 names = [name for values in CANONICAL_COMMANDS.values() for name in values]
-assert len(names) == 72
+assert len(names) == 75
 assert not [name for name in names if name not in cmd.keyword]
 assert not [
     name

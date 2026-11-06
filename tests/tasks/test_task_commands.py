@@ -276,6 +276,7 @@ class TaskCommandTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["source"], "groups")
         self.assertEqual(calls[0][1]["entries"], "a,b")
         self.assertEqual(calls[0][1]["window_size"], 2)
+        self.assertEqual(calls[0][1]["bind_keys"], 1)
         self.assertEqual(calls[1][0], "next")
 
     def test_pp_nav_rejects_ignored_targets_and_reports_boundaries(self):

@@ -1,5 +1,7 @@
 # Implementation Status
 
+这是截至 0.14.0 的历史实现与证据汇总，保留当时的通过、失败和待验证状态，不代表当前版本均已通过。0.15/0.16 的后续记录见 [连续审阅与发布记录](validation/01_sampling_reference_2026-09-29.md)，本工作树 0.17.0 候选见 [整合验收](validation/02_toolkit_unification_2026-11-06.md)。按用途查找其他历史材料见 [历史索引](03_history_index.md)。
+
 ## 连续审阅 — 0.12.2
 
 已交付：显式恢复最近数据源/筛选/候选位置；独立的“稍后复核”状态与 Next unreviewed / Next marked for later 路线；不污染质量标签的 review handoff JSON；分数相对排名/绝对规则提示；SSH/路径错误的直接恢复入口。
@@ -274,7 +276,7 @@ Current evidence anchors:
   bind points and every one fails with `PermissionError: [Errno 1] Operation
   not permitted`, with no assertion failure. They remain an explicit
   environment gate rather than being counted as passed.
-- Windows Host historical baseline: the latest reviewed automated PyMOL
+- Windows Host historical baseline: the then-latest reviewed automated PyMOL
   3.1.3.1 record passed 13/13 and is
   [automatic pass / manual pending](validation/structure_annotator_optimization_2026-07-26.md).
   It covers the former 63-command surface. A 2026-07-27 attempt to launch the

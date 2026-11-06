@@ -1052,10 +1052,6 @@ class _OutputRecorder:
             ManifestEntry(name, kind, role, tuple(sorted(interaction_ids)))
         )
 
-    def select(self, name: str, selection: str, role: str) -> None:
-        self.record(name, "selection", role)
-        self.cmd.select(name, selection)
-
     def create(self, name: str, selection: str, state: int, role: str) -> None:
         self.record(name, "object", role)
         self.cmd.create(name, selection, state, 1)
@@ -1191,15 +1187,16 @@ def _render_partners(
     partners_group = _child_name(root_group, "partners")
     recorder.group(partners_group, "", "partners_group")
     for partner in result.partners:
+        # Partner expressions remain in the result; only the ligand needs a
+        # scene copy for styling without mutating the source atoms.
+        if partner.role != "ligand":
+            continue
         name = _child_name(root_group, partner.role)
-        if partner.role == "ligand":
-            recorder.create(
-                name, partner.selection, result.run.source.state, "partner_ligand_copy"
-            )
-            cmd_api.show("sticks", name)
-            cmd_api.color("orange", name)
-        else:
-            recorder.select(name, partner.selection, "partner_selection")
+        recorder.create(
+            name, partner.selection, result.run.source.state, "partner_ligand_copy"
+        )
+        cmd_api.show("sticks", name)
+        cmd_api.color("orange", name)
         recorder.group(partners_group, name, "partners_group")
     return partners_group
 
@@ -1315,6 +1312,7 @@ def _render_result(
     name_root: str = "",
 ) -> OutputManifest:
     recorder = _OutputRecorder(cmd_api, _existing_names(cmd_api))
+    enabled_selections = tuple(cmd_api.get_names("selections", enabled_only=1))
     child_root = str(name_root).strip() or root_group
     try:
         partners_group = _render_partners(cmd_api, recorder, result, child_root)
@@ -1370,6 +1368,10 @@ def _render_result(
     except Exception:
         recorder.cleanup()
         raise
+    finally:
+        # Native measurement creation can hide existing selections.
+        for selection in enabled_selections:
+            cmd_api.enable(selection)
 
 
 @dataclass(frozen=True)

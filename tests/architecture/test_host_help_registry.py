@@ -59,9 +59,10 @@ import pymolplugins.host.plugin as plugin
 {body}
 '''.format(root=str(ROOT), before_import=before_import, body=body)
     completed = subprocess.run(
-        [sys.executable, "-I", "-c", source],
+        [sys.executable, "-I", "-X", "utf8", "-c", source],
         cwd=ROOT,
         text=True,
+        encoding="utf-8",
         capture_output=True,
         check=False,
     )
@@ -84,7 +85,7 @@ class HostManifestTests(unittest.TestCase):
         compat = {
             name for values in AUTOLOADED_COMPAT_COMMANDS.values() for name in values
         }
-        self.assertEqual(len(canonical), 72)
+        self.assertEqual(len(canonical), 75)
         self.assertEqual(
             compat,
             {
@@ -98,8 +99,8 @@ class HostManifestTests(unittest.TestCase):
                 "seq_select",
             },
         )
-        self.assertEqual(len(declared_command_names()), 80)
-        self.assertEqual(len(set(declared_command_names())), 80)
+        self.assertEqual(len(declared_command_names()), 83)
+        self.assertEqual(len(set(declared_command_names())), 83)
         self.assertEqual(set(COMMAND_TARGETS), canonical | compat)
 
 

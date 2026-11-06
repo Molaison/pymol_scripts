@@ -32,6 +32,9 @@ class PluginPackageTests(unittest.TestCase):
             bootstrap = archive.read("pymol_plugins/__init__.py").decode("utf-8")
             self.assertTrue(bootstrap.startswith(f"# Version: {__version__}\n"))
             self.assertIn("pymol_plugins/INSTALL.md", names)
+            for filename in ("ssh_askpass.exe", "ssh_askpass.c"):
+                source = ROOT / "pymolplugins/remote/askpass" / filename
+                self.assertEqual(archive.read("pymol_plugins/" + source.relative_to(ROOT).as_posix()), source.read_bytes())
             for path in (ROOT / "pymolplugins").rglob("*.py"):
                 name = "pymol_plugins/" + path.relative_to(ROOT).as_posix()
                 with self.subTest(source=name):

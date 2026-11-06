@@ -62,6 +62,17 @@ class FakeCmd:
     def get_type(self, name):
         return self.types.get(name, "")
 
+    def visible_names(self):
+        parents = {child: parent for parent, children in self.groups.items() for child in children}
+        result = set()
+        for name in self.enabled:
+            parent = parents.get(name)
+            while parent in self.enabled:
+                parent = parents.get(parent)
+            if not parent:
+                result.add(name)
+        return result
+
     def get_object_list(self, selection="all"):
         return [name for name in self.groups.get(selection, []) if self.types[name] == "object:molecule"]
 
@@ -170,14 +181,70 @@ class NavigationAdapterTests(unittest.TestCase):
             {"a_model", "a_cgo", "a_map", "a_measurement"},
         )
         self.assertIn("overlay", self.fake.enabled)
-        self.assertNotIn("b_model", self.fake.enabled)
+        self.assertNotIn("b_model", self.fake.visible_names())
         navigation.pp_nav_next()
-        self.assertIn("b_model", self.fake.enabled)
-        self.assertNotIn("a_model", self.fake.enabled)
-        self.assertNotIn("a_cgo", self.fake.enabled)
-        self.assertNotIn("a_map", self.fake.enabled)
-        self.assertNotIn("a_measurement", self.fake.enabled)
+        self.assertIn("b_model", self.fake.visible_names())
+        self.assertNotIn("a_model", self.fake.visible_names())
+        self.assertNotIn("a_cgo", self.fake.visible_names())
+        self.assertNotIn("a_map", self.fake.visible_names())
+        self.assertNotIn("a_measurement", self.fake.visible_names())
         self.assertIn("overlay", self.fake.enabled)
+
+    def test_group_containers_preserve_hidden_children_and_scene_sync(self):
+        self.fake.enabled.difference_update({"root_a", "a_cgo", "nested"})
+        original = set(self.fake.enabled)
+        navigation.pp_nav_start(source="groups", zoom_policy="none")
+        self.assertIn("a_model", self.fake.visible_names())
+        self.assertNotIn("a_cgo", self.fake.enabled)
+        self.assertNotIn("nested", self.fake.enabled)
+        navigation.pp_nav_next()
+        self.assertNotIn("a_model", self.fake.visible_names())
+        self.assertIn("a_model", self.fake.enabled)
+        self.fake.disable("root_b")
+        self.fake.enable("root_a")
+        synced = navigation.pp_nav_sync_from_scene()
+        self.assertEqual(synced["current_entry_ids"], ["group:root_a"])
+        navigation.pp_nav_stop()
+        self.assertEqual(self.fake.enabled, original)
+
+    def test_nested_group_opens_ancestors_without_revealing_external_siblings(self):
+        self.fake.disable("root_a")
+        original = set(self.fake.enabled)
+        navigation.pp_nav_start(source="groups", entries="nested,root_b", zoom_policy="none")
+        self.assertTrue({"a_map", "a_measurement"}.issubset(self.fake.visible_names()))
+        self.assertNotIn("a_model", self.fake.visible_names())
+        self.assertNotIn("a_cgo", self.fake.visible_names())
+        self.assertIn("overlay", self.fake.visible_names())
+        navigation.pp_nav_next()
+        self.assertNotIn("root_a", self.fake.enabled)
+        navigation.pp_nav_stop()
+        self.assertEqual(self.fake.enabled, original)
+
+    def test_object_ancestor_visibility_recovers_after_failed_transition_and_replacement(self):
+        self.fake.disable("root_a")
+        original = set(self.fake.enabled)
+        navigation.pp_nav_start(source="objects", entries="a_map,b_model", zoom_policy="none")
+        controller = navigation._controller()
+        self.assertIn("a_map", self.fake.visible_names())
+        self.assertNotIn("a_measurement", self.fake.visible_names())
+        self.assertNotIn("a_model", self.fake.visible_names())
+        active = set(self.fake.enabled)
+        navigation.pp_nav_register_hook("silent_parser_error {object}")
+        failed, _, _ = self.capture_output(navigation.pp_nav_next)
+        self.assertEqual(failed["rollback"], "restored")
+        self.assertEqual(self.fake.enabled, active)
+        self.fake.fail_disable_names.add("root_b")
+        failed, _, _ = self.capture_output(
+            navigation.pp_nav_start, source="groups", entries="nested,root_b", replace=1, zoom_policy="none"
+        )
+        self.fake.fail_disable_names.clear()
+        self.assertEqual(failed["status"], "error")
+        self.assertIs(navigation._controller(), controller)
+        self.assertEqual(self.fake.enabled, active)
+        replacement = navigation.pp_nav_start(source="groups", entries="nested,root_b", replace=1, zoom_policy="none")
+        self.assertNotEqual(replacement.get("status"), "error")
+        navigation.pp_nav_stop()
+        self.assertEqual(self.fake.enabled, original)
 
     def test_registered_start_normalizes_quoted_entries_and_scalars(self):
         navigation.register_commands(self.fake)
@@ -784,8 +851,8 @@ class NavigationAdapterTests(unittest.TestCase):
             zoom_policy="none",
         )
         controller = navigation._controller()
-        self.assertNotIn("b_model", self.fake.enabled)
-        self.fake.silent_enable_names.add("b_model")
+        self.assertNotIn("root_b", self.fake.enabled)
+        self.fake.silent_enable_names.add("root_b")
 
         failed = navigation.pp_nav_stop()
 
@@ -793,7 +860,7 @@ class NavigationAdapterTests(unittest.TestCase):
         self.assertIs(navigation._CONTROLLER, controller)
         self.assertEqual(failed["errors"]["cleanup"], [])
         self.assertTrue(failed["errors"]["visibility"])
-        self.assertEqual(controller.managed_names, {"b_model"})
+        self.assertEqual(controller.managed_names, {"root_b"})
         self.assertIn("visibility did not change", failed["errors"]["visibility"][0])
         self.assertTrue(
             {
@@ -809,7 +876,7 @@ class NavigationAdapterTests(unittest.TestCase):
 
         self.assertEqual(retried["status"], "stopped")
         self.assertIsNone(navigation._CONTROLLER)
-        self.assertIn("b_model", self.fake.enabled)
+        self.assertIn("root_b", self.fake.enabled)
 
     def test_force_stop_explicitly_abandons_unresolved_ownership(self):
         with tempfile.TemporaryDirectory() as dataset:
@@ -991,7 +1058,7 @@ class NavigationAdapterTests(unittest.TestCase):
             second["current_entry_ids"], ["group:root_c", "group:root_d"]
         )
         self.assertTrue({"c_model", "d_model"}.issubset(self.fake.enabled))
-        self.assertNotIn("a_model", self.fake.enabled)
+        self.assertNotIn("a_model", self.fake.visible_names())
         self.assertEqual(navigation.pp_nav_next()["status"], "boundary")
 
     def test_group_membership_change_blocks_transition_before_scene_mutation(self):

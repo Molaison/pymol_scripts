@@ -1,125 +1,43 @@
-# Multi-selection, annotation fields, and candidate scores
+# 配置标注字段和评分说明
 
-Status: implemented, validated, packaged and installation-checked as 0.3.0, 2026-09-15.
+用 Structure Annotator 为单个或多个候选保存单选、多选和文字标注，并在查看结构时比较评分。先打开自己的结构目录或评分表；选择标签只是草稿，保存后才能继续或导出结果。
 
-The 0.5.1 workspace keeps these storage and scoring contracts. Mouse choices
-remain drafts by default. **Save on label click** is optional and independent
-of **Go to the next structure after saving**; both are in **Settings > Annotations**
-and **More actions**. Alt+digit saves a single-choice label once, while a
-multiple-choice shortcut only toggles a draft value. Import, filtering and
-configuration use on-demand pages/dialogs. See
-[the current validation record](validation/structure_annotator_click_save_2026-09-16.md).
+## 设置字段并保存
 
-Version 0.9.0 adds a default **Ctrl+click** gesture for one candidate: choose a
-single-choice value, or toggle a multiple-choice item and apply all staged
-choices, then save and advance on success. Ctrl+click **Apply** in the choice
-popup also saves and advances. This works when ordinary click-saving and
-automatic advance are off. Shift stages values, required fields still gate
-saving, failures retain the draft/cursor, and selected batches still need
-explicit Save. Column and choice searches accept noncontiguous fuzzy matches.
+在 **Settings → Annotations** 配置字段名、可选值和必填状态，返回 Review 选择值，点击 **Save and next**。有必填项未完成或写入失败时，插件保留草稿和当前位置。**More actions → Undo last save** 撤销上一次完整保存。
 
-## Accepted behavior
+要对多行赋值，在列表用 Shift 选范围、Ctrl 切换单行，然后显式保存。批量保存先验证所有必填值，不逐个加载其他结构，也不对未预览候选执行标签命令。相同结构路径的不同行保持独立标注；非空 ID 不能重复。
 
-- Shift selects a range of visible candidate rows; Ctrl toggles individual rows.
-  Selection gestures do not load every selected structure. The currently
-  previewed candidate remains explicit and supplies the footer score values.
-- Annotation fields are configurable as single-choice, multiple-choice, or
-  text, with required/optional status. Existing quality labels remain usable;
-  notes are optional. Required fields gate a completed save, not browsing.
-- Saving selected rows validates all resulting required fields before writing.
-  A batch is one durable operation and one undo operation. It does not load
-  other structures or run per-object bucket commands against unpreviewed rows.
-- Optional click-saving commits only one candidate from a single-choice
-  button/dropdown after all required fields are complete. Shift+click,
-  ordinary multiple-choice clicks and batch clicks remain drafts. Failed writes retain
-  the current candidate and unsaved choices; programmatic form restoration
-  never submits annotations.
-- Ctrl+click is an explicit save-and-next gesture for one candidate, including
-  secondary multiple-choice fields. It never auto-saves a multi-row selection.
-- Score cards next to annotation use selected CSV columns and the current
-  filtered candidate cohort. At most six numeric metrics are shown. Formatting
-  is compact, while full precision remains in tooltips and exports.
-- Relative ranks are cached when the filter or columns change. Cursor movement
-  does not rescan the table or access files. Unknown score direction remains
-  neutral; users can specify higher/lower, thresholds, or a CSV pass column.
-- Absolute guidance and cohort-relative rank are labeled separately. A high
-  numeric value is not automatically described as biologically better.
-- The details view also respects column choices, and changing candidates or
-  filters cannot leave score cards attached to an old candidate/cohort.
-  All saved annotation fields remain visible in Structure details regardless
-  of the current field configuration, with full values in tooltips.
-- Opening the panel never restores a historical source or configuration,
-  including old snapshots with `restore_last_dataset=true`. Existing data in
-  the live PyMOL session remains available. The Data action opens
-  the Folder/CSV table inputs; a searchable Recent configurations dialog explicitly restores
-  configuration or restores and loads the selected source.
-- Restoring configuration does not load a structure or change the active
-  source identity. Explicit imports use the chosen UI configuration, without
-  silently replacing it with the last sidecar configuration.
-- Directory discovery and structure materialization support Windows paths
-  longer than MAX_PATH, including mapped-drive files and UNC paths.
+## 选择保存手势
 
-## Validation and delivery
+**Save on label click** 和保存后前进是相互独立的设置。启用点击保存后，单候选的单选按钮或下拉选择可保存；必填条件仍生效。单候选 Ctrl+click 默认保存并前进；多选弹窗普通点击只更改草稿，Ctrl+click 或 Ctrl+click Apply 保存并前进。Shift、多行和普通多选不自动保存。Alt+数字对单选保存一次，对多选只切换草稿。
 
-Cover Shift/Ctrl selection, mixed existing values, required and optional fields,
-multi-valued labels, atomic batch/replay/undo, save/reload/export, score formatting,
-filter-dependent ranks, missing values, and explicit quality rules. Use the real
-Windows Qt/PyMOL workflow and retain the preloaded-navigation latency check.
-Build and install-check a new Plugin Manager ZIP after completing validation.
+## 解释评分和代表性标签
 
-## Execution record
+选择表格实际评分列后，评分卡最多显示六项数值。相对排名基于当前筛选集合；改变筛选会改变比较范围。若要使用绝对规则，明确指定评分方向、阈值或通过列；方向未知时保持中性。高数值本身不证明结构质量。
 
-- Existing 0.2.1 implementation and file ownership were inspected.
-- The storage scout returned upstream 502 without editing files; integration
-  and implementation continue in the main thread.
-- Implemented atomic JSONL batch events, whole-batch undo, configurable field
-  definitions, required-field validation, and multi-value encoding. Existing
-  scalar schema 1.0/1.1 events remain readable; batch events use schema 1.2.
-- Added UI selection/draft coordination and cached score summaries. Details and
-  footer metrics follow selected columns; relative ranks follow the current row
-  filter. Unknown directions remain neutral, with explicit rule configuration.
-- The 200-row real Windows/PyMOL gate passes Shift/Ctrl selection, required and
-  optional fields, multiple choices, batch save/undo without structure loads,
-  filtered rank changes, details filtering, config persistence, and multi-field
-  CSV export. Warm navigation with the footer measured median 2.43 ms and
-  maximum 3.41 ms in the first successful run.
-- The full suite passed 695 tests before the last incremental update and
-  source-configuration refinements. The expanded suite and 50,000-row review
-  gate are being rerun. Release packaging and final documentation remain.
-- The latest review GUI run passed; 697-test regression exposed one stale
-  expectation about console reload configuration. GUI and console configuration
-  precedence are being made explicit while adding the history browser.
-- The supplied K: source exists (215-character directory, 72 PDB files, maximum
-  full path length 288). Windows plain `isfile` reports false but extended paths
-  succeed. The canonical DirectoryDatasetSource currently drops these files;
-  the plugin-specific discovery finds 72 and loads the first via its cache.
-- Two fresh bounded agents returned upstream 502 without changes; the main
-  thread owns implementation and validation of import/history and long paths.
-- The final full suite passes 700 tests in 24.661 s. The current 50,000-row
-  Windows/PyMOL review run passes all field/batch/score/filter/export checks;
-  warm Next median is 2.51 ms and maximum is 4.55 ms, with no batch structure
-  loads. The 200-row/128-column compatibility workflow also passes all keyboard,
-  completion, filter, cancellation and scene-preservation checks.
-- Explicit history restore was tested against a deliberately newer conflicting
-  sidecar. Startup ignores even legacy automatic-restore flags; configuration
-  restore makes no structure load and retains the active source identity.
-- Windows long-path acceptance passes a 341-character directory, 421-character
-  structure path, direct/cache materialization, and all 72 structures in the
-  supplied K: directory. Source size/mtime and sidecar-directory presence are
-  unchanged. The first host attempt passed the feature checks but exposed the
-  test harness's unprefixed temporary-directory cleanup; extended-path cleanup
-  fixed it and the complete rerun passed.
-- `just` built `dist/PymolPlugins-0.3.0.zip` (88 files, 384,039 bytes). Archive
-  CRC and source-byte parity pass. Windows PyMOL's real Plugin Manager installed
-  it outside the repository and loaded version 0.3.0, all 11 canonical modules,
-  71 canonical plus 8 compatibility commands, and Structure Annotator.
-  Final evidence is recorded in
-  [the validation record](validation/structure_annotator_review_2026-09-15.md).
+源表 `label` 是描述性候选标题，可标记典型模式或异常，不等于人工 Good/Bad。结构详情可查看完整值和已保存字段，即使字段已从当前表单移除。人工标注与原始 CSV/PDB 分开；导出时选择新路径。
 
-## Storage compatibility
+## 排查与交接
 
-Batch records are single newline-terminated, fsynced schema-1.2 events. Undo
-checks every affected key before restoring the group. The event bound is
-16 MiB and the existing log bound is 64 MiB; oversized operations fail before
-appending. Older 0.2.x readers cannot read batch events. Use the new plugin for
-logs containing batch annotations; existing 1.0/1.1 logs require no conversion.
+需要回看时使用 Later 路线；重开时主动选择 **Continue last review**。导出 handoff 只包含进度和标签摘要，不含结构。不要让多个 PyMOL 进程同时编辑同一 JSONL；删除数据目录前备份状态和标注。配置、快捷键和原存储合同的细节见 [详细参考](09_reference_annotation_2026-11-06.md)，实际导入步骤见 [CSV 指南](structure_annotator_csv_walkthrough.md)。
+
+<details>
+<summary>旧标题及详细条款索引</summary>
+
+原地址保留为兼容入口；以下条目指向重写前的详细参考。
+
+<a id="配置标注并保存"></a>
+- [配置标注并保存](09_reference_annotation_2026-11-06.md#%E9%85%8D%E7%BD%AE%E6%A0%87%E6%B3%A8%E5%B9%B6%E4%BF%9D%E5%AD%98)
+<a id="解释评分卡"></a>
+- [解释评分卡](09_reference_annotation_2026-11-06.md#%E8%A7%A3%E9%87%8A%E8%AF%84%E5%88%86%E5%8D%A1)
+<a id="accepted-behavior"></a>
+- [Accepted behavior](09_reference_annotation_2026-11-06.md#accepted-behavior)
+<a id="validation-and-delivery"></a>
+- [Validation and delivery](09_reference_annotation_2026-11-06.md#validation-and-delivery)
+<a id="execution-record"></a>
+- [Execution record](09_reference_annotation_2026-11-06.md#execution-record)
+<a id="storage-compatibility"></a>
+- [Storage compatibility](09_reference_annotation_2026-11-06.md#storage-compatibility)
+
+</details>

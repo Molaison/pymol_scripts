@@ -48,9 +48,12 @@ class FakeCmd:
         self.types.pop(name, None)
         self.groups.pop(name, None)
 
-    def group(self, group_name, member, action="add"):
+    def group(self, group_name, member="", action="add"):
         self.group_calls.append((group_name, member, action))
         self.types[group_name] = "object:group"
+        if action == "empty":
+            self.groups[group_name] = []
+            return
         self.groups.setdefault(group_name, []).append(member)
 
     def align(self, mobile, reference):
@@ -170,10 +173,11 @@ class GroupingCommandTests(unittest.TestCase):
         result = grouping.group_objects_by_name(selection="chosen", replace=1)
 
         self.assertEqual(result, {"sample": ["sample_1", "sample_2"]})
-        self.assertEqual(self.fake.delete_calls, ["sample"])
+        self.assertEqual(self.fake.delete_calls, [])
         self.assertEqual(
             self.fake.group_calls,
             [
+                ("sample", "", "empty"),
                 ("sample", "sample_1", "add"),
                 ("sample", "sample_2", "add"),
             ],
@@ -236,12 +240,14 @@ class GroupingCommandTests(unittest.TestCase):
         self.assertIn("G2", result["error"])
         self.assertEqual(self.fake.align_calls, [])
 
-    def test_all_four_registered_commands_use_console_quote_normalization(self):
+    def test_registered_commands_use_console_quote_normalization(self):
         self._set_partition(["sample_1", "sample_2"])
         self._set_alignment_scene()
         grouping.register_commands(self.fake)
 
         expected = {
+            "pp_group",
+            "pp_group_by_name",
             "group_objects_by_name",
             "merge_models_by_name",
             "align_in_groups",

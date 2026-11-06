@@ -23,6 +23,9 @@ import time
 import zlib
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 
+from .otp import (DEFAULT_OTP_PROMPT, OtpBroker, get_otp_settings,
+                  otp_fingerprint, validate_otp_secret, _prompt_pattern)
+
 
 MAX_TRANSFER_BYTES = 512 * 1024 * 1024
 _REMOTE_SCRIPT = Path(__file__).with_name("ssh_worker.py").read_text(encoding="utf-8")
@@ -170,8 +173,10 @@ def ssh_profiles(config=""):
     return list(dict.fromkeys(result))
 
 
-def default_ssh_program():
+def default_ssh_program(*, builtin_otp=False):
     """Use an installed SSH login wrapper before the bare system executable."""
+    if builtin_otp:
+        return shutil.which("ssh") or ""
     configured = os.environ.get("PYMOLPLUGINS_SSH_PROGRAM", "").strip()
     if configured:
         return os.path.abspath(os.path.expanduser(configured))
@@ -190,6 +195,7 @@ class _SshSession:
         self.closed = False
         self.process = None
         self.future = None
+        self.otp_broker = None
         self.phase = "Connecting / authenticating"
         self.transferred = self.total = self.wire_bytes = 0
         self.transfer_started = None
@@ -198,6 +204,9 @@ class _SshSession:
 
     def _start(self):
         options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
+        if self.client.otp_secret:
+            self.otp_broker = OtpBroker(self.client.otp_secret, self.client.otp_prompt)
+            options["env"] = self.otp_broker.environment()
         self.process = subprocess.Popen(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=self.diagnostics, **options)
 
@@ -218,6 +227,11 @@ class _SshSession:
         if not line:
             self.diagnostics.seek(0)
             detail = self.diagnostics.read().decode("utf-8", errors="replace").strip()
+            broker = self.otp_broker
+            if broker is not None:
+                detail = broker.redact(detail)
+                if broker.error:
+                    detail += "\n" + broker.error
             raise SshError(f"SSH {self.client.location.profile}: {detail or 'connection ended'}")
         if len(line) > 32 * 1024 * 1024:
             raise SshError("SSH response exceeds the metadata limit.")
@@ -236,6 +250,10 @@ class _SshSession:
             ready = self._read_json()
             if ready.get("result") != {"ready": True}:
                 raise SshError("SSH worker did not send its ready response.")
+            broker = self.otp_broker
+            if broker is not None:
+                broker.close()
+                self.otp_broker = None
         self.phase = "Reading remote metadata"
         header = self._read_json()
         if header.get("stream"):
@@ -330,6 +348,10 @@ class _SshSession:
         if self.closed:
             return
         self.closed = True
+        broker = self.otp_broker
+        if broker is not None:
+            broker.close()
+            self.otp_broker = None
         if self.process is not None:
             self.client._stop_process(self.process, drain=False)
         if self.future is not None:
@@ -346,14 +368,21 @@ class _SshSession:
 class SshClient:
     """Invoke the user's OpenSSH configuration with cancellable file operations."""
 
-    def __init__(self, location, *, timeout=120.0, executable=None):
+    def __init__(self, location, *, timeout=120.0, executable=None, otp_secret=None, otp_prompt=None):
         self.location = parse_ssh_path(location) if isinstance(location, str) else location
         self.timeout = float(timeout)
-        self.executable = str(executable or self.location.program or default_ssh_program())
+        settings = get_otp_settings(self.location.profile, self.location.config) if otp_secret is None else {}
+        secret = settings.get("secret", "") if otp_secret is None else otp_secret
+        self.otp_secret = validate_otp_secret(secret) if secret else ""
+        self.otp_prompt = _prompt_pattern(otp_prompt if otp_prompt is not None else settings.get("prompt", DEFAULT_OTP_PROMPT))
+        self.otp_identity = otp_fingerprint(self.otp_secret, self.otp_prompt)
+        self.executable = str(executable or self.location.program or default_ssh_program(builtin_otp=bool(self.otp_secret)))
         if not self.executable:
             raise SshError("OpenSSH is not installed or ssh is not on PATH.")
         if not os.path.isfile(self.executable) and not shutil.which(self.executable):
             raise SshError("SSH program does not exist: " + self.executable)
+        if self.otp_secret and self.executable.lower().endswith((".py", ".cmd", ".bat")):
+            raise SshError("Built-in OTP requires native OpenSSH. Clear SSH program to use system SSH instead of a login wrapper.")
         if self.executable.lower().endswith((".cmd", ".bat")):
             raise SshError("Choose ssh.exe or the Python login script used by your SSH launcher.")
 
@@ -372,6 +401,8 @@ class SshClient:
             command = [self.executable]
         command += ["-T", "-o", "ConnectTimeout=10",
                    "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2"]
+        if self.otp_secret:
+            command += ["-o", "BatchMode=no", "-o", "NumberOfPasswordPrompts=1"]
         if self.location.config:
             command += ["-F", self.location.config]
         # Profiles are validated against option-like names. Keep the target
@@ -382,7 +413,7 @@ class SshClient:
     def _stop_process(self, process, *, drain=True):
         if process.poll() is not None:
             return
-        if os.name == "nt" and self.executable.lower().endswith(".py"):
+        if os.name == "nt" and (self.executable.lower().endswith(".py") or self.otp_secret):
             stopped = subprocess.run(["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
                                      creationflags=subprocess.CREATE_NO_WINDOW)
@@ -401,7 +432,7 @@ class SshClient:
         if cancel_event is not None and cancel_event.is_set():
             raise SshCancelled("SSH operation cancelled.")
         command = tuple(self.command())
-        key = (self.location.profile, self.location.config, command)
+        key = (self.location.profile, self.location.config, command, self.otp_identity)
         with _sessions_lock:
             session = _sessions.get(key)
             if session is None or session.closed:

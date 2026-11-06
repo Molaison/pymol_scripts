@@ -452,6 +452,9 @@ class NavigationController:
     retired_file_names: Set[str] = field(default_factory=set)
     loaded_entry_names: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
     original_enabled: Dict[str, bool] = field(default_factory=dict)
+    group_parents: Dict[str, str] = field(default_factory=dict)
+    ancestor_names: Set[str] = field(default_factory=set)
+    masked_names: Set[str] = field(default_factory=set)
     hooks: List[Tuple[str, int]] = field(default_factory=list)
     keys_bound: bool = False
     previous_key_mappings: Dict[str, Tuple[bool, object]] = field(default_factory=dict)
@@ -472,11 +475,39 @@ class NavigationController:
             raise NavigationError("zoom_policy must be current, current_and_pins, or none")
         if self.source != "files":
             for entry in self.session.entries:
-                self.managed_names.update(entry.object_names)
+                self.managed_names.update(self._entry_visibility_names(entry))
                 self.loaded_entry_names[entry.id] = entry.object_names
         enabled = set(_get_names("all", 1))
+        if self.source != "files":
+            self.group_parents = _group_parent_snapshot()
+            for name in tuple(self.managed_names):
+                self.ancestor_names.update(self._ancestors(name))
+            self.managed_names.update(self.ancestor_names)
+            # Opening a previously hidden ancestor must not reveal unrelated
+            # siblings. Mask only those outside the paths to managed entries.
+            for ancestor in self.ancestor_names:
+                if all(name in enabled for name in (ancestor, *self._ancestors(ancestor))):
+                    continue
+                self.masked_names.update(
+                    name for name, parent in self.group_parents.items()
+                    if parent == ancestor and name not in self.managed_names
+                )
+            self.managed_names.update(self.masked_names)
         for name in self.managed_names:
             self.original_enabled[name] = name in enabled
+
+    def _entry_visibility_names(self, entry: NavigationEntry) -> Tuple[str, ...]:
+        return (entry.group_name,) if entry.kind == "group" else self._entry_names(entry)
+
+    def _ancestors(self, name: str) -> List[str]:
+        result: List[str] = []
+        parent = self.group_parents.get(name, "")
+        while parent:
+            if parent in result:
+                raise NavigationError(f"cyclic PyMOL group ancestry involving: {parent}")
+            result.append(parent)
+            parent = self.group_parents.get(parent, "")
+        return result
 
     def _entry_names(self, entry: NavigationEntry) -> Tuple[str, ...]:
         return self.loaded_entry_names.get(entry.id, entry.object_names)
@@ -603,15 +634,19 @@ class NavigationController:
                 "navigation session is degraded after a failed recovery"
             )
         self.ensure_resident()
-        for name in sorted(self.managed_names.union(self.retired_file_names)):
-            if name in _get_names("all"):
-                _require_cmd().disable(name)
-        visible_names: List[str] = []
+        expected_enabled = {
+            name for name in self.ancestor_names if self.original_enabled[name]
+        }
         for entry in self.session.visible_entries():
-            for name in self._entry_names(entry):
-                if name not in visible_names:
-                    visible_names.append(name)
-                _require_cmd().enable(name)
+            for name in self._entry_visibility_names(entry):
+                expected_enabled.add(name)
+                expected_enabled.update(self._ancestors(name))
+        existing = set(_get_names("all"))
+        enabled = set(_get_names("all", 1))
+        for name in sorted(self.managed_names.union(self.retired_file_names)):
+            should_enable = name in expected_enabled
+            if name in existing and (name in enabled) != should_enable:
+                (_require_cmd().enable if should_enable else _require_cmd().disable)(name)
         existing_after = set(_get_names("all"))
         self.retired_file_names.intersection_update(existing_after)
         missing = sorted(self.managed_names.difference(existing_after))
@@ -621,7 +656,6 @@ class NavigationController:
                 + ", ".join(missing)
             )
         enabled_after = set(_get_names("all", 1))
-        expected_enabled = set(visible_names)
         mismatched = sorted(
             name
             for name in self.managed_names
@@ -944,6 +978,8 @@ def _bind_keys(controller: NavigationController) -> None:
         for key, callback in callbacks.items():
             api.set_key(key, callback)
             controller.installed_key_mappings[key] = mappings.get(key)
+        from pymolplugins.navigation.qt_keys import install_qt_navigation_keys
+        install_qt_navigation_keys(sys.modules[__name__])
     except Exception:
         _restore_keys(controller, preserve_external=False)
         raise
@@ -1734,7 +1770,10 @@ def pp_nav_sync_from_scene() -> Dict[str, object]:
         for index, entry in enumerate(controller.session.entries):
             if entry.id in controller.session.pinned_entry_ids:
                 continue
-            if enabled.intersection(controller._entry_names(entry)):
+            if any(
+                name in enabled and all(parent in enabled for parent in controller._ancestors(name))
+                for name in controller._entry_visibility_names(entry)
+            ):
                 candidates.append(index)
         if not candidates:
             raise NavigationError("enabled scene does not identify a managed non-pinned entry")

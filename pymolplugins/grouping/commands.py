@@ -138,7 +138,7 @@ def group_objects_by_name(
         sep: Object-name separator.
         num: Number of leading/trailing fields used by the strategy.
         prefix: Optional prefix for generated group names.
-        replace: Delete an existing group of the same name before adding members.
+        replace: Empty an existing group before adding members, preserving objects.
 
     Returns:
         Mapping from created group name to member object names.
@@ -152,7 +152,7 @@ def group_objects_by_name(
         if replace_value:
             for group_name in plan:
                 if existing_types.get(group_name) == "object:group":
-                    cmd.delete(group_name)
+                    cmd.group(group_name, action="empty")
         for group_name, members in plan.items():
             for member in members:
                 cmd.group(group_name, member, action="add")
@@ -298,9 +298,69 @@ def merge_groups(
         return _error_result(exc, "groups")
 
 
+def pp_group_by_name(selection="all", method="split_lastn_sep", sep="_", num=1,
+                     prefix="", replace=0):
+    """Group molecule objects by name without merging their atoms.
+
+    Args:
+        selection: Molecule objects to partition.
+        method: split_firstn_sep or split_lastn_sep.
+        sep: Separator in object names.
+        num: Number of name fields to split.
+        prefix: Prefix for generated group names.
+        replace: Replace an existing group, retaining source objects.
+    Returns:
+        Group names and their members.
+    """
+    return group_objects_by_name(selection, method, sep, num, prefix, replace)
+
+
+def pp_group(action="info", group=""):
+    """Inspect or toggle complete groups, including measurements and CGO.
+
+    Args:
+        action: info, enable or disable. Enable also enables parent groups;
+            both visibility actions preserve each child's individual flag.
+        group: Exact group name, or empty for the info list of all groups.
+    Returns:
+        Group membership for info, or the changed group's visibility.
+
+    Navigate bundles with ``pp_nav groups, group_pattern``; use
+    ``sa_load_groups parent=group_name`` to annotate direct child groups.
+    """
+    from pymolplugins.core.pymol_groups import (
+        direct_children, expand_group_leaves, group_parent_snapshot,
+    )
+    action, group = str(action).strip().lower(), str(group).strip()
+    if action not in {"info", "enable", "disable"}:
+        raise ValueError("action must be info, enable, or disable")
+    groups = list(cmd.get_names("group_objects"))
+    if group and group not in groups:
+        raise ValueError("not a PyMOL group: %s" % group)
+    if action != "info":
+        if not group:
+            raise ValueError("specify the exact group to enable or disable")
+        if action == "enable":
+            cmd.enable(group, parents=1)
+        else:
+            cmd.disable(group)
+        return {"group": group, "enabled": action == "enable"}
+    parents = group_parent_snapshot(cmd)
+    result = {name: {"parent": parents.get(name, ""),
+                     "members": direct_children(name, parents),
+                     "leaves": expand_group_leaves(cmd, name, parents)}
+              for name in ([group] if group else groups)}
+    for name, details in result.items():
+        print("%s: %d members, %d drawable leaves" %
+              (name, len(details["members"]), len(details["leaves"])))
+    return result
+
+
 def register_commands(command_api=None) -> None:
     selected = cmd if command_api is None else command_api
     commands = {
+        "pp_group": pp_group,
+        "pp_group_by_name": pp_group_by_name,
         "group_objects_by_name": group_objects_by_name,
         "merge_models_by_name": merge_models_by_name,
         "align_in_groups": align_in_groups,

@@ -26,6 +26,7 @@ from pymolplugins.annotation.persistence import pending_errors, submit_write
 from pymolplugins.annotation.sources.csv_source import CsvReadCancelled, read_csv_header
 from pymolplugins.annotation.review_config import default_fields, decode_value, field_key, missing_required, validate_fields, validate_score_config
 from pymolplugins.annotation.review_steps import ReviewObjects, effective_steps, validate_steps
+from pymolplugins.annotation.scene_groups import CandidateBundles, ancestors, candidates as scene_candidates, delete_owned, group_parents, write_manifest
 from pymolplugins.annotation.review_actions import save_annotations, undo_annotations
 from pymolplugins.annotation.score_summary import prepare_score_summary
 from pymolplugins.annotation.command_templates import format_commands
@@ -463,6 +464,9 @@ def remove_structure_annotation(path: str, label_key: str) -> None:
 @dataclass
 class AnnotatorState:
     source_mode: str = "directory"
+    group_candidates: bool = True
+    scene_groups: list = field(default_factory=list)
+    scene_parent: str = ""
     dataset_dir: str = "."
     csv_path: str = ""
     path_column: str = "structure_path"
@@ -571,6 +575,7 @@ _PERSISTED_STRING_FIELDS = (
     "step_cmd",
 )
 _PERSISTED_BOOL_FIELDS = (
+    "group_candidates",
     "auto_advance",
     "save_on_label_click",
     "show_source_row",
@@ -618,6 +623,8 @@ def _path_identity(path: str) -> str:
 
 
 def _active_source_reference() -> str:
+    if STATE.source_mode == "groups":
+        return STATE.state_path
     if STATE.source_mode == "csv" and STATE.dataset is not None:
         return str(STATE.csv_path or "")
     if not STATE.files:
@@ -882,6 +889,7 @@ def _install_entries(
 
 def _runtime_snapshot() -> Dict[str, object]:
     names = (
+        "group_candidates", "scene_groups", "scene_parent",
         "source_mode", "dataset_dir", "csv_path", "path_column", "id_column",
         "display_columns", "csv_encoding", "csv_delimiter", "source_base",
         "mapping_profile", "filter_text", "sort_column", "sort_descending",
@@ -914,6 +922,8 @@ def _restore_runtime_snapshot(snapshot: Mapping[str, object]) -> None:
 
 
 def _active_dataset_directory() -> str:
+    if STATE.source_mode == "groups":
+        return os.path.dirname(STATE.state_path)
     """Return the directory proved by the currently loaded file list."""
 
     if not STATE.files:
@@ -985,7 +995,7 @@ def _validate_persisted_config(raw: object) -> Dict[str, object]:
         if not isinstance(value, str) or len(value) > 4096:
             raise StateStoreError(f"config.{name} must be a bounded string")
         config[name] = value
-    if "source_mode" in config and config["source_mode"] not in {"directory", "csv"}:
+    if "source_mode" in config and config["source_mode"] not in {"directory", "csv", "groups"}:
         raise StateStoreError("config.source_mode must be directory or csv")
     if "display_columns" in raw:
         columns = raw["display_columns"]
@@ -1216,6 +1226,15 @@ def _write_persisted_dataset_state(source_reference: str, *, background=False) -
 
 
 def _save_current_dataset_state(*, background=False) -> Optional[str]:
+    if STATE.source_mode == "groups":
+        payload = {"schema": "pymolplugins.scene-review/1", "parent": STATE.scene_parent,
+                   "groups": list(STATE.scene_groups), "entry_id": STATE.current_entry_id(),
+                   "config": _persisted_config()}
+        if background:
+            submit_write(("state", STATE.state_path), write_manifest, STATE.state_path, payload)
+        else:
+            write_manifest(STATE.state_path, payload)
+        return STATE.state_path
     active = _active_source_reference()
     if not active:
         return None
@@ -1230,6 +1249,8 @@ def _save_current_dataset_state(*, background=False) -> Optional[str]:
 def _record_current_config_history(*, background=False) -> Optional[str]:
     """Record one finalized config without making history a runtime dependency."""
 
+    if STATE.source_mode == "groups":
+        return None
     active = _active_source_reference()
     if not active:
         return None
@@ -1546,7 +1567,7 @@ def _object_name_for_index(path: str, index: int) -> str:
 
 def _object_exists(object_name: str) -> bool:
     try:
-        return object_name in set(cmd.get_object_list())
+        return object_name in set(cmd.get_names("objects"))
     except Exception:
         return False
 
@@ -1563,7 +1584,7 @@ def _get_enabled_managed_object() -> Optional[str]:
         return None
 
 
-def _verify_current_object_enabled() -> bool:
+def _verify_current_object_enabled(*, check_parents=False) -> bool:
     """
     Verify that STATE.current_object is actually enabled in PyMOL.
     Returns True if matched, False if mismatch detected.
@@ -1572,8 +1593,16 @@ def _verify_current_object_enabled() -> bool:
         return False
     try:
         enabled = set(cmd.get_names("objects", enabled_only=1))
+        if STATE.source_mode == "groups":
+            if enabled.intersection(STATE.scene_groups) != {STATE.current_object}:
+                return False
+            if check_parents:
+                parents = group_parents(cmd)
+                return all(name in enabled for name in ancestors(STATE.current_object, parents))
+            return True
         enabled_managed = enabled.intersection(STATE.managed_objects)
-        return enabled_managed == {STATE.current_object}
+        group = _candidate_bundles.groups.get(STATE.current_object)
+        return enabled_managed == {STATE.current_object} and (not group or group in enabled)
     except Exception:
         return False
 
@@ -2088,7 +2117,31 @@ def _evict_decompressed_except(keep_indices: set) -> None:
         _bg_decompress_futures.pop(idx, None)
 
 
-def _run_pymol_commands(template: str, context: Dict[str, str]) -> None:
+def _run_pymol_commands(template: str, context: Dict[str, str], *, owner=None) -> None:
+    if not str(template).strip():
+        return
+    owner = owner or context.get("candidate") or context.get("object")
+    if owner in STATE.managed_objects:
+        _candidate_bundles.check_command_references(owner, format_commands(template, context))
+    before = set(cmd.get_names("objects"))
+    try:
+        _execute_pymol_commands(template, context)
+    finally:
+        created = set(cmd.get_names("objects")) - before
+        if owner in _review_objects.owned:
+            _review_objects.products.setdefault(owner, set()).update(created)
+            _review_objects.owned.update(created)
+        elif owner in STATE.managed_objects:
+            _candidate_bundles.products.setdefault(owner, set()).update(created)
+            if STATE.group_candidates:
+                _candidate_bundles.attach(cmd, owner, created)
+        elif STATE.source_mode == "groups":
+            _scene_products.update({name: owner for name in created})
+            for name in created:
+                cmd.group(owner, name)
+
+
+def _execute_pymol_commands(template, context):
     for number, formatted in format_commands(template, context):
         try:
             _execute_checked(cmd, formatted)
@@ -2121,13 +2174,16 @@ def _park_managed_objects() -> List[_ParkedManagedObject]:
     parked: List[_ParkedManagedObject] = []
     token = uuid.uuid4().hex[:12]
     try:
-        for index, original in enumerate(list(STATE.managed_objects)):
+        owned = list(STATE.managed_objects) + list(_candidate_bundles.groups.values())
+        owned += [name for members in _candidate_bundles.products.values() for name in members]
+        for index, original in enumerate(dict.fromkeys(owned)):
             if original not in existing:
                 continue
             candidate = f"sa_tx_{token}_{index + 1}"
             while candidate in existing:
                 candidate += "x"
             cmd.set_name(original, candidate)
+            _candidate_bundles.rename_owner(original, candidate)
             existing.discard(original)
             existing.add(candidate)
             parked.append(
@@ -2141,6 +2197,7 @@ def _park_managed_objects() -> List[_ParkedManagedObject]:
         for record in reversed(parked):
             try:
                 cmd.set_name(record.parked, record.original)
+                _candidate_bundles.rename_owner(record.parked, record.original)
             except Exception:
                 traceback.print_exc()
         raise
@@ -2150,6 +2207,7 @@ def _park_managed_objects() -> List[_ParkedManagedObject]:
 def _restore_parked_objects(records: Sequence[_ParkedManagedObject]) -> None:
     for record in reversed(list(records)):
         cmd.set_name(record.parked, record.original)
+        _candidate_bundles.rename_owner(record.parked, record.original)
         if record.enabled:
             cmd.enable(record.original)
         else:
@@ -2157,11 +2215,10 @@ def _restore_parked_objects(records: Sequence[_ParkedManagedObject]) -> None:
 
 
 def _discard_parked_objects(records: Sequence[_ParkedManagedObject]) -> None:
-    for record in records:
-        try:
-            cmd.delete(record.parked)
-        except Exception:
-            traceback.print_exc()
+    _candidate_bundles.remove(cmd, [record.parked for record in records])
+    if STATE.source_mode != "groups":
+        _release_scene_groups()
+    delete_owned(cmd, [record.parked for record in records])
 
 
 def _begin_scene_swap() -> List[_ParkedManagedObject]:
@@ -2197,6 +2254,7 @@ def _delete_managed_objects(keep: bool) -> None:
             cmd.delete(obj)
         except Exception:
             pass
+    _candidate_bundles.remove(cmd, list(STATE.managed_objects))
     STATE.managed_objects.clear()
     STATE.current_object = None
 
@@ -2209,6 +2267,8 @@ def _desired_indices_ahead() -> List[int]:
 
 
 def _evict_unneeded_objects() -> None:
+    if STATE.source_mode == "groups":
+        return
     if STATE.keep_previous:
         return
     if not STATE.files:
@@ -2222,9 +2282,10 @@ def _evict_unneeded_objects() -> None:
     if _panel is not None and _panel._pending_navigation is not None:
         desired.add(_panel._pending_navigation[2])
 
+    existing = set(cmd.get_names("objects"))
     keep_objects = []
     for obj in list(STATE.managed_objects):
-        if not _object_exists(obj):
+        if obj not in existing:
             continue
         keep_objects.append(obj)
     STATE.managed_objects = keep_objects
@@ -2239,6 +2300,7 @@ def _evict_unneeded_objects() -> None:
 
     for idx, obj in list(loaded_by_index.items()):
         if idx not in desired:
+            _candidate_bundles.remove(cmd, [obj])
             try:
                 cmd.delete(obj)
             except Exception:
@@ -2257,14 +2319,18 @@ def _ensure_candidate_loaded(
     *,
     trust_materialized: bool = False,
     run_commands: bool = True,
+    existing=None,
 ) -> Optional[str]:
     if not STATE.files:
         return None
     index = index % len(STATE.files)
     path = STATE.files[index]
     obj_name = _object_name_for_index(path, index)
+    existing = set(cmd.get_names("objects")) if existing is None else existing
+    if obj_name in existing and obj_name not in STATE.managed_objects:
+        raise RuntimeError("Candidate name already belongs to the scene: " + obj_name)
 
-    if not _object_exists(obj_name):
+    if obj_name not in existing:
         load_path = path
         if STATE.entries:
             materialized = _materialize_index(
@@ -2300,8 +2366,10 @@ def _ensure_candidate_loaded(
         # and produces a real Host ``wait_queue`` timeout.
         # A preload stays disabled before Qt can draw it. Forcing refresh here
         # briefly rendered the next object and stalled the active structure.
-    if obj_name not in STATE.managed_objects:
-        STATE.managed_objects.append(obj_name)
+    existing.add(obj_name)
+    if STATE.group_candidates:
+        _candidate_bundles.attach(cmd, obj_name)
+        existing.update(_candidate_bundles.groups.values())
 
     if not focus:
         if obj_name != STATE.current_object:
@@ -2309,20 +2377,14 @@ def _ensure_candidate_loaded(
         return obj_name
 
     for other in list(STATE.managed_objects):
-        if other != obj_name and _object_exists(other):
+        if other != obj_name and other in existing:
             cmd.disable(other)
     cmd.enable(obj_name)
+    _candidate_bundles.show(cmd, obj_name, existing)
 
     STATE.current_object = obj_name
     if _panel is None:
         _update_cache_navigation_pins()
-
-    # Ensure the synchronous load produced an addressable object before a
-    # restored command template can run against it.
-    if not _object_exists(obj_name):
-        cmd.refresh()
-        if not _object_exists(obj_name):
-            raise RuntimeError(f"loaded object is unavailable: {obj_name}")
 
     context = {
         "object": obj_name,
@@ -2343,6 +2405,8 @@ def _ensure_candidate_loaded(
 
 
 _review_objects = ReviewObjects()
+_candidate_bundles = CandidateBundles()
+_scene_products = {}
 
 
 def _configured_steps():
@@ -2354,6 +2418,8 @@ def _has_review_steps():
 
 
 def _ensure_loaded(index, focus, allow_gz_fallback=True, *, trust_materialized=False):
+    if STATE.source_mode == "groups":
+        return _show_scene_group(index) if focus else STATE.files[index]
     if not focus:
         return _ensure_candidate_loaded(index, False, allow_gz_fallback,
                                         trust_materialized=trust_materialized)
@@ -2362,7 +2428,9 @@ def _ensure_loaded(index, focus, allow_gz_fallback=True, *, trust_materialized=F
     assets = STATE.step_assets.get(entry.id, {}) if entry else {}
     source = (STATE.source_mode, STATE.csv_path if STATE.source_mode == "csv" else STATE.dataset_dir)
     previous_objects = _review_objects.snapshot(cmd)
-    previous_candidate_definition = _review_objects.definitions.get("candidate")
+    bundle_snapshot = _candidate_bundles.snapshot()
+    owned_before = set(STATE.managed_objects)
+    existing = set(cmd.get_names("objects"))
     try:
         _review_objects.begin(cmd, source, steps, assets)
         context = {"file": STATE.files[index], "index": str(index), "count": str(len(STATE.files)),
@@ -2372,9 +2440,9 @@ def _ensure_loaded(index, focus, allow_gz_fallback=True, *, trust_materialized=F
             if item["type"] == "commands":
                 _run_pymol_commands(item.get("commands", STATE.step_cmd), context)
             elif item["name"] == "candidate":
-                loaded = not _object_exists(_object_name_for_index(STATE.files[index], index))
+                loaded = _object_name_for_index(STATE.files[index], index) not in existing
                 candidate = _ensure_candidate_loaded(index, True, allow_gz_fallback,
-                    trust_materialized=trust_materialized, run_commands=False)
+                    trust_materialized=trust_materialized, run_commands=False, existing=existing)
                 context["object"] = context["candidate"] = candidate
                 if loaded:
                     _run_pymol_commands(item.get("on_load_cmd", ""), context)
@@ -2382,11 +2450,15 @@ def _ensure_loaded(index, focus, allow_gz_fallback=True, *, trust_materialized=F
                 name, loaded = _review_objects.load(cmd, item, assets[item["name"]])
                 context[item["name"]] = name
                 if loaded:
-                    _run_pymol_commands(item.get("on_load_cmd", ""), context)
+                    _run_pymol_commands(item.get("on_load_cmd", ""), context, owner=name)
         _review_objects.finish(cmd)
         STATE.step_context = context
         return candidate
     except Exception:
+        _candidate_bundles.restore(cmd, bundle_snapshot)
+        for name in set(STATE.managed_objects) - owned_before:
+            cmd.delete(name)
+            STATE.managed_objects.remove(name)
         _review_objects.restore(cmd, previous_objects)
         raise
 
@@ -2411,7 +2483,7 @@ def _schedule_preload_tick() -> None:
 
 def _kick_preload() -> None:
     global _preload_generation, _preload_queue
-    if _has_review_steps():
+    if STATE.source_mode == "groups" or _has_review_steps():
         return
     if not STATE.preload_enabled:
         return
@@ -2534,7 +2606,7 @@ def _navigate_annotation(method: str, *args) -> str:
     previous = session.cursor
     previous_object = STATE.current_object
     previous_view = cmd.get_view()
-    previous_enabled = set(cmd.get_names("objects", enabled_only=1)).intersection(STATE.managed_objects)
+    previous_enabled = set(cmd.get_names("objects", enabled_only=1))
     getattr(session, method)(*args)
     target = session.cursor
     session.goto(previous)
@@ -2559,9 +2631,10 @@ def _navigate_annotation(method: str, *args) -> str:
         session.goto(previous)
         STATE.index = session.cursor
         STATE.current_object = previous_object
-        for name in STATE.managed_objects:
-            if _object_exists(name):
-                (cmd.enable if name in previous_enabled else cmd.disable)(name)
+        existing = set(cmd.get_names("objects"))
+        controlled = set(STATE.managed_objects) | set(_candidate_bundles.groups.values())
+        for name in controlled & existing:
+            (cmd.enable if name in previous_enabled else cmd.disable)(name)
         cmd.set_view(previous_view)
         raise
 
@@ -3946,6 +4019,152 @@ def _commit_prepared_directory_load(plan):
         raise
 
 
+_scene_visibility = {}
+
+
+def _release_scene_groups():
+    global _scene_visibility
+    existing = set(cmd.get_names("objects"))
+    delete_owned(cmd, _scene_products)
+    _scene_products.clear()
+    for name, enabled in _scene_visibility.items():
+        if name in existing:
+            (cmd.enable if enabled else cmd.disable)(name)
+    _scene_visibility = {}
+
+
+def _show_scene_group(index):
+    target = STATE.files[index]
+    if cmd.get_type(target) != "object:group":
+        raise ValueError("Scene group is unavailable; load its PyMOL session first: " + target)
+    enabled = set(cmd.get_names("objects", enabled_only=1))
+    products = set(_scene_products)
+    try:
+        for name in STATE.scene_groups:
+            if name != target:
+                cmd.disable(name)
+        cmd.enable(target, parents=1)
+        context = {"object": target, "candidate": target, "file": target,
+                   "index": str(index), "count": str(len(STATE.files)),
+                   "entry_id": STATE.entries[index].id, "row_number": ""}
+        _run_pymol_commands(STATE.step_cmd, context)
+        STATE.current_object = target
+        STATE.step_context = context
+        return target
+    except Exception:
+        delete_owned(cmd, set(_scene_products) - products)
+        for name in set(_scene_products) - products:
+            del _scene_products[name]
+        for name in cmd.get_names("objects"):
+            (cmd.enable if name in enabled else cmd.disable)(name)
+        raise
+
+
+def sa_group_candidate(enabled: int = 1):
+    """Group each loaded candidate with objects created by its review commands."""
+    STATE.group_candidates = _flag(enabled)
+    if STATE.group_candidates:
+        for name in STATE.managed_objects:
+            _candidate_bundles.attach(cmd, name)
+        _candidate_bundles.show(cmd, STATE.current_object, set(cmd.get_names("objects")))
+    else:
+        # Ungroup without deleting molecules, contacts, or labels.
+        for group in _candidate_bundles.groups.values():
+            cmd.group(group, action="excise")
+        _candidate_bundles.groups.clear()
+    _save_current_dataset_state()
+    return STATE.group_candidates
+
+
+def sa_load_groups(parent: str = "", review_path: str = "scene-review.json", restore_saved: int = 1):
+    """Review direct child groups; reopen annotations after loading the original scene.
+
+    Args:
+        parent: Parent group, or empty for top-level groups.
+        review_path: Annotation manifest; no molecular data is written here.
+        restore_saved: Restore matching saved group names, settings, and position.
+    """
+    global _scene_visibility
+    path = os.path.abspath(os.path.expanduser(review_path))
+    saved = None
+    if _flag(restore_saved) and os.path.exists(path):
+        with open(path, encoding="utf-8") as handle:
+            saved = json.load(handle)
+        if saved.get("schema") != "pymolplugins.scene-review/1":
+            raise ValueError("Not a scene group review manifest: " + path)
+        if parent and parent != saved["parent"]:
+            raise ValueError("The review manifest belongs to another parent group. Use a new review_path or restore_saved=0.")
+        parent = str(saved["parent"])
+    parents = group_parents(cmd)
+    owned = set(_candidate_bundles.groups.values()) | _review_objects.owned
+    owned.update(name for values in _candidate_bundles.products.values() for name in values)
+    names = [name for name in scene_candidates(cmd, parent, parents) if name not in owned]
+    if not names:
+        raise ValueError("No user-loaded child groups to review; annotator-generated bundles belong to the file source.")
+    if saved:
+        missing = set(saved["groups"]) - set(names)
+        if missing:
+            raise ValueError("Load the original scene groups before restoring: " + ", ".join(sorted(missing)))
+        names = list(saved["groups"])
+    entries = tuple(AnnotationEntry(id="group:" + name, ordinal=index,
+        display_name=name, source_path=name, source_kind="groups",
+        resolved_path=name, availability=AVAILABILITY_AVAILABLE,
+        metadata={"group": name}) for index, name in enumerate(names))
+    previous = _runtime_snapshot()
+    enabled = set(cmd.get_names("objects", enabled_only=1))
+    old_visibility = dict(_scene_visibility)
+    old_products = dict(_scene_products)
+    parked = []
+    try:
+        parked = _begin_scene_swap()
+        if saved:
+            config = dict(saved.get("config", {}))
+            config.pop("source_mode", None)
+            _apply_persisted_config(config)
+        STATE.source_mode = "groups"
+        STATE.scene_groups, STATE.scene_parent = names, parent
+        STATE.dataset_dir, STATE.csv_path, STATE.state_path = os.path.dirname(path), "", path
+        STATE.reference_column, STATE.steps = "", []
+        STATE.step_assets, STATE.step_materialized, STATE.materialized_paths = {}, {}, {}
+        STATE.filter_text, STATE.sort_column = "", ""
+        STATE.filter_presets, STATE.sampling, STATE.display_columns = [], {}, []
+        STATE.dataset = AnnotationDataset("groups", path, os.path.dirname(path), entries,
+                                          columns=("group",))
+        STATE.all_entries, STATE.filtered_count = list(entries), len(entries)
+        STATE.row_annotation_store = RowAnnotationStore(path + ".annotations.jsonl")
+        STATE.undo_history.clear()
+        _install_entries(entries, resume_entry_id=saved.get("entry_id", "") if saved else "",
+                         active_entries=entries)
+        _rescan_annotated_indices()
+        _load_current_structure()
+        _save_current_dataset_state()
+        _discard_parked_objects(parked)
+        _review_objects.clear(cmd)
+        controlled = set(names).union(*(set(ancestors(name, parents)) for name in names))
+        removed = {name for name, owner in old_products.items() if owner not in names}
+        delete_owned(cmd, removed)
+        for name in removed:
+            _scene_products.pop(name, None)
+        for name in set(old_visibility) - controlled:
+            (cmd.enable if old_visibility[name] else cmd.disable)(name)
+        # Returning to the same scene review retains its original visibility lease.
+        _scene_visibility = {name: old_visibility.get(name, name in enabled) for name in controlled}
+    except Exception:
+        delete_owned(cmd, set(_scene_products) - set(old_products))
+        _scene_products.clear()
+        _scene_products.update(old_products)
+        _rollback_scene_swap(previous, parked)
+        _scene_visibility = old_visibility
+        for name in cmd.get_names("objects"):
+            (cmd.enable if name in enabled else cmd.disable)(name)
+        raise
+    if _panel is not None:
+        _panel._sync_from_state()
+        _panel._refresh_status()
+    return {"status": "loaded", "active_count": len(entries), "state_path": path,
+            "annotation_path": STATE.row_annotation_store.path}
+
+
 def sa_load_dir(path: str = ".", pattern: str = "", *, restore_saved: bool = True,
                 raise_errors: bool = False) -> None:
     """Synchronously load a folder for console/script callers."""
@@ -4000,7 +4219,7 @@ def sa_annotate(value: str) -> None:
             return
 
         # Verify the displayed object matches STATE before annotating
-        if not _verify_current_object_enabled():
+        if not _verify_current_object_enabled(check_parents=True):
             enabled = set(cmd.get_names("objects", enabled_only=1))
             enabled_managed = sorted(enabled.intersection(STATE.managed_objects))
             print("Structure Annotator: scene/context mismatch; annotation aborted")
@@ -4396,7 +4615,7 @@ def sa_state_status() -> Dict[str, object]:
         if STATE.source_mode == "csv" and STATE.csv_path
         else {"source_mode": "directory"}
     )
-    path = dataset_state_path(target, **kwargs)
+    path = STATE.state_path if STATE.source_mode == "groups" else dataset_state_path(target, **kwargs)
     result: Dict[str, object] = {
         "status": "inactive" if not active else "active",
         "source_mode": STATE.source_mode,
@@ -4408,7 +4627,11 @@ def sa_state_status() -> Dict[str, object]:
     }
     if result["exists"]:
         try:
-            result["state"] = read_dataset_state(target, **kwargs)
+            if STATE.source_mode == "groups":
+                with open(path, encoding="utf-8") as handle:
+                    result["state"] = json.load(handle)
+            else:
+                result["state"] = read_dataset_state(target, **kwargs)
         except StateStoreError as exc:
             result.update({"status": "invalid", "error": str(exc)})
     print(result)
@@ -4575,6 +4798,13 @@ def sa_filter(
             raise RuntimeError("Structure Annotator: no navigable structure rows")
         selected_index = _resume_entry_index(active_entries, current_id, STATE.index)
         selected_entry = active_entries[selected_index]
+        if STATE.source_mode == "groups":
+            STATE.filter_text, STATE.sort_column, STATE.sort_descending = next_filter, next_sort, next_descending
+            _install_entries(STATE.all_entries, resume_entry_id=current_id, active_entries=active_entries)
+            STATE.filtered_count = len(active_entries)
+            _load_current_structure()
+            _save_current_dataset_state()
+            return {"status": "ok", "active_count": len(active_entries), "total_count": len(STATE.all_entries)}
         preflight_materialized = _materialize_entry(
             selected_entry, _materialization_context()
         )
@@ -4640,11 +4870,11 @@ def _prepare_view(entries, query, sort_column, descending, current_id,
     if active:
         selected = active[_resume_entry_index(active, current_id, current_index)]
         prepared = materialized.get(selected.id)
-        if prepared is None:
+        if prepared is None and selected.source_kind != "groups":
             prepared = _materialize_entry(selected, context)
     _check_csv_preparation_cancelled(cancel_event)
     assets, cached = {}, dict(step_materialized or {})
-    if selected is not None and dataset is not None:
+    if selected is not None and dataset is not None and selected.source_kind != "groups":
         assets, cached = _prepare_step_assets(dataset, selected, steps, step_cmd, mapping, context, cached,
                                               cancel_event=cancel_event)
     return {"entries": tuple(active), "selected": selected, "materialized": prepared,
@@ -5469,6 +5699,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             return
         self._closed = True
         _review_objects.clear(cmd)
+        _delete_managed_objects(False)
+        _release_scene_groups()
         self.review.close()
         self._cancel_pending_task(announce=False)
         try:
@@ -5504,6 +5736,9 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             self._apply_view(sampling=dialog.result_config)
 
     def _edit_review_steps(self):
+        if STATE.source_mode == "groups":
+            self._show_error("Scene groups already contain their review objects. Edit the per-step commands to change their display.")
+            return
         if self._csv_task_id:
             return
         from .review_steps_widgets import ReviewStepsDialog
@@ -5523,6 +5758,9 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         source = STATE.csv_path if STATE.source_mode == "csv" else _active_dataset_directory()
         name_path = parse_ssh_path(source).path if is_ssh_path(source) else source
         title = os.path.basename(name_path or "") if index == 0 else "Open data" if index == 1 else "Settings"
+        if index == 0 and STATE.source_mode == "groups":
+            title = STATE.scene_parent or "Scene groups"
+            source = STATE.state_path
         self.active_source_label.setText(title or "Structure Annotator")
         self.active_source_label.setToolTip(source or "")
         self.back_button.setVisible(index == 2 or (index == 1 and STATE.dataset is not None))
@@ -6118,6 +6356,24 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         _evict_unneeded_objects()
         _kick_preload()
 
+    def _load_scene_groups(self):
+        from pymolplugins.core.pymol_groups import is_group
+        names = [name for name in cmd.get_names("objects") if is_group(cmd, name)]
+        parent, accepted = QtWidgets.QInputDialog.getItem(self, "Review scene groups",
+            "Parent group", ["(top-level groups)"] + names, 0, False)
+        if not accepted:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Scene review annotations",
+            os.path.abspath("scene-review.json"), "Scene review (*.json)")
+        if not path:
+            return
+        try:
+            sa_load_groups("" if parent == "(top-level groups)" else parent, path)
+            self.main_tabs.setCurrentIndex(0)
+        except Exception as exc:
+            traceback.print_exc()
+            self._show_error(str(exc))
+
     def _request_navigation(self, index):
         try:
             self._request_navigation_impl(index)
@@ -6144,6 +6400,10 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.review.selection.clear()
         self._sync_to_state(update_directory=False, persist=False)
         index %= len(STATE.entries)
+        if STATE.source_mode == "groups":
+            _navigate_annotation("goto", index)
+            self._refresh_status()
+            return
         if _has_review_steps():
             if self._csv_task_id:
                 if self._csv_task_kind != "steps":
@@ -7418,6 +7678,8 @@ def __init_plugin__(app=None) -> None:
     addmenuitemqt("Structure Annotator", show_structure_annotator_panel)
 
 
+extend_command(cmd, "sa_load_groups", sa_load_groups)
+extend_command(cmd, "sa_group_candidate", sa_group_candidate)
 extend_command(cmd, "sa_load_dir", sa_load_dir)
 extend_command(cmd, "sa_csv_preview", sa_csv_preview)
 extend_command(cmd, "sa_load_csv", sa_load_csv)

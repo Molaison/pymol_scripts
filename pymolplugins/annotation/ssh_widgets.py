@@ -13,6 +13,7 @@ from pymolplugins.remote.ssh import (
     SshClient, SshLocation, default_ssh_program, is_ssh_path, parse_ssh_path,
     ssh_profiles, ssh_progress,
 )
+from pymolplugins.remote.otp import DEFAULT_OTP_PROMPT, configure_otp, get_otp_settings
 from .history_store import fuzzy_matches
 from .qt_widgets import CollapsibleSection, ColumnCompletion
 
@@ -61,7 +62,7 @@ class SourceLocationControls(QtWidgets.QWidget):
         self.config.setToolTip("SSH config on the computer running PyMOL. A WSL config is not selected automatically.")
         self.program = QtWidgets.QLineEdit()
         self.program.setPlaceholderText("Use the configured SSH login program")
-        self.program.setToolTip("Leave blank to use the detected login program, including your existing OTP wrapper.")
+        self.program.setToolTip("Leave blank for automatic selection. Automatic OTP uses system OpenSSH directly.")
         self.advanced_section = CollapsibleSection("Advanced")
         advanced_form = QtWidgets.QFormLayout(self.advanced_section.content)
         for title, editor, filters in (
@@ -75,6 +76,7 @@ class SourceLocationControls(QtWidgets.QWidget):
             button.clicked.connect(lambda _checked=False, widget=editor, selected_filter=filters: self._browse_setting(widget, selected_filter))
             row.addWidget(button)
             (advanced_form if editor is self.program else form).addRow(title, row)
+        self._build_otp_settings(form, advanced_form)
         form.addRow(self.advanced_section)
         self.setup_help_button = QtWidgets.QPushButton("First SSH connection…")
         self.setup_help_button.setAutoDefault(False)
@@ -89,6 +91,70 @@ class SourceLocationControls(QtWidgets.QWidget):
         buttons.accepted.connect(self._accept_settings)
         buttons.rejected.connect(self.settings_dialog.reject)
         form.addRow(buttons)
+
+    def _build_otp_settings(self, form, advanced_form):
+        self.otp_host = QtWidgets.QComboBox()
+        self.otp_host.setEditable(True)
+        self.otp_host.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+        self.otp_host.setAccessibleName("SSH server for automatic OTP")
+        self.otp_host.lineEdit().setPlaceholderText("SSH Host name, for example f101")
+        form.addRow("SSH server", self.otp_host)
+        self.otp_enabled = QtWidgets.QCheckBox("Automatic OTP")
+        form.addRow(self.otp_enabled)
+        self.otp_secret = QtWidgets.QLineEdit()
+        self.otp_secret.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.otp_secret.setPlaceholderText("Authenticator setup key (not a six-digit code)")
+        self.otp_secret.setAccessibleName("OTP secret")
+        form.addRow("OTP secret", self.otp_secret)
+        self.otp_remember = QtWidgets.QCheckBox("Remember encrypted key on this computer")
+        self.otp_remember.setToolTip("Unchecked: use only until PyMOL closes. Checked: save with Windows user encryption.")
+        form.addRow(self.otp_remember)
+        note = QtWidgets.QLabel("Uses this server's OTP key with system SSH. No extra OTP program is needed.")
+        note.setWordWrap(True)
+        form.addRow(note)
+        self.otp_prompt = QtWidgets.QLineEdit()
+        self.otp_prompt.setPlaceholderText(DEFAULT_OTP_PROMPT)
+        self.otp_prompt.setToolTip("Optional regular expression for your server's OTP prompt. Leave blank for common OTP prompts.")
+        advanced_form.addRow("OTP prompt", self.otp_prompt)
+        self.otp_host.currentTextChanged.connect(self._load_otp_settings)
+        self.otp_enabled.toggled.connect(self._update_otp_controls)
+        self.config.editingFinished.connect(self._refresh_otp_hosts)
+        self._update_otp_controls()
+
+    def _refresh_otp_hosts(self):
+        chosen = self.otp_host.currentText().strip()
+        try:
+            profiles = ssh_profiles(self.config.text().strip())
+        except (OSError, ValueError):
+            return  # OK reports invalid config paths without discarding edits.
+        self.otp_host.blockSignals(True)
+        self.otp_host.clear()
+        self.otp_host.addItems(profiles)
+        self.otp_host.setCurrentText(chosen)
+        self.otp_host.blockSignals(False)
+        self._load_otp_settings()
+
+    def _load_otp_settings(self, *_args):
+        host = self.otp_host.currentText().strip()
+        try:
+            settings = get_otp_settings(host, self.config.text().strip()) if host else {}
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.dialog_error.setText(str(exc))
+            self.dialog_error.show()
+            settings = {}
+        self.otp_enabled.setChecked(settings.get("enabled", False))
+        self.otp_secret.setText(settings.get("secret", ""))
+        self.otp_remember.setChecked(settings.get("remember", False))
+        prompt = settings.get("prompt", DEFAULT_OTP_PROMPT)
+        self.otp_prompt.setText("" if prompt == DEFAULT_OTP_PROMPT else prompt)
+        self._update_otp_controls()
+
+    def _update_otp_controls(self, *_args):
+        enabled = self.otp_enabled.isChecked()
+        self.otp_secret.setEnabled(enabled)
+        self.otp_remember.setEnabled(enabled and os.name == "nt")
+        self.otp_prompt.setEnabled(enabled)
+        self.program.setPlaceholderText(default_ssh_program(builtin_otp=enabled) or "SSH is not installed")
 
     def _build_quick_start(self):
         self.quick_start_dialog = QtWidgets.QDialog(self)
@@ -122,8 +188,10 @@ class SourceLocationControls(QtWidgets.QWidget):
             "<pre>Host my-lab\n    HostName server.example.org\n    User your-username</pre>"
             "<p>First confirm <code>ssh my-lab</code> works on the computer running PyMOL, "
             "including host trust and key/OTP setup. Then reopen <b>Connections…</b> and click "
-            "<b>OK</b> to refresh the list. You can choose an existing config or login program "
-            "there. Leave the program blank for automatic selection.</p>"
+            "<b>OK</b> to refresh the list. For automatic OTP, select the server in "
+            "<b>Connections…</b>, enable <b>Automatic OTP</b>, and enter the authenticator "
+            "setup key. Leave <b>SSH program</b> blank; no extra OTP wrapper is needed. "
+            "The key stays in this PyMOL session unless you choose encrypted storage on Windows.</p>"
             "<p>The server needs <b>Python 3</b>. No SSHFS mount or WSL worker is required. "
             "The plugin does not create accounts or manage passwords.</p>"
             "<h3>If opening takes time</h3>"
@@ -154,20 +222,39 @@ class SourceLocationControls(QtWidgets.QWidget):
         program = self.program.text().strip() or default_ssh_program()
         self.program.setPlaceholderText(program or "SSH is not installed")
         self.dialog_error.hide()
+        self.otp_host.blockSignals(True)
+        self.otp_host.setCurrentText(self.connection.currentText().strip() if self.remote else "")
+        self.otp_host.blockSignals(False)
+        self._refresh_otp_hosts()
         if self.settings_dialog.exec_() != QtWidgets.QDialog.Accepted:
             self.config.setText(before[0])
             self.program.setText(before[1])
+        self.otp_secret.clear()
 
     def _accept_settings(self):
         try:
-            ssh_profiles(self.config.text().strip())
-            SshClient(SshLocation("connection-check", "~", self.config.text().strip(), self.program.text().strip()))
+            config = self.config.text().strip()
+            profile = self.otp_host.currentText().strip()
+            enabled = self.otp_enabled.isChecked()
+            if enabled and not profile:
+                raise ValueError("Choose an SSH server before enabling Automatic OTP.")
+            secret = self.otp_secret.text().strip() if enabled else ""
+            if enabled and not secret:
+                raise ValueError("Enter the authenticator setup key, not the current six-digit code.")
+            prompt = (self.otp_prompt.text().strip() or DEFAULT_OTP_PROMPT) if enabled else DEFAULT_OTP_PROMPT
+            ssh_profiles(config)
+            SshClient(SshLocation(profile or "connection-check", "~", config, self.program.text().strip()),
+                      otp_secret=secret, otp_prompt=prompt)
+            if profile:
+                configure_otp(profile, secret, config, self.otp_remember.isChecked(), prompt)
         except (OSError, ValueError, RuntimeError) as exc:
             traceback.print_exc()
             self.dialog_error.setText(str(exc))
             self.dialog_error.show()
             return
         if self._reload_profiles():
+            if profile:
+                self.connection.setCurrentText(profile)
             self.settings_dialog.accept()
 
     @property

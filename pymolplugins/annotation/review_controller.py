@@ -296,6 +296,10 @@ class ReviewController:
         targets = self.targets()
         if not targets or self.owner.STATE.row_annotation_store is None:
             return
+        if (self.owner.STATE.source_mode == "groups" and len(targets) == 1
+                and not self.owner._verify_current_object_enabled(check_parents=True)):
+            self.panel._show_error("The current group or its parent is hidden. Reload the group before saving.")
+            return
         try:
             updates = self.form.updates()
         except ValueError as exc:

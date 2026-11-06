@@ -87,13 +87,13 @@ _TASKS = (
     _help_entry(
         "task",
         "navigate",
-        "Navigate files, molecule objects, or whole root groups as entries.",
+        "Browse objects or groups: Left/Right step, Ctrl+Left/Right page; an empty command line handles navigation, while text keeps cursor editing. Use keys=0 to disable bindings and pp_nav stop to restore shortcuts and visibility.",
         "pp_nav TARGET",
         'pp_nav groups, "walk_root_*"',
         True,
         "pp_nav stop",
         ("pp_nav next", "pp_nav prev", "pp_nav pin", "pp_nav stop"),
-        ("navigation", "nav", "next", "previous", "batch", "groups"),
+        ("navigation", "nav", "next", "previous", "batch", "groups", "arrows", "keyboard", "快捷键", "方向键"),
         "navigation",
         (
             "导航",
@@ -316,13 +316,13 @@ _TASKS = (
     _help_entry(
         "task",
         "annotation",
-        "Open the Structure Annotator GUI for persistent directory or CSV review.",
+        "Review directories, CSV rows or existing scene groups; candidate outputs switch as one bundle.",
         "Plugin > PymolPlugins: Structure Annotator",
         "Plugin > PymolPlugins: Structure Annotator",
         True,
         "Use the annotator's row-level Undo action.",
-        ("Load a directory or CSV in the Source tab",),
-        ("csv", "scores", "review", "label", "history"),
+        ("Load a directory or CSV in the Source tab", "pp_review_groups parent=candidates"),
+        ("csv", "scores", "review", "label", "history", "groups", "bundle"),
         "annotation",
         (
             "标注",
@@ -340,6 +340,7 @@ _CATEGORY_PURPOSE = {
     "toolkit": "Load, diagnose, and discover the toolkit.",
     "tasks": "Recommended workflows with explicit preview, undo, stop, or job guidance.",
     "targets": "Resolve and apply commands once per object or group.",
+    "grouping": "Inspect, toggle, and create complete object groups; navigate with pp_nav.",
     "navigation": "Navigate files, objects, or root groups.",
     "follow": "Propagate one manually moved object's transform.",
     "sequence_alignment": "Select sequence motifs and perform rigid alignment.",
@@ -355,6 +356,33 @@ _CATEGORY_PURPOSE = {
 # Curated command rows use:
 # purpose, minimal usage, example, mutates, undo, next, keywords.
 _COMMAND_ROWS = {
+    "pp_review_groups": (
+        "Open Structure Annotator on direct child groups, preserving external scene objects.",
+        "pp_review_groups [PARENT] [, review_path=PATH] [, restore_saved=1]",
+        "pp_review_groups candidates, review_path=scene-review.json",
+        True,
+        "Use annotation Undo; closing restores original group visibility and retains external objects.",
+        ("Load the original PSE before reopening its scene-review.json", "pp_help annotation"),
+        ("group", "review", "annotation", "分组", "标注"),
+    ),
+    "pp_group": (
+        "Inspect or toggle complete groups, including distances and CGO; enable restores parent visibility.",
+        "pp_group [info|enable|disable] [, GROUP]",
+        "pp_group info, candidates",
+        True,
+        "Use the opposite visibility action; child visibility flags are preserved.",
+        ('pp_nav groups, "candidate_*"', "pp_review_groups parent=candidates"),
+        ("group", "bundle", "show", "hide", "分组", "整组"),
+    ),
+    "pp_group_by_name": (
+        "Create real groups from object-name fields without merging coordinates.",
+        "pp_group_by_name [SELECTION] [, method=split_lastn_sep]",
+        "pp_group_by_name all, prefix=review_",
+        True,
+        "Ungroup the generated containers; source molecule objects remain intact.",
+        ("pp_group", "pp_help navigation"),
+        ("group", "names", "分组"),
+    ),
     "pp_show": (
         "Show/hide in all states; default all means molecule objects/group leaves only, with same-session undo identity when supported.",
         "pp_show REPRESENTATION [, TARGET]",
@@ -365,13 +393,13 @@ _COMMAND_ROWS = {
         ("surface", "display", "group", "表面"),
     ),
     "pp_nav": (
-        "Start or control navigation; control actions reject start-only options.",
+        "Start object/group navigation with Left/Right and Ctrl+Left/Right; an empty command line navigates, while text keeps cursor editing. Set keys=0 to disable bindings; pp_nav stop restores shortcuts and visibility. Control actions reject start-only options.",
         "pp_nav [ACTION|TARGET]",
         'pp_nav groups, "walk_root_*"',
         True,
         "pp_nav stop",
         ("pp_nav next", "pp_nav status", "pp_nav stop"),
-        ("browse", "group batch", "导航"),
+        ("browse", "group batch", "arrows", "keyboard", "导航", "方向键", "快捷键"),
     ),
     "pp_align": (
         "Align objects, anchors, one motif, or one ligand and journal the mutation.",
@@ -1176,7 +1204,14 @@ def command_help(name):
 
 def _preset_entries():
     values = []
-    for name, aliases, purpose, example, undo, keywords in _PRESET_ROWS:
+    from pymolplugins.styles.presets import PRESETS
+    rows = list(_PRESET_ROWS)
+    curated = {row[0] for row in rows}
+    rows.extend((item.name, item.aliases, item.description,
+                 "pp_style_apply %s, selection=all" % item.name,
+                 "pp_style_revert", (item.category, "figure", "style"))
+                for item in PRESETS if item.name not in curated)
+    for name, aliases, purpose, example, undo, keywords in rows:
         command = "pp_style_apply" if example.startswith("pp_style") else "pp_interact_run"
         values.append(
             _help_entry(

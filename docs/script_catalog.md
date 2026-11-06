@@ -1,138 +1,53 @@
-# Script Catalog
+# 查找命令和脚本
 
-This catalog distinguishes supported entry points from migration wrappers and
-standalone historical tools.  Runtime surfaces are important: `Host` means the
-module imports PyMOL and must run inside Windows PyMOL; `WSL` means it can run in
-ordinary Python; `Both` means a PyMOL-independent core is also testable in WSL.
+在 PyMOL 运行 `pp_load`，再用 `pp_help` 或 `help 命令名` 查可用命令。按下表选择任务，随后查看对应目录；本页覆盖统一实现、兼容入口和独立工具。Host 条目需要 PyMOL；标为 WSL/Both 的核心可以在普通 Python 中运行或测试，但界面仍属于 Host。
 
-Status vocabulary:
-
-- **Canonical**: loaded by `plugins/pymol_plugins.py` or a supported service
-  entry point; new workflows should use these APIs.
-- **Compatibility**: a thin wrapper around canonical behavior, retained for old
-  command lines.
-- **Standalone**: useful independent domain/UI, but not part of the unified
-  canonical lifecycle.
-- **Legacy/experimental**: not loaded by `pp_load`; may own unsafe global state,
-  broad mutations, duplicate commands, or optional unvalidated dependencies.
-
-All canonical implementation imports flow inward to `pymolplugins/`. Historical
-top-level paths remain only as migration shims so existing PyMOL `run` commands
-and Python imports continue to work.
-
-## Canonical toolkit
-
-| Surface | Path | Primary API / purpose |
+| 要做什么 | 使用入口 | 结果与限制 |
 | --- | --- | --- |
-| Host | `pymolplugins/host/plugin.py` | Unified implementation for `pp_load`, full-manifest `pp_doctor`/`pp_capabilities`, and categorized `pp_help`; `plugins/pymol_plugins.py` is its thin Plugin Manager entry. |
-| WSL | `pymolplugins/host/manifest.py` | Declarative, uniqueness-tested inventory: eight task facades plus 64 advanced commands and eight declared compatibility names. |
-| Both | `pymolplugins/tasks/commands.py` | Recommended `pp_show`, `pp_nav`, `pp_align`, `pp_orient`, `pp_contacts`, `pp_metrics`, `pp_jobs`, and `pp_undo` facades; delegates to canonical domain owners. |
-| Both | `pymolplugins/tasks/journal.py` | Bounded exact-owner operation references plus all-state representation snapshots and optional hidden same-session object identity markers for transactional `pp_show` undo. |
-| Both | `pymolplugins/core/parameters.py` | Strict PyMOL-console boundary and value parsing: one-layer paired-quote normalization for every canonical `cmd.extend` callback, plus `as_bool`, `as_int`, `as_float`, `split_names`, and `sanitize_name`. |
-| WSL | `pymolplugins/core/sequence.py` | Residue-safe sequence index and exact/bounded motif matching with original chain/resi identity. |
-| WSL | `pymolplugins/core/math3d.py` | Dependency-free TTT/homogeneous transforms, rigid validation, Horn/Kabsch fit, eigen/vector utilities. |
-| Both | `pymolplugins/targets/resolver.py` | Deterministic exact/glob/contains/regex/fuzzy object/group resolution and recursive non-molecule-safe group expansion. |
-| Host | `pymolplugins/targets/commands.py` | Object/group iteration with default molecule-leaf execution, explicit `commit=0` preview, and same-line parser completion checks: `pp_target_resolve` and `pp_foreach`. |
-| Both / Host UI | `pymolplugins/targets/batch_*.py` | `pp_batch`: folder/CSV fixed-reference or template/glob/regex ID pairs, ordered commands, main-thread execution, default A+B outputs, cancellation and result reports. |
-| WSL | `pymolplugins/navigation/model.py` | Pure `NavigationEntry` / `NavigationSession` state model. |
-| Host | `pymolplugins/navigation/commands.py` | Canonical file/object/root-group navigator: `pp_nav_start`, `pp_nav_next`, `pp_nav_prev`, batch, pin, hook, status, sync, and stop commands. |
-| Both | `pymolplugins/follow/commands.py` | Explicit `arm -> move driver -> apply` object-TTT propagation with rebase, stale-safe undo, and safe-default static/callback CGO policy: `pp_follow_*`. |
-| Host | `pymolplugins/grouping/commands.py` | Existing name-based grouping/alignment helpers; loaded by the toolkit but command names are pre-namespace and should be used cautiously. |
-| Both | `pymolplugins/alignment/sequence.py` | Canonical `pp_select_sequence`; exact residue mapping covers blank/multi-character chains, insertion codes, negative resi, altloc, and missing CA. |
-| Both | `pymolplugins/alignment/rigid.py` | Anchor/motif/ligand fit with explicit move payload, anchor/move fingerprints, stale-safe preview/commit/undo, and reproducible export: `pp_align_*`. |
-| Both | `pymolplugins/geometry/commands.py` | Equal/mass-weighted PCA, vector/two-point/cyclic axes, secondary-roll orientation, membrane slabs, shell-free ANVIL runner/DUM parser/coordinate validation, and JSON export. |
-| Both | `pymolplugins/styles/presets.py` | Declarative normalized preset definitions. |
-| Host | `pymolplugins/styles/registry.py` | Validated style registry with snapshot/revert and render separation: `pp_style_*`; owns deterministic legacy wrappers. |
-| WSL | `pymolplugins/interactions/schema.py` | Versioned public `InteractionResult` and exact `OutputManifest` schemas with source objects, input/stale fingerprints, and parameters. |
-| WSL | `pymolplugins/interactions/presets.py` | Canonical local and PLIP preset definitions and aliases. |
-| WSL | `pymolplugins/interactions/plip_protocol.py` | Strict PyMOL-export/PLIP atom identity map, raw validator, and canonical `InteractionResult` conversion. |
-| Both | `pymolplugins/interactions/controller.py` | Mutation-bounded local/PLIP controller: preset dispatch, exact-ligand filtering, canonical rendering, transactional replacement restore, export, and manifest clear. |
-| Host | `pymolplugins/remote/commands.py` | Windows PyMOL async Qt client for PLIP and Rosetta plus worker health/capabilities; worker threads perform HTTP only. |
-| WSL | `pymolplugins/remote/client.py` | Bounded typed HTTP client with no redirects and request/response/schema checks. |
-| Both | `pymolplugins/remote/staging.py` | Warm-cache single/batch stat lookup plus bounded binary staging with identity validation, 256-item/64-KiB batch chunking, exact old-worker fallback, and atomic `.part` replacement; called by Windows PyMOL and independently testable in WSL. |
-| WSL | `pymolplugins/worker/app.py` | Loopback HTTP service: health/capabilities, inline analysis, and optional allowlisted `/v1/stage/stat`, `/v1/stage/stat-batch`, and `/v1/stage/file`. |
-| WSL | `pymolplugins/worker/staging.py` | Root-alias/relative-path resolver with realpath/fd containment, regular-file, size, and deadline checks. |
-| WSL | `pymolplugins/worker/backends/plip.py` | Optional PLIP backend; active only when PLIP/OpenBabel are importable. |
-| WSL/native Python | `pymolplugins/interactions/plip_runner.py` | Versioned eight-category PLIP raw adapter used by the worker and native compatibility environments. |
-| WSL | `pymolplugins/worker/backends/rosetta.py` | Lazy, serialized backend for an already-installed licensed PyRosetta environment; never downloads PyRosetta. |
+| 检查安装 | `pp_doctor check_worker=0` | 列出命令归属与环境；不用连接可选 worker |
+| 浏览对象、group 或文件 | `pp_nav` | 高层对象/group 默认方向键导航，`pp_nav stop` 恢复；见 [操作指南](task_command_walkthrough.md) |
+| 分组、接触、样式 | `pp_group`、`pp_contacts`、`pp_style_list` | 查看 [0.17.0 候选使用指南](01_group_interaction_styles.md)；局部接触不是能量结论 |
+| 导入并标注结构 | Structure Annotator 菜单 | 查看 [审阅指南](structure_annotator_csv_walkthrough.md)，源表与标注分开保存 |
+| 配对并处理结构 | `pp_batch` | 先预览输入对，再运行并生成独立输出；见 [批处理](batch_processing_specification.md#usage) |
+| 请求 PLIP / PyRosetta | `pp_worker_health`、`pp_jobs` | 后端需单独安装，见 [worker](wsl_worker.md)；取消不保证终止后端计算 |
 
-## Compatibility adapters
+0.17.0 候选 manifest 包含 75 个 canonical 和 8 个兼容命令；具体参数以已安装版本的 `pp_help` 为准。canonical 是推荐入口，compatibility 保留旧调用；standalone 独立运行，legacy/experimental 不由 `pp_load` 自动加载。旧入口的存在不代表已纳入统一撤销或生命周期。
 
-| Surface | Path | Compatibility behavior |
+## 统一实现位置
+
+| 领域 | 目录或文件 | 查找内容 |
 | --- | --- | --- |
-| Host | `workflows/dataset_navigation/file_management.py` | Old file/batch/pin command names delegate to `pp_nav_*`; owns no navigation state and no longer registers generic `next`/`prev`/`pin`. |
-| Host | `workflows/dataset_navigation/screen_boost.py` | Old bucket/window/hook names delegate to the canonical navigator; owns no second cursor and performs no import-time key binding. |
-| Host | `analysis/alignment_selection/align_by_ligand.py` | `alignto_ligand` / `super_ligand` delegate to canonical ligand-anchor rigid alignment and move whole complexes. |
-| Host | `analysis/alignment_selection/select_by_sequence.py` | Old path shim; `sbs`, `select_sequence`, and `seq_select` remain aliases of `pp_select_sequence`. |
-| Host | `visualization/styles/macaron_style.py` | Legacy macaron command loader; delegates to the registry. |
-| Host | `visualization/styles/set_publication_style.py` | Legacy publication command loader; delegates to the registry. |
-| Host | `visualization/styles/publication_presets.py` | Legacy preset command loader; delegates to the registry. |
-| Host | `visualization/styles/ink_wash_style.py` | Legacy ink-wash command loader; delegates to the registry. |
-| Host | `visualization/styles/rfdiffusion2_pymolsetting.py` | Legacy RFdiffusion-style command loader; delegates to the registry. |
-| Host | `analysis/interactions/plip_interactions.py` | Old PLIP command/dialog names delegate run and clear to `pp_interact_*`; the preserved historical implementation is not entered by the public command. |
+| 装载与帮助 | `pymolplugins/host/` | `pp_load`、manifest、`pp_help`、doctor、补全 |
+| 任务命令 | `pymolplugins/tasks/` | 显示、导航、对齐、方向、接触、任务、撤销 |
+| 目标与批处理 | `pymolplugins/targets/` | 目标解析、逐项命令、配对计划和批处理 UI |
+| 导航与 group | `pymolplugins/navigation/`、`pymolplugins/grouping/`、`pymolplugins/follow/` | 状态、场景切换、分组和刚体跟随 |
+| 标注与源 | `pymolplugins/annotation/` | 表格/目录/SSH、路径映射、缓存、状态、标注、scene groups |
+| 序列、对齐、几何 | `pymolplugins/alignment/`、`pymolplugins/geometry/`、`pymolplugins/core/` | 序列映射、拟合、轴、膜、通用数据和数学 |
+| 样式与相互作用 | `pymolplugins/styles/`、`pymolplugins/interactions/` | preset、快照、接触数据、渲染、PLIP 协议 |
+| 远程分析 | `pymolplugins/remote/`、`pymolplugins/worker/` | Host 客户端、staging、HTTP 服务和可选后端 |
 
-## Standalone and in-progress tools
+## 查兼容和独立功能
 
-| Status | Surface | Path | Purpose / caveat |
-| --- | --- | --- | --- |
-| Standalone | Host | `pymolplugins/annotation/plugin.py` | Three-tab directory/CSV Qt annotation UI with preview, lazy model/view score table and O(1) row maps, transactional source swaps, row-level annotation/undo/export, background materialization, persistent cache, per-source restore, and global fuzzy history. |
-| Standalone support | Both | `pymolplugins/annotation/model.py`, `sources/` | PyMOL-independent immutable entry/dataset model and directory/CSV adapters; preserves raw rows and duplicate-path entry identity while inferring typed score columns. |
-| Standalone support | Both | `pymolplugins/annotation/path_resolver.py`, `mapping_store.py` | Direct/relative/POSIX-to-Windows path resolution plus bounded global mapping profiles; built-in `x_k` maps three remote-home spellings to `K:`. |
-| Standalone support | Both | `pymolplugins/annotation/cache.py`, `materializer.py` | Windows-local persistent source-version cache with atomic copy/decompress, LRU limits, pinning, concurrent-write deduplication, and metadata source-change checks. |
-| Standalone support | Both | `pymolplugins/annotation/annotation_store.py` | Append-only, fsynced, bounded CSV row/label JSONL annotations with torn-tail recovery, signature-cached reads, incremental local replay, label snapshots, undo, and atomic compaction. |
-| Standalone support | Both | `pymolplugins/annotation/state_store.py` | Version-2 atomic per-directory/per-CSV state under `.pymolplugins`, portable CSV sidecar IDs, Windows hidden-directory support, and bounded version-1 migration. |
-| Standalone support | WSL/Host Python | `pymolplugins/annotation/history_store.py` | Version-2 bounded atomic global source/config snapshots plus recency/frequency-aware fuzzy field history; `PYMOLPLUGINS_ANNOTATOR_HISTORY` provides an isolation override. |
-| Standalone | Host | `extras/navigation/load_states.py` | Loads a directory as states in one object; this is a separate movie-style use case. |
-| Standalone | Host | `extras/interactions/ligand_environment.py` | Ligand-environment convenience commands; revised to keep generated output scoped, but canonical presets are preferred. |
-| Legacy | Host | `extras/interactions/contacts.py` | Historical good/bad polar-contact plugin with Tk/Qt entry points. |
-| Legacy | Host | `visualization/styles/high_contrast_ray_style.pml` | Historical direct PML preset; canonical automation should use `pp_style_apply` / `pp_style_render`. |
-| Standalone | Host | `extras/interactions/hydrogen_bonds.py` | Direct inter-chain H-bond/salt-bridge visualization; canonical presets are preferred for structured output. |
-| Standalone | Host | `extras/alignment/interface.py` | CB-distance/SASA/contact interface selector; the legacy implementation still needs deeper mutation/surface review. |
-| Standalone | Host | `extras/alignment/index_selection.py` | `sis` helper for comma-separated residue indices. |
-| Standalone | Host | `extras/alignment/sequence_difference.py` | Qt/console sequence-difference coloring workflow. |
-| Standalone | Host | `extras/cavities/backbone_cavity.py` | Cavity finder with CGO output and optional Qt dialog. |
-| Experimental | Host | `extras/cavities/backbone_cavity_experimental.py` | Alternate cavity workflow with external scientific dependencies. |
-| Standalone | Host | `extras/geometry/inertia.py` | Covariance/inertia/surface utilities and optional user-provided MSMS executable. PCA/orientation work should prefer `orientation.py`. |
-| Standalone | Host | `extras/geometry/ellipsoids.py` | Direct CGO ellipsoid builder. |
-| Standalone | Host | `extras/geometry/center_of_mass.py` | Center-of-mass helper. |
-| Standalone | Host | `pymolplugins/geometry/axes_overlay.py` | Callback-owned viewport axes that automatically register with group follow and are skipped by its safe default. |
-| Data | Host | `visualization/overlays/z_axis_overlay.ini` | Static Z-axis CGO definition. |
+历史 Python 导入和 `run` 路径保留在 `analysis/`、`workflows/`、`utilities/`、`visualization/`、`services/`；不要仅因旧文件可运行就把它当成 canonical。独立和实验工具位于 `extras/`；`archive/` 为历史参考，不由 `pp_load` 加载。原有逐文件目录、每条状态和注意事项保留在 [详细脚本索引](06_reference_catalog_2026-11-06.md)。
 
-## Examples and archive
+## 查测试和证据
 
-| Status | Path | Purpose |
-| --- | --- | --- |
-| Example | `examples/pymol_wiki/color_by_mutation.py` | Curated PyMOL Wiki mutation-coloring example. |
-| Archive | `archive/specialized/align_ligand.py` | Historical CLI ligand-transfer helper. |
-| Archive | `archive/specialized/compute_radius_of_gyration.py` | Historical radius-of-gyration calculator. |
-| Archive | `archive/specialized/validate_soft_fix.py` | Historical patch diagnostic. |
-| Archive | `archive/experimental/`, `archive/legacy/` | Reference-only code and session artifacts; never loaded by `pp_load`. |
+`tests/` 包含纯 Python 与 fake-PyMOL 测试；`tests/host/` 包含真实 PyMOL/Qt 检查。按 [Windows Host 验收](windows_host_acceptance.md) 选择相关边界，并把版本、结果和限制写入记录。旧版记录在 [历史索引](03_history_index.md)；旧通过不代表当前修改重新通过。
 
-## Tests and operational documentation
+<details>
+<summary>旧标题及详细条款索引</summary>
 
-- `tests/`: feature-mirrored standard-library pure/fake-PyMOL test suite runnable
-  in WSL; `tests/architecture/` enforces one-way canonical imports and command
-  manifest uniqueness.
-- `docs/development_specification.md`: behavioral specification and acceptance IDs.
-- `docs/implementation_status.md`: evidence-based completion matrix.
-- `docs/wsl_worker.md`: worker installation, startup, networking, security, and troubleshooting.
-- `docs/windows_host_acceptance.md`: required real-PyMOL integration record.
-- `docs/structure_annotator_csv_walkthrough.md`: one-by-one CSV, path mapping,
-  Windows-local cache, and WSL staging validation procedure.
-- `tests/host/host_smoke.py` and `scripts/windows/run_host_smoke.ps1`: automated
-  Host fixture/smoke gate; interactive mouse/callback/Qt items remain manual.
-- `tests/host/annotator_qt_smoke.py`: visible Host-PyQt completion gate using
-  the Python/Qt bundled with Windows PyMOL; types through QtTest and accepts
-  multiline/bucket fuzzy candidates by mouse and keyboard; also checks lazy
-  Scores-table identity, targeted annotation cells, same-source reloads,
-  background CSV heartbeat/cancel/late-result isolation, immediate registry
-  cleanup on Cancel/panel close, and main-thread Preview/Load completion.
-- `tests/host/annotator_qt_performance.py`: repeatable 50,000 x 8 bundled-Qt
-  model/widget RSS comparison and 200-sample cursor-refresh performance gate.
-- `docs/validation/windows_host_smoke_2026-07-25.md`: latest reviewed Host/CSV/cache
-  smoke evidence summary.
-- `docs/validation/structure_annotator_optimization_2026-07-26.md`: batch-stat,
-  incremental JSONL, and large-table validation evidence.
+原地址保留为兼容入口；以下条目指向重写前的详细参考。
 
-When adding a module, record its status and runtime surface here.  Do not label a
-module canonical merely because it imports successfully or passes syntax checks.
+<a id="canonical-toolkit"></a>
+- [Canonical toolkit](06_reference_catalog_2026-11-06.md#canonical-toolkit)
+<a id="compatibility-adapters"></a>
+- [Compatibility adapters](06_reference_catalog_2026-11-06.md#compatibility-adapters)
+<a id="standalone-and-in-progress-tools"></a>
+- [Standalone and in-progress tools](06_reference_catalog_2026-11-06.md#standalone-and-in-progress-tools)
+<a id="examples-and-archive"></a>
+- [Examples and archive](06_reference_catalog_2026-11-06.md#examples-and-archive)
+<a id="tests-and-operational-documentation"></a>
+- [Tests and operational documentation](06_reference_catalog_2026-11-06.md#tests-and-operational-documentation)
+
+</details>

@@ -77,6 +77,13 @@ class FakeCmd:
     def disable(self, name):
         self.enabled.discard(name)
 
+    def get_type(self, name):
+        return self.types.get(name, "")
+
+    def group(self, name, members="", action="add"):
+        self.types[name] = "object:group"
+        self.enabled.add(name)
+
     def sync(self):
         pass
 

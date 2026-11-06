@@ -141,9 +141,13 @@ def extend_command(
         command_api.extend(name, adapted)
         # PyMOL parsing.LITERAL: preserve the complete quoted regex and template.
         command_api.keyword[name][4] = 20
+        from pymolplugins.host.completion import register_completion
+        register_completion(command_api, name, function)
         return adapted
     adapted = console_command(function)
     command_api.extend(name, adapted)
+    from pymolplugins.host.completion import register_completion
+    register_completion(command_api, name, function)
     return adapted
 
 

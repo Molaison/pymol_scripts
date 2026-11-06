@@ -4,6 +4,7 @@ import re
 import uuid
 
 from .command_templates import STEP_FIELDS, format_commands
+from .scene_groups import delete_owned
 from pymolplugins.core.windows_paths import windows_long_path
 
 
@@ -80,45 +81,57 @@ class ReviewObjects:
         self.active = {}
         self.owned = set()
         self.definitions = {}
+        self.products = {}
+        self.parked_products = {}
 
     def clear(self, api):
-        for name in self.owned:
-            api.delete(name)
+        delete_owned(api, self.owned)
         self.fixed.clear()
         self.active.clear()
         self.owned.clear()
         self.definitions.clear()
+        self.products.clear()
+        self.parked_products.clear()
         self.source = None
 
     def snapshot(self, api):
         return (self.source, dict(self.fixed), dict(self.active), set(self.owned),
-                set(api.get_names("objects", enabled_only=1)) & self.owned, dict(self.definitions))
+                set(api.get_names("objects", enabled_only=1)) & self.owned, dict(self.definitions),
+                {key: set(value) for key, value in self.products.items()})
 
     def restore(self, api, snapshot):
-        source, fixed, active, owned, enabled, definitions = snapshot
-        for name in self.owned - owned:
-            api.delete(name)
+        source, fixed, active, owned, enabled, definitions, products = snapshot
+        delete_owned(api, (self.owned - owned - set(self.parked_products))
+                     | set(self.parked_products.values()))
+        for parked, original in self.parked_products.items():
+            api.set_name(parked, original)
+        self.parked_products.clear()
         for name in owned:
             (api.enable if name in enabled else api.disable)(name)
         self.source, self.fixed, self.active, self.owned = source, fixed, active, owned
         self.definitions = definitions
+        self.products = products
 
     def finish(self, api):
         retained = set(self.fixed.values()) | {item[1] for item in self.active.values()}
-        for name in self.owned - retained:
-            api.delete(name)
+        self.products = {owner: names for owner, names in self.products.items() if owner in retained}
+        retained.update(set().union(*self.products.values()) if self.products else set())
+        delete_owned(api, self.owned - retained)
         self.owned = retained
+        self.parked_products.clear()
 
     def begin(self, api, source, steps, assets):
         if source != self.source:
+            self.park_products(api, list(self.products))
             for name in self.active.values():
-                api.disable(name[1])
+                self.set_enabled(api, name[1], False)
             self.fixed.clear()
             self.active.clear()
             self.definitions.clear()
             self.source = source
         definitions = {item["name"]: dict(item) for item in steps if item["type"] == "object"}
         changed = {name for name in self.definitions if self.definitions[name] != definitions.get(name)}
+        self.park_products(api, [name for key, name in self.fixed.items() if key[0] in changed])
         self.fixed = {key: name for key, name in self.fixed.items() if key[0] not in changed}
         self.definitions = definitions
         desired = {item["name"]: (item["name"], assets[item["name"]].path)
@@ -127,10 +140,11 @@ class ReviewObjects:
         for label, (key, name, fixed) in list(self.active.items()):
             if fixed and desired.get(label) == key and label not in changed:
                 continue
+            self.park_products(api, [name])
             if fixed:
-                api.disable(name)
+                self.set_enabled(api, name, False)
             else:
-                api.disable(name)
+                self.set_enabled(api, name, False)
             del self.active[label]
 
     def load(self, api, item, materialized):
@@ -156,6 +170,29 @@ class ReviewObjects:
             if fixed:
                 self.fixed[key] = name
         else:
-            api.enable(name)
+            self.set_enabled(api, name, True)
         self.active[label] = (key, name, fixed)
         return name, loaded
+
+    def set_enabled(self, api, name, enabled):
+        action = api.enable if enabled else api.disable
+        action(name)
+        for product in self.products.get(name, ()):
+            action(product)
+
+    def park_products(self, api, owners):
+        """Free command-defined names while preserving the previous transaction."""
+        if not owners:
+            return
+        existing = set(api.get_names("objects"))
+        for owner in owners:
+            for name in list(self.products.get(owner, ())):
+                if name not in existing or name in self.parked_products:
+                    continue
+                parked = "sa_step_tx_" + uuid.uuid4().hex[:12]
+                api.set_name(name, parked)
+                self.products[owner].remove(name)
+                self.products[owner].add(parked)
+                self.owned.remove(name)
+                self.owned.add(parked)
+                self.parked_products[parked] = name

@@ -1077,6 +1077,8 @@ class ZPymolRunCompatibilityTests(unittest.TestCase):
                     compile(wrapper_path.read_text(), str(wrapper_path), "exec"),
                     pymol_module.__dict__,
                 )
+                # Windows cannot remove a directory while it is our cwd.
+                os.chdir(previous_cwd)
             self.assertIn("pp_style_apply", fake.extended)
             self.assertIs(fake.extended["macaron_style"], pymol_module.legacy_macaron_style)
         finally:

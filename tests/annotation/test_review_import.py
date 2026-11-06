@@ -65,8 +65,12 @@ class ReviewImportTests(unittest.TestCase):
             override = json.loads((Path(root) / "review.override.json").read_text())
             self.assertEqual(override["display_columns"], ["score1"])
             self.assertEqual(json.loads((Path(root) / "review.json").read_text()), config)
+            # Match panel close before creating a fresh state; do not orphan
+            # scene objects by discarding their ownership records.
+            self.module._delete_managed_objects(False)
             self.module.STATE = self.module.AnnotatorState(preload_enabled=False)
-            self.module.sa_load_csv(str(table))
+            reopened = self.module.sa_load_csv(str(table))
+            self.assertEqual(reopened["status"], "loaded")
             self.assertEqual(self.module.STATE.step_cmd, "color cyan, {object}")
             self.assertEqual(self.module.STATE.display_columns, ["score1"])
 

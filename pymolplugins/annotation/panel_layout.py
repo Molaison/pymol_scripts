@@ -572,6 +572,13 @@ def _navigation(panel, layout):
     panel.more_button.setToolTip("More actions")
     panel.more_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
     menu = QtWidgets.QMenu(panel)
+    menu.addAction("Review loaded scene groups…", panel._load_scene_groups)
+    panel.group_candidates_action = menu.addAction("Group candidate and created objects")
+    panel.group_candidates_action.setCheckable(True)
+    from .plugin import STATE, sa_group_candidate
+    panel.group_candidates_action.setChecked(STATE.group_candidates)
+    panel.group_candidates_action.toggled.connect(sa_group_candidate)
+    menu.addSeparator()
     panel.undo_action = menu.addAction("Undo last save", panel._undo)
     panel.next_unann_action = menu.addAction("Next unreviewed", panel._next_unannotated)
     panel.next_later_action = menu.addAction("Next marked for later", panel._next_marked_for_later)

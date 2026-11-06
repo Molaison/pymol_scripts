@@ -77,6 +77,7 @@ class FakeCmd:
         self.interaction_pairs = interaction_pairs
         self.salt_pairs = salt_pairs
         self.names = {atom.model for atom in self.atoms}
+        self.selections = set()
         self.calls = []
         self.delete_calls = []
         self.find_pair_calls = []
@@ -159,11 +160,14 @@ class FakeCmd:
             return [(('complex', 1), ('complex', 2))]
         return []
 
-    def get_names(self, mode="all"):
+    def get_names(self, mode="all", enabled_only=0):
+        if mode == "selections":
+            return sorted(self.selections)
         return sorted(self.names)
 
     def select(self, name, selection):
         self.names.add(name)
+        self.selections.add(name)
         self.calls.append(("select", name, selection))
 
     def create(self, name, selection, source_state, target_state):
@@ -207,9 +211,13 @@ class FakeCmd:
     def disable(self, name):
         self.calls.append(("disable", name))
 
+    def enable(self, name):
+        self.calls.append(("enable", name))
+
     def delete(self, name):
         self.delete_calls.append(name)
         self.names.discard(name)
+        self.selections.discard(name)
         for key in [key for key in self.properties if key[0] == name]:
             del self.properties[key]
 
@@ -384,6 +392,8 @@ class PymolInteractionAdapterTests(unittest.TestCase):
         )
         self.assertEqual(record.manifest.parameters, record.result.run.parameters)
         self.assertIn("complex", record.manifest.source_objects)
+        self.assertFalse(any(entry.kind == "selection" for entry in record.manifest.created))
+        self.assertFalse(any(call[0] == "select" for call in fake.calls))
 
         manifest_names = record.manifest.created_names
         controller.clear("ppi_fixture")
@@ -420,6 +430,8 @@ class PymolInteractionAdapterTests(unittest.TestCase):
         self.assertTrue(any('chain ""' in selection for selection in selections))
         self.assertGreaterEqual(len(record.result.sites), 1)
         self.assertEqual(record.result.summary["counts_by_type"], {"hydrogen_bond": 1})
+        self.assertFalse(any(entry.kind == "selection" for entry in record.manifest.created))
+        self.assertFalse(any(call[0] == "select" for call in fake.calls))
 
     def test_polar_qc_classifies_without_legacy_global_setting_mutation(self):
         fake = PolarFakeCmd()
@@ -516,6 +528,8 @@ class PymolInteractionAdapterTests(unittest.TestCase):
         self.assertIn("index 2", distance[3])
         self.assertNotIn("index 6", distance[3])
         self.assertNotIn("index 3", distance[3])
+        self.assertFalse(any(entry.kind == "selection" for entry in record.manifest.created))
+        self.assertFalse(any(call[0] == "select" for call in fake.calls))
         manifest_names = record.manifest.created_names
         controller.clear("ppi_remote")
         self.assertEqual(set(fake.delete_calls), set(manifest_names))

@@ -1,15 +1,5 @@
-# PyMOL Plugin Manager entries
+# Plugin Manager 入口
 
-These files only bootstrap the repository root and delegate to canonical code
-under `pymolplugins/host`, `pymolplugins/annotation`, and
-`pymolplugins/styles`. They remain at stable paths for Windows Plugin Manager.
+在 PyMOL 的 Plugin 菜单打开 **PymolPlugins: Structure Annotator** 或 **PymolPlugins: Batch Processing**；首次安装见 [首页](../readme.md#安装)。本目录的脚本保留 Plugin Manager 入口，并调用 `pymolplugins/` 下的实现。
 
-`structure_annotator.py` persists each loaded dataset under
-`<dataset>/.pymolplugins/structure_annotator.json` and keeps de-duplicated
-cross-dataset input history under
-`~/.pymolplugins/structure_annotator_history.json`. Opening the panel restores
-the last finalized dataset unless its **Restore last dataset** checkbox was
-disabled. Directory, pattern, label, values, On-step, and bucket-command fields
-use that global history for automatic fuzzy completion. Because restored
-On-step/bucket templates are executable PyMOL commands, use annotator state
-only from trusted datasets.
+打开面板不会自动重连历史数据源；选择 **Data → Continue last review** 才恢复最近审阅。状态、标注和历史与源文件分开保存；审阅命令可以执行 PyMOL 操作，只应使用可信数据集的命令配置。完整使用和存储细节见 [Structure Annotator 指南](../docs/structure_annotator_csv_walkthrough.md)。

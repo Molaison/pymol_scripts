@@ -306,6 +306,12 @@ def pp_load(repair=0) -> Dict[str, object]:
     )
     repaired_commands, repaired_overrides = _repair_declared_commands(repair_value)
     audit = _command_audit()
+    from pymolplugins.host.completion import install_completions
+    callbacks, _ = _expected_callbacks()
+    completion = install_completions(
+        cmd, {name: callback for name, callback in callbacks.items()
+              if audit["canonical_status"].get(name, audit["compat_status"].get(name)) == "ok"},
+    )
     blocking_command_issues = bool(
         audit["missing_commands"]
         or audit["missing_compat_commands"]
@@ -328,6 +334,7 @@ def pp_load(repair=0) -> Dict[str, object]:
         "foreign_commands": audit["foreign_commands"],
         "expected_callback_errors": audit["expected_callback_errors"],
         "command_audit": audit,
+        "completion_parameters": completion,
     }
     print(
         f"PymolPlugins load: {len(loaded)}/{len(CANONICAL_MODULES)} modules, "
@@ -634,6 +641,22 @@ def pp_help(category="") -> Dict[str, object]:
     return result
 
 
+def pp_review_groups(parent="", review_path="scene-review.json", restore_saved=1):
+    """Open Structure Annotator on existing groups without copying structures.
+
+    Args:
+        parent: Parent whose direct child groups are candidates; empty selects roots.
+        review_path: Local JSON manifest and annotation storage location.
+        restore_saved: Restore the saved candidate list and review position.
+    Returns:
+        The group import result. Original groups must be loaded before reopening.
+    """
+    from pymolplugins.annotation.plugin import sa_load_groups, show_structure_annotator_panel
+    result = sa_load_groups(parent, review_path, restore_saved)
+    show_structure_annotator_panel()
+    return result
+
+
 def show_structure_annotator_from_toolkit():
     """Load the optional annotation UI only when explicitly requested."""
     module = importlib.import_module("pymolplugins.annotation.plugin")
@@ -676,6 +699,7 @@ _register_host_command("pp_load", pp_load)
 _register_host_command("pp_doctor", pp_doctor)
 _register_host_command("pp_capabilities", pp_capabilities)
 _register_host_command("pp_help", pp_help)
+_register_host_command("pp_review_groups", pp_review_groups)
 
 try:
     cmd.auto_arg[0]["pp_help"] = [

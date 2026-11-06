@@ -1,6 +1,6 @@
 """Pure-data module and command inventory for the Host plugin.
 
-``CANONICAL_COMMANDS`` contains eight task facades plus the 64-command
+``CANONICAL_COMMANDS`` contains eight task facades plus the advanced
 advanced inventory.  The toolkit also autoloads a small compatibility surface
 to ``pp_help`` and ``pp_doctor``.  Both surfaces are declared here so runtime
 verification can compare callback identity instead of checking only that a name
@@ -22,12 +22,13 @@ CANONICAL_MODULES = (
 )
 
 CANONICAL_COMMANDS = {
-    "toolkit": ("pp_load", "pp_doctor", "pp_capabilities", "pp_help"),
+    "toolkit": ("pp_load", "pp_doctor", "pp_capabilities", "pp_help", "pp_review_groups"),
     "tasks": (
         "pp_show", "pp_nav", "pp_align", "pp_orient",
         "pp_contacts", "pp_metrics", "pp_jobs", "pp_undo",
     ),
     "targets": ("pp_target_resolve", "pp_foreach", "pp_batch"),
+    "grouping": ("pp_group", "pp_group_by_name"),
     "navigation": (
         "pp_nav_start", "pp_nav_next", "pp_nav_prev", "pp_nav_next_batch",
         "pp_nav_prev_batch", "pp_nav_goto", "pp_nav_pin", "pp_nav_unpin",
@@ -89,6 +90,7 @@ _CANONICAL_CATEGORY_MODULES = {
     "toolkit": "pymolplugins.host.plugin",
     "tasks": "pymolplugins.tasks.commands",
     "targets": "pymolplugins.targets.commands",
+    "grouping": "pymolplugins.grouping.commands",
     "navigation": "pymolplugins.navigation.commands",
     "follow": "pymolplugins.follow.commands",
     "geometry": "pymolplugins.geometry.commands",

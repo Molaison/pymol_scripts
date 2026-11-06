@@ -329,6 +329,12 @@ def _start_navigation(
     if selected == "files":
         kwargs["path"] = target or "."
     else:
+        if any(token in target for token in "*?["):
+            matches = resolve_targets(
+                _require_cmd(), target, match="glob",
+                kinds="group" if selected == "groups" else "object",
+            )
+            target = ",".join(item.name for item in matches)
         kwargs["entries"] = target
     return navigation.pp_nav_start(**kwargs)
 
@@ -400,11 +406,19 @@ def pp_nav(
     step=1,
     page=20,
     wrap=1,
-    keys=0,
+    keys=1,
     replace=0,
     force=0,
 ) -> Dict[str, object]:
-    """Start or control one navigation session with task-level action words."""
+    """Browse objects/groups with Left/Right; stop restores previous shortcuts.
+
+    Args:
+        action: objects, groups, files, or a navigation control such as stop.
+        target: Names or a glob pattern; empty uses all entries of the source.
+        keys: Bind Left/Right and Ctrl+Left/Right on start (default 1).
+    Returns:
+        The delegated navigation result and its status.
+    """
 
     try:
         verb = str(action).strip().lower()
@@ -447,7 +461,7 @@ def pp_nav(
             start_only.append("page")
         if wrap_value is not True:
             start_only.append("wrap")
-        if keys_value is not False:
+        if keys_value is not True:
             start_only.append("keys")
         if replace_value is not False:
             start_only.append("replace")
@@ -467,6 +481,8 @@ def pp_nav(
                 page_value, int(wrap_value), int(keys_value), int(replace_value),
             )
             delegated = "pp_nav_start"
+            if keys_value and isinstance(result, Mapping) and result.get("keys_bound"):
+                print("Navigation keys: Left/Right = previous/next; Ctrl+Left/Right = page; pp_nav stop = restore shortcuts.")
         else:
             if target_value and verb not in {"goto", "pin", "unpin"}:
                 raise ValueError("action %s does not accept target" % verb)

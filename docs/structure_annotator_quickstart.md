@@ -1,57 +1,58 @@
-# Structure Annotator：边看结构边筛选和标注
+# 用 Structure Annotator 开始审阅
 
-> **典型用法：** 有 300 个设计结构和一张含 `iptm`、`plddt` 的评分表。先筛出高分候选，再逐个看三维结构、标记 `Good` / `Bad`；中断后接着上次位置看，不用手工在 PyMOL 和 Excel 之间来回切换。
+用自己的 PDB/CIF 目录或 CSV/TSV 评分表，在 PyMOL 中查看结构、筛选候选、保存标签并在下次继续。先准备带 Qt 和 Plugin Manager 的桌面 PyMOL，以及可访问的结构文件；不需要安装 WSL worker。
 
-下面的截图来自 **2026-10-22 在 gamma 电脑的 Windows PyMOL 3.1 上安装公开 0.16.0 ZIP 后进行的实际 GUI 操作**。截图用 3 个**测试结构**，不是上面所说的 300 个真实设计。
+<a id="1-安装"></a>
+## 安装并打开
 
-## 1. 安装
+1. 从 [正式 Release](https://github.com/Molaison/pymol_scripts/releases/latest) 下载附件 `PymolPlugins-<版本>.zip`，不要选择自动生成的 Source code ZIP。
+2. 在 PyMOL 选择 **Plugin → Plugin Manager → Install New Plugin**，选择原始 ZIP，不要解压。
+3. 完全退出并重启 PyMOL，选择 **Plugin → PymolPlugins: Structure Annotator**。
 
-打开 [最新正式 Release](https://github.com/Molaison/pymol_scripts/releases/latest)，下载附件 **`PymolPlugins-<版本>.zip`**（不要下载 GitHub 的 Source code ZIP）。在桌面 PyMOL 里选 **Plugin → Plugin Manager → Install New Plugin**，选择 ZIP，完全退出并重开 PyMOL。菜单中出现 **PymolPlugins: Structure Annotator** 即可。
+本工作树还描述未正式发布的 0.17.0 候选功能；正式版以 Release 为准。后续可以通过 **Plugin → PymolPlugins: Updates** 检查更新，安装后同样需要重启。
 
-后续更新可使用 **Plugin → PymolPlugins: Updates** 检查新版；更新完成也要重启 PyMOL。
+<a id="2-打开结构文件夹或评分表"></a>
+## 导入结构或评分表
 
-## 2. 打开结构文件夹或评分表
+在 **Open from** 选择 **This computer**，在 **Path** 选择自己的 PDB/CIF 目录或 CSV/TSV，再点击 **Open**。支持压缩的 `.pdb.gz` / `.cif.gz`。询问 **Structure column** 时选择包含结构路径的列，例如 `structure_path`；相对路径默认相对于表格目录。必要时在 **Import options → File locations** 设置基准目录。
 
-选择 **Plugin → PymolPlugins: Structure Annotator**，`Open from` 选 **This computer**，在 `Path` 选 PDB/CIF 文件夹或者 CSV/TSV，点 **Open**。如果加载表格时询问 **Structure column**，应选放 `.pdb` / `.cif` 路径的那一列，例如 `structure_path`，不要选 `iptm` 分数列。相对路径从表格所在目录解析，必要时在 **Import options → File locations** 设置基准目录。
+![实际 Windows PyMOL 的 Open data 页](images/structure_annotator/01_open_data.png)
 
-![实际 Windows PyMOL：Open data 页](images/structure_annotator/01_open_data.png)
+如果数据在 SSH 主机，先在运行 PyMOL 的电脑完成已有 SSH 设置，包括首次主机信任和私钥或密码步骤，并确认 `ssh my-lab` 可连接。然后在 **Open from** 选择该 Host 并输入远端路径；服务端需要 Python 3。插件按需下载结构并在本地保存标注，远端源文件只读。
 
-**远端 SSH 数据也能直接打开。** 先在装有 PyMOL 的电脑终端确认 `ssh my-lab` 可成功连接，电脑上的 `~/.ssh/config` 有相应 `Host my-lab` 别名，再在 `Open from` 选它、填写远端 `/path/to/scores.tsv` 或结构目录。第一次使用可点 **Set up SSH…**；服务端需有 Python 3。它会按需下载结构、在电脑本地缓存和保存标注，**不会修改服务器上的原表和结构**。不必预先挂载 SSHFS；如果 SSH 仍要求 OTP，仍应按正常方式完成身份验证。
+需要自动填写 OTP 时，在 **Connections…** 的 **SSH server** 选择服务器，例如 `f101`，勾选 **Automatic OTP**，在 **OTP secret** 填写认证器的 Base32 设置密钥，点击 **OK**。不要填当前六位验证码。**Advanced → SSH program** 留空；如果以前明确保存了 `.py` wrapper，先清空该项。插件使用系统 OpenSSH，不需要安装或修改外部 wrapper。
 
-## 3. 看分数、做标签和继续上次审阅
+默认密钥只在当前 PyMOL 进程有效；Windows 上勾选 **Remember encrypted key on this computer** 才用当前 Windows 用户的 DPAPI 加密保存。内置 OTP 不填写普通密码或私钥口令，也不自动接受新主机。提示不匹配、密钥保存和旧 wrapper 的兼容方式见 [SSH 步骤](structure_annotator_csv_walkthrough.md#连接-ssh-数据源)。
 
-在 **Review** 页看到当前结构、表格分数和标签。点击 `Good` / `Bad` 先选草稿，再点 **Save and next** 真正保存并跳到下一条；`+ Add note` 可以记原因。左侧列表能直接切换候选。
+<a id="3-看分数做标签和继续上次审阅"></a>
+## 查看结构并保存标签
 
-![实际 Windows PyMOL：结构候选、评分和 Save and next](images/structure_annotator/02_review_and_labels.png)
+在 **Review** 查看当前三维结构、评分和标签。选择 `Good`、`Bad` 等标签只是草稿；点击 **Save and next** 才保存并进入下一条。可用 **+ Add note** 记录理由，也可在左侧列表切换候选。
 
-- **暂时看不准：** 在 **More → Mark current for later** 标记待复查；**Next unreviewed** 继续未审阅的条目，之后用 **Next marked for later** 集中处理。
-- **中途退出：** 下次打开菜单 **Data → Continue last review**，恢复最近的数据源、筛选和位置。首次导入后，记录可能仍在后台保存；如果按钮暂时不可用，可在保存完成后重新进入 Open data / Data 页再试。此按钮只在你主动点击时恢复，不会启动就自动连远端。
-- **撤销/交接：** 保存与标记写在独立的本地审阅记录，不会修改原始 CSV/PDB。可导出一份**新 CSV** 汇总标签；**Data → Export review handoff…** 只导出进度/标签 JSON，不包含结构文件本身。
+![实际 Windows PyMOL 的结构、评分和保存按钮](images/structure_annotator/02_review_and_labels.png)
 
-## 4. 筛选、排序和保存候选组
+暂时无法判断时选择 **More → Mark current for later**；**Next unreviewed** 和 **Next marked for later** 分别继续未审阅项和回看暂缓项。下次主动选择 **Data → Continue last review** 恢复来源、筛选和位置；面板不会自动连接历史 SSH 源。首次导入后历史记录仍在后台保存时，Continue 可能短暂不可用。
 
-例如评分列实际名叫 `iptm`，可在 **Filter → Column conditions** 输入 `iptm >= 0.8`，再按 `iptm` **Descending** 排序，先看高分设计。测试截图的列名是 `AC.iptm`，要按自己表头填写；高分本身不等于结构一定正确。
+源结构和评分表不会被标注流程改写。需要交接时，**Data → Export review handoff…** 导出进度和标签摘要，但不包含结构；导出带标签的表格时选择新路径。
 
-![实际 Windows PyMOL：Column conditions、分数组筛选和排序](images/structure_annotator/03_filter_and_sort.png)
+<a id="4-筛选排序和保存候选组"></a>
+## 筛选并保存常用条件
 
-**Group** 可以保存 `High` 等常用条件，下次点组名直接复用；清除过滤则回到全体候选。筛选只改变当前显示范围，不会删除被排除的结构或评分。
+打开 **Filter → Column conditions**，使用真实表头输入条件。例如列名实际为 `iptm` 时，可写 `iptm >= 0.8` 并按该列 **Descending** 排序。这个阈值只演示语法，是否适用由数据和科学判断决定。筛选只改变查看范围，不删除源数据。
 
-![实际 Windows PyMOL：只显示符合条件的候选](images/structure_annotator/04_filtered_group.png)
+![实际 Windows PyMOL 的筛选和排序](images/structure_annotator/03_filter_and_sort.png)
 
-## 5. 更多实用功能
+在 **Group** 保存常用条件，再通过 Filter 旁的箭头切换；组可以重叠，不能当作质量标签。清除过滤可回到完整候选集合。
 
-| 要做什么 | 在哪里操作 | 相比手动操作的好处 |
-| --- | --- | --- |
-| 显示哪些评分列 | Review 页的列选择 | 只看 `iptm`、`plddt` 等关心的指标，不让几十列挤占视野 |
-| 参考结构和候选一起显示、自动对齐 | **More → Review steps…** 或 **Settings → Automation → Review steps…** | 按步骤加载候选和固定参考，复用 PyMOL 命令；需自己配置参考路径与 `align` 命令 |
-| 一键准备常见可视化 | **Settings → Automation → Viewing presets…** | 选择 cartoon、蛋白界面或口袋等预设，再预览和确认执行；不是自动给出科学结论 |
-| 为标签动作生成命令草稿 | **Settings → Automation → AI command drafts…** | 生成可编辑的 PyMOL 命令，仍需预览、确认、Apply；需要可用 provider，不能把草稿当作已执行 |
-| 继续同组审阅、交给同事 | **Data → Continue last review / Export review handoff…** | 保存进度与审阅路线，不必记住上次看到哪一行 |
+![实际 Windows PyMOL 的筛选结果](images/structure_annotator/04_filtered_group.png)
 
-设置详解及远端路径、Review steps 配置示例见 [完整功能说明（文字版）](structure_annotator_csv_walkthrough.md)。
+<a id="5-更多实用功能"></a>
+## 继续深入
 
-## 实机测试范围
+- [CSV、SSH、Review steps 和缓存](structure_annotator_csv_walkthrough.md)：设置显示列、固定参考、命令和导出。
+- [整理运行产物的 agent 提示词](02_agent_review.md)：从已有 raw 评分生成可审阅产物，不重算评分。
+- [标注字段和评分](annotation_fields_and_score_guidance.md)：配置必填、多选、批量保存与评分方向。
+- **Settings → Automation → Viewing presets… / AI command drafts…**：先预览和编辑，再确认插入并 Apply；生成草稿不会自动执行。
 
-在 gamma 的 Windows PyMOL 3.1 / Qt 上，使用**公开的 0.16.0 Release ZIP**和临时测试数据，通过了插件安装、首次打开、三维结构加载、标签保存并前进、Later/未审阅导航、Continue last review、评分筛选与分组、handoff JSON、CSV/TSV 导入和配置恢复；测试输入哈希未变。以上截图均由真实 GUI 自动化操作抓取。
-
-**未宣称全部场景都通过：** 这次没有从 gamma SSH 会话直接恢复用户历史中的远端真实 `sum_scores.csv`（Windows SSH 会话看不到原映射盘）；也没有实测 AI provider 或所有 Review steps 高级配置。首次导入后 History 异步写入时，Continue 按钮可能短暂不可用；另一个旧性能测试观察到主线程 `os.stat`，尚不能据此承诺固定的翻页延迟。以上不妨碍按本文先从本地样例开始使用。
+<a id="实机测试范围"></a>
+本页截图来自 2026-10-22 的 Windows PyMOL 3.1 / Qt 与公开 0.16.0 ZIP，使用三个测试结构。该次检查覆盖本地导入、保存、筛选和继续；没有在该次恢复用户历史远端 CSV，也没有实测所有 AI provider 和高级步骤。其他版本及新功能的证据按 [历史索引](03_history_index.md) 查阅。
