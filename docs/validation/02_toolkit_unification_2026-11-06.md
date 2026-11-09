@@ -223,6 +223,21 @@ python scripts/package_plugin.py
 
 ## 2026-11-09 0.18.0 合并发布与本机更新
 
-负责人：当前 Codex 会话。状态：进行中。用户明确授权将预设、bundle prompt、保持相机修复与上一轮切组性能优化一起提交、合并发布，再更新本机插件；不关闭或热重载当前 PyMOL 会话。版本从 0.17.1 升为 0.18.0。此节是本次发布的唯一状态记录；证据保存在 `output/18_release/`。
+负责人：当前 Codex 会话。状态：提交、合并、正式发布及本机更新完成。用户明确授权将预设、bundle prompt、保持相机修复与上一轮切组性能优化一起交付，并要求不影响当前会话。版本从 0.17.1 升为 0.18.0。此节是本次发布的唯一状态记录；证据保存在 `output/18_release/`。
 
-远端已核实为 `Molaison/pymol_scripts`，main 与本地起点均为 `127c2bf`；旧 origin URL 可正常重定向，不另改远端配置。复用现有 CI 自动发布流程。下一步：提交发布变更、PR 检查/合并，等待正式 Release，然后通过原生 updater 校验安装，并在独立隐藏桌面验证实际安装目录。
+- 实现提交 `d2e84aa5ffc293b30e9791236a02803fbf850967` 经 [PR #6](https://github.com/Molaison/pymol_scripts/pull/6) 合并至 main，合并提交 `649ead00cfd6c3c949d589a7ca5e38017283bdee`。原旧工作树及其本地 main/未提交文件未修改；现有 origin URL 继续正常重定向到 `Molaison/pymol_scripts`。
+- [PR 检查 42603486067](https://github.com/Molaison/pymol_scripts/actions/runs/42603486067) 和 [主分支构建发布 42603859032](https://github.com/Molaison/pymol_scripts/actions/runs/42603859032) 均成功。发布 [v0.18.0](https://github.com/Molaison/pymol_scripts/releases/tag/v0.18.0)，附件为 `PymolPlugins-0.18.0.zip`（517196 bytes）及 `SHA256SUMS`。正式资产来自 Linux CI；本地预构建 ZIP 的大小不同，不将它冒充正式资产。
+- `03_install.json`：原生 updater 从正式 Release 下载、校验 SHA256/包版本并同卷替换。实际安装目录 `D:/Softwares/Pymol3.1/Lib/site-packages/pmg_tk/startup/pymol_plugins` 为 0.18.0，上一版 0.17.1 保存在同级 `.pymol_plugins-backup`。更新前检查了这两个绝对目录均在预期 startup 目录内且不是重解析链接。
+- `04_installed_files.json`：已安装的版本入口、navigation 及四个 annotation 修改模块逐字节匹配 v0.18.0 标签源码。没有修改全局 Python、SSH、插件设置或人工审阅数据。
+- `05_installed/01_result.json`：从上述真实安装目录加载 0.18.0，在 Windows PyMOL 3.1.3.1 中完成四预设、两候选切换、相机保持、参考不动、命名对象校验与人工命令保存重开，全部 passed。没有把工作树模块当成已安装版；报告记录实际模块路径。
+- `05_installed/02_desktop.json`：独立隐藏桌面测试 exit 0，输入桌面前后均为 Default。安装前后没有检测到其他 PyMOL 安装路径下的运行进程；没有关闭、重启、热重载或向用户窗口发送操作。所有本任务进程已终态。
+
+复现安装和已安装版验收（工作树根目录，PowerShell `-NoProfile -NonInteractive`）：
+
+```powershell
+& 'D:/Softwares/Pymol3.1/python.exe' -I -u tests/host/18_release_install.py --stage install --version 0.18.0
+& 'D:/Softwares/Pymol3.1/python.exe' -I -u tests/host/18_release_install.py --stage verify --version 0.18.0
+& 'D:/Softwares/Pymol3.1/python.exe' -I -u tests/host/17_step_presets.py --plugin-root 'D:/Softwares/Pymol3.1/Lib/site-packages/pmg_tk/startup/pymol_plugins' --output output/18_release/05_installed
+```
+
+用户下次启动 PyMOL 即使用 0.18.0；若仍有未退出的实例，待用户自行完整重启后生效。本次无需再次安装，也无待监督运行。人工链对应及 PyMOL 2.x 验收边界与上一节一致。
