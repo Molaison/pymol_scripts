@@ -212,13 +212,17 @@ def current_context(panel):
     from . import plugin
     state = plugin.STATE
     entry = state.current_entry()
+    objects = {item["name"]: state.step_context[item["name"]]
+               for item in plugin._configured_steps() if item["type"] == "object"
+               and item["name"] != "candidate" and item["name"] in state.step_context}
     return {"object": state.current_object, "selection": state.current_object,
             "index": str(state.index), "count": str(len(state.files)),
             "file": state.current_file(),
             "entry_id": state.current_entry_id(),
             "row_number": str(entry.row_number or "") if entry else "",
             "label": plugin._annotation_fields()[0]["name"],
-            "reference_object": getattr(panel, "_reference_object", "")}
+            "reference_object": getattr(panel, "_reference_object", ""),
+            "review_objects": objects}
 
 
 class AICommandDialog(QtWidgets.QDialog):
@@ -253,6 +257,22 @@ class AICommandDialog(QtWidgets.QDialog):
         presets.addWidget(self.preset_combo, 1)
         presets.addWidget(self.preset_button)
         layout.addLayout(presets)
+        self.reference_row = QtWidgets.QWidget()
+        reference_layout = QtWidgets.QHBoxLayout(self.reference_row)
+        reference_layout.setContentsMargins(0, 0, 0, 0)
+        reference_layout.addWidget(QtWidgets.QLabel("Fixed reference"))
+        self.reference_combo = QtWidgets.QComboBox()
+        self.reference_combo.addItem("Choose a fixed Review steps object…", "")
+        from . import plugin
+        loaded = current_context(self.panel)["review_objects"]
+        for item in plugin._configured_steps():
+            if item["type"] == "object" and item.get("fixed") and item["name"] in loaded:
+                self.reference_combo.addItem(item["name"], item["name"])
+        reference_layout.addWidget(self.reference_combo, 1)
+        layout.addWidget(self.reference_row)
+        self.reference_row.hide()
+        self.preset_combo.currentIndexChanged.connect(
+            lambda: self.reference_row.setVisible(str(self.preset_combo.currentData()).startswith("reference_")))
         self.triggers = QtWidgets.QListWidget()
         self.triggers.setMaximumHeight(110)
         for key in command_editors(self.panel):
@@ -344,7 +364,11 @@ class AICommandDialog(QtWidgets.QDialog):
             self.request_steps = self.selected_steps()
             if not self.request_steps:
                 raise ValueError("Select a trigger first")
-            commands, note = viewing_preset(self.preset_combo.currentData(), self.context["object"], cmd)
+            reference = self.reference_combo.currentData()
+            commands, note = viewing_preset(
+                self.preset_combo.currentData(), self.context["object"], cmd,
+                reference_name=reference,
+                reference_object=self.context["review_objects"].get(reference, ""))
             document = {"schema": SCHEMA, "steps": [
                 {"step_id": key, "commands": commands} for key in self.request_steps]}
             drafts = parse_draft(json.dumps(document), self.request_steps, self.context, cmd)

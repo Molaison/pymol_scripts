@@ -71,10 +71,13 @@ Both mean the same current object. Other on_open placeholders: {file} source pat
 {index} zero-based navigation index, {count} current navigation count, {entry_id} stable
 entry ID, {row_number} source row number (may be empty). after_label also supports
 {label} annotation field key and {value} saved value. No format specs, conversions,
-attribute access, invented placeholders such as {reference}, {A}, or {B}.
+attribute access, or invented placeholders. Additional named object placeholders are
+allowed ONLY for keys in the review_objects mapping supplied below; they refer to
+objects already loaded by this dataset's Review steps.
 Only commands below are supported for AI generation; require explicit selections.
 Use only displayed live object names for other objects; do not invent or load objects.
-For align/super the mobile object MOVES; keep the candidate fixed for reference comparison.
+For align/super the mobile object MOVES. Only align when requested; keep fixed
+Review steps references stationary and move the candidate instead.
 show/hide representations: cartoon, sticks, spheres, lines, ribbon, surface, mesh, dots, everything.
 Do not claim to satisfy unsupported operations by substituting unrelated commands.
 Use inline selection expressions (chain, resn, organic, polymer, byres, within) instead of creating named selections.
@@ -189,10 +192,12 @@ def parse_draft(text, steps, context, api):
         template = "\n".join(lines)
         fields = STEP_FIELDS if key == "on_open" else BUCKET_FIELDS
         values = {name: context.get(name, "") for name in fields}
+        objects = context.get("review_objects", {})
+        values.update(objects)
         if key != "on_open":
             values["value"] = key.removeprefix("after_label/")
         validate_commands(template if key == "on_open" else "",
-                          {} if key == "on_open" else {values["value"]: template})
+                          {} if key == "on_open" else {values["value"]: template}, objects)
         for number, rendered in format_commands(template, values):
             try:
                 validate_native(rendered, api)

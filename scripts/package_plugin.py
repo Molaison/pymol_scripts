@@ -97,7 +97,7 @@ review.json可选filter_presets。Filter旁下拉箭头可一键切组；Filter�
 
 - PyMOL 控制台运行 `pp_load` 和 `pp_help` 可查看命令入口。
 - **Plugin > PymolPlugins: Batch Processing**（或 `pp_batch`）用于批量结构处理。
-- **Settings > Automation > Viewing presets…** 提供PPI、PLI、寡聚体、膜蛋白、DNA/RNA、cartoon和surface草稿；不需要API。
+- **Settings > Automation > Viewing presets…** 提供保持相机、界面表面、固定参考叠合、候选 Cα 对齐，以及PPI、PLI、寡聚体、膜蛋白、DNA/RNA、cartoon和surface草稿；不需要API。参考预设需选择已加载的固定 Review steps 对象。原生 align 会创建或更新 _align1/_align2；对齐只移动候选，需检查复合物的链对应。
 - **AI command drafts… > AI settings…** 可选择原Codex或自定义API地址/Key/模型及Responses/Chat Completions格式。Remember key使用Windows账户加密，否则Key仅保留到PyMOL退出。
 - 预设和AI都先预览、编辑、确认插入，再点 **Apply commands**；生成不执行。
 - 可选 PLIP/PyRosetta workers 和 ANVIL 不包含在 ZIP 中。

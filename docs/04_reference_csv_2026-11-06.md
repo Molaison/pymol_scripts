@@ -711,38 +711,4 @@ The historical July commands and measured results are recorded in
 
 ### 产物整理prompt（含筛选分组）
 
-这是可选进阶版本，适合需要有依据的筛选分组时使用。先看 [基础 agent 提示词和导入步骤](02_agent_review.md)；示例字段必须替换为实际字段，不是固定评分阈值。
-
-````text
-请整理本次运行产物，目标是便于在 PyMOL Structure Annotator 中按组审阅：
-
-1. 将结构文件 hardlink 到指定文件夹，不修改结构内容。跨文件系统无法 hardlink 时报告阻塞，不静默改成复制。避免同名文件覆盖。
-
-2. 只从已有 raw 打分结果汇总 sum_scores.csv，不重新计算任何结构评分。每个结构一行，包含 structure_path（相对该CSV的路径）、absolute_path、label，以及结合此前对话确定的重要评分指标。评分列按查看重要性排列；保留缺失为空值，不用0代替。检查结构与评分行的对应关系，不遗漏或重复结构。
-
-3. label 稀疏标记典型模式、异常或有解释价值的代表性结构，覆盖多种模式，不只选择最好/最差。label不是人工质量标签，也不必给每行赋值。
-
-4. 同级生成 review.json，保留原有字段，并增加 filter_presets，供插件一键切换分组。格式示例：
-{
-  "path_column": "structure_path",
-  "display_columns": ["score1", "score2", "score3", "score4"],
-  "label_column": "label",
-  "step_cmd": "hide everything, {object}\nshow cartoon, {object}\norient {object}\nzoom {object}",
-  "filter_presets": [
-    {"name": "代表结构", "expression": "label is not None"},
-    {"name": "关键评分缺失", "expression": "score1 is None or score2 is None"}
-  ]
-}
-
-display_columns 必须从实际CSV字段中选最值得人工查看的4–6项。step_cmd 是整批共用的命令模板；保留字面量 {object}，不要写死结构名，也不要逐结构生成命令。
-
-filter_presets 请根据已有指标、已知判据和实际分布设计通常3–6个有意义的组，不照抄上面两个示例：覆盖优先审阅、指标间不一致、异常/缺失、代表性模式等实际存在的情况。名称短且唯一。每组需给出具体可执行的 expression；可指定 sort_column 和 sort_descending，让最值得看的条目靠前。
-
-表达式只能使用CSV已有字段、数值/字符串/布尔常量、比较符、and/or/not、括号、contains(列, "文字")、is None / is not None。带空格或特殊字符的列名用反引号。不要使用Python代码、分位数函数、in、算术表达式或引用其他分组名；需要组合组时展开条件。
-
-阈值优先采用此前约定或有依据的判据；若使用现有分数分布的分位数，先算成具体数值写入表达式，并说明只是探索性分层，不是已验证的通过标准。没有依据时不要发明“合格/不合格”阈值。分组默认允许重叠；若需要互斥，显式写出排除条件。
-
-5. 用实际CSV逐项检查：display_columns和筛选/排序列存在；每个表达式可执行；统计每组命中数、重叠数及未覆盖数，检查空组是否有意保留。分组只改变查看范围，不修改原始分数、不自动写入人工标签，也不拆分/复制分组结构。
-
-6. 附简洁 README.md：只保留数据来源、指标方向、各组条件/阈值依据和数量、必要异常、打开方式。说明在插件Filter页面可编辑/新增/删除分组。不要创建或覆盖已有 review.override.json，它属于人的修改；如它影响新的生成分组，明确提示，不擅自删除。
-````
+生成提示词已统一到 [创建 PyMOL review bundle](02_agent_review.md#复制提示词)，包含结构与 raw 评分配对、固定参考、步骤顺序、筛选依据和人工 override 保护。此处保留旧锚点，不再维护第二份提示词。

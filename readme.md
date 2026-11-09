@@ -12,7 +12,7 @@
 2. 在 PyMOL 选择 **Plugin → Plugin Manager → Install New Plugin**，选择下载的 ZIP。
 3. 完全退出并重启 PyMOL。Plugin 菜单中出现 **PymolPlugins: Structure Annotator** 和 **PymolPlugins: Batch Processing**。
 
-0.17.0 已正式发布，引入场景 group 审阅、候选及派生产物整组切换、interaction 改进、统一补全、六个样式和内置 SSH OTP。功能用法见 [操作指南](docs/01_group_interaction_styles.md) 和 [SSH 指南](docs/structure_annotator_csv_walkthrough.md#连接-ssh-数据源)。
+0.18.0 增加保持相机、界面表面、固定参考叠合和候选 Cα 对齐预设，并优化大场景切组时的分组读取，仍逐次识别手动改组。准备结构与评分表可直接使用 [review bundle 生成提示词](docs/02_agent_review.md)。其他功能见 [操作指南](docs/01_group_interaction_styles.md) 和 [SSH 指南](docs/structure_annotator_csv_walkthrough.md#连接-ssh-数据源)。
 
 更新插件时，打开 **Plugin → PymolPlugins: Updates**，点击 **Check now**，再点击 **Download and install**。也可启用 **Automatically install stable updates (restart required)**；**Check for updates when PyMOL starts** 默认开启，自动安装默认关闭。更新后完全退出并重新打开 PyMOL，当前会话不会热重载。
 

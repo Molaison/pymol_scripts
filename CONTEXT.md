@@ -75,3 +75,11 @@ reference当前合同（0.15.1）：用户明确要求常驻固定对象，已�
 当前开发分支 `codex/unify-tools` 基于 `a883fe9`，在独立 Windows 工作树 `D:/SyncPath/GitRepo/PymolPlugins-unification`；原旧目录及其未提交改动保留。用户要求 interaction 默认零新增 selection、完整补全、绘图 preset 整合，以及候选派生产物整组切换和已有 group 直接标注两种模式。
 
 本次唯一状态、证据与恢复入口：[插件统一审查与整合](docs/validation/02_toolkit_unification_2026-11-06.md)。使用说明：[Group、interaction 与绘图命令](docs/01_group_interaction_styles.md)。
+
+## 2026-11-09 大场景切组
+
+独立 `pp_nav groups` 的实时分组检查改用 binary session 载荷；保持每步检查与手动改组检测。恢复读上述唯一验收记录的“大场景切组性能”节。真实 Windows PyMOL 对比、源码基线和复现脚本均在该节；后续 GUI 测试默认使用已验证的独立隐藏桌面，不抢占当前输入桌面。测得 Qt repaint 仍主导整体切换耗时，不能把内部调用加速倍数当成整体体验加速。
+
+## Step commands 与 bundle 生成
+
+当前生成提示词唯一入口为 [创建 PyMOL review bundle](docs/02_agent_review.md)，涵盖稳定候选身份、raw 评分配对、固定参考、命令顺序、筛选依据与人工 override 保护。旧指南锚点仅跳转，不再维护第二份 prompt。保持相机、界面表面、固定参考叠合和候选 Cα 对齐预设均走草稿确认；参考从已加载的固定 Review steps 对象中选择，以命名占位符随候选切换。候选加载使用 zoom=0，由 Step commands 控制相机，避免自动缩放破坏连续查看。原生 align 会创建或更新 `_align1`/`_align2`，不宣称此预设零新增 selection。状态和实测范围见同一验收记录的“Step commands 预设与 review bundle prompt”节。

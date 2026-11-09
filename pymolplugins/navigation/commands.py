@@ -239,7 +239,9 @@ def _group_parent_snapshot() -> Dict[str, str]:
     """
     api = _require_cmd()
     try:
-        session = api.get_session("", partial=1, quiet=1)
+        # Parent fields stay unchanged; binary payloads avoid building per-atom
+        # Python lists on every transition. This does not change export settings.
+        session = api.get_session("", partial=1, quiet=1, binary=1)
     except TypeError:
         session = api.get_session("", 1, 1)
     except AttributeError as exc:

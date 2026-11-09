@@ -147,3 +147,82 @@ python scripts/package_plugin.py
 | 用户文档 | GPT-6.1 Terra 原会话同步首页、完整指南和包内 INSTALL；`output/14_terra_updates_result.md` |
 
 当前发布与本机更新已完成，无待监督进程。以后使用 Updates 入口即可；真实 F101 OTP 登录仍需按该 Host 的密钥配置完成后验收。
+
+## 2026-11-09 大场景切组性能
+
+负责人：当前 Codex 会话。状态：优化和真实 Host 验收完成；改动留在 `codex/group-navigation-performance`，尚未提交、发布或替换日常安装。基线 `127c2bf`。此节为唯一任务恢复记录。
+
+### 实现与实测结果
+
+`pymolplugins/navigation/commands.py` 的 `_group_parent_snapshot` 改为 `get_session(..., binary=1)`；每次切换仍读取当前父子关系，不缓存分组、不仅检查名称集合。旧接口的 TypeError 兼容路径保留。实际导出设置在测试前后均为 0，未被修改。
+
+真实 PyMOL profile 确认 `get_session` 是导航调用的主要热点。`api_probe.json` 在 169,416 原子场景中测得默认会话读取中位数 182.88 ms，binary 为 11.59 ms，父子映射一致；因此没有扩大改动到导航状态、分组事件或全局设置。官方实现依据：[CmdGetSession](https://github.com/schrodinger/pymol-open-source/blob/master/layer4/Cmd.cpp) 临时设置并恢复 binary；本机 `pymol/exporting.py` 也支持该参数。
+
+| 同一真实 Windows Host，15 次切换中位数 | 优化前 | 优化后 | 变化 |
+| --- | ---: | ---: | ---: |
+| 60 组：导航调用 | 110.52 ms | 8.51 ms | 12.98× |
+| 60 组：导航 + Qt repaint | 637.98 ms | 536.39 ms | 减少 15.92% |
+| 180 组：导航调用 | 219.00 ms | 30.72 ms | 7.13× |
+| 180 组：导航 + Qt repaint | 1958.13 ms | 1775.48 ms | 减少 9.33% |
+
+场景分别为 301/901 对象，57,096/169,416 原子；每组含真实 936 原子蛋白、嵌套组、CGO 和 measurement。3 次预热、15 次无 profile 计时、另做 3 次 profile。两个版本串行运行且输入、视角、导航参数相同。重绘时间仍主导总体耗时；此结果不是远端读取/下载或真人键盘到屏幕延迟的提升。
+
+### 真实验收与边界
+
+- `output/16_group_navigation/after.json`：passed。原生右方向键、CGO 新增、接触线移出、同名称集合下结构/嵌套组跨组移动、清空并删除候选组均通过。修改涉及未显示组；变化在下一次切换检测到（约 30–33 ms），游标和场景不变；恢复后可继续。
+- `output/16_group_navigation/before.json`：完整性能测量和截图有效，后续恢复测试 failed。原版已正确返回 stale；本机原生 `group …, remove` 没有移出成员，导致恢复断言失败。相同现象在插件外单独复现；改用原生 `ungroup` 后，优化版小场景和完整场景通过。不将该失败标为通过，不修改 PyMOL 本体。
+- `before_edits.json`：使用 git 基线模块和修正后的原生命令，五组场景的全部改组检查 passed；同时验证了可复现的 before 模块加载入口。没有重跑已完成的大场景计时。
+- `output/16_group_navigation_unit.log`：59 项导航测试通过，含 binary 读取、同名称跨组移动、旧接口兼容。
+- `output/16_group_navigation_package_checks.log`：46 项项目规定检查通过。未重新构建或发布同版本 ZIP。
+- `comparison.html` 为自包含对比报告，`comparison.json` 为数值；`before_180.png`、`after_180.png` 为真实 OpenGL framebuffer，均已目视检查，保留本机许可文字。
+
+此前当前桌面初测、错误断言及两次被中止的重复运行不参与最终比较。重复执行由越界子代理引起，已停止；测试入口增加 Windows mutex，拒绝并行启动同一 benchmark。误取当前桌面区域的初始截图已删除。最终测量 JSON 保留每次样本、profile、版本与源码 SHA256。
+
+### 隐藏桌面与恢复
+
+用户认可独立隐藏桌面并要求成为全局短规则；已写入本机 `C:/Users/ADMIN/.codex/AGENTS.md` 和明确请求的偏好记忆。仍使用 ADMIN，未登录额外用户、未更改凭据/RDP；CreateDesktopW + CreateProcess 把 GUI 放到非输入桌面。资格验证 `isolated_qualification.json` 实测 PyMOL 3.1.3.1 / Intel UHD 770 / OpenGL 4.6，旋转和换色后 framebuffer 正确更新。最终 before/after 的 `*_measure_desktop.json` 记录输入桌面前后均 Default；after child exit 0。所有本任务进程均已终态。
+
+复现入口（在本工作树按顺序运行；before 仅在测试进程内加载 git 基线版本的 navigation 模块，不更改工作树）：
+
+```powershell
+& 'D:/Softwares/Pymol3.1/python.exe' -I -u tests/host/16_group_navigation_perf.py --stage measure --variant before --isolated
+& 'D:/Softwares/Pymol3.1/python.exe' -I -u tests/host/16_group_navigation_perf.py --stage measure --variant after --isolated
+& 'D:/Softwares/Pymol3.1/python.exe' -I -u tests/host/16_group_navigation_perf.py --stage compare --variant after
+```
+
+已有数据无需重跑。后续若继续优化，下一瓶颈是 PyMOL/Qt repaint；先独立测其成本。F101 OTP 和远端 worker 不属于本轮范围。
+
+## 2026-11-09 Step commands 预设与 review bundle prompt
+
+负责人：当前 Codex 会话。状态：实现及完整 Host 验收完成，包含新候选切换的相机保持修复；仍在 `PymolPlugins-unification` 工作树，尚未提交、打包、发布或替换日常安装。上轮大场景性能改动保留。本节为本轮唯一执行记录，无待监督进程。
+
+新增保持相机、界面表面、固定参考叠合、候选 Cα 对齐四个草稿预设，沿用预览/确认插入/Apply 流程。固定参考选择器只列已加载的 fixed Review steps 对象；草稿使用命名占位符，AI 草稿解析器也接受上下文中实际声明的对象名。未声明占位符仍报错。参考对齐移动 candidate，参考保持不动；复合物须检查链对应。
+
+生成 prompt 统一到 `docs/02_agent_review.md`，旧完整指南及历史进阶锚点指向此入口。保留 hardlink、raw 分数不重算、代表性 label、缺失值/重复/遗漏核查与筛选依据，补充稳定候选粒度/ID、评分溯源、固定参考和步骤执行顺序、完整路径检查及人工 override 保护。`id_column` 不能写入 review.json，需在 UI 的 Row ID column 选择；显式 steps 的 commands 项只有省略 commands 字段时才执行 step_cmd。
+
+### 实际验证
+
+- `output/17_step_presets/01_result.json`：passed。Windows PyMOL 3.1.3.1 / Intel UHD 770 / OpenGL 4.6，加载本工作树代码；用 [RCSB 1BRS](https://files.rcsb.org/download/1BRS.pdb) 的 A/D 链生成临时测试候选和参考，第二候选验证实际切换。测试不是新的科学评分或实验结论。
+- 四个预设均通过真实 Qt 生成、确认插入、Apply、重载和切换第二候选执行。生成/插入未改场景；保持相机与叠合预设在新候选切换时相机也不变；界面表面有真实 surface；对齐候选移动约 12 Å，Cα RMSD < 0.01 Å，固定参考最大坐标变化为 0。每个预设的 candidate_switch 为 passed。
+- 手工追加 `color salmon, {candidate}` 后，第二候选使用新命令、同名参考被复用；关闭/重开保留 override 和命令。源 review.json、候选文件、参考及原始 1BRS 内容不变；无关对象和人工 selection 成员保持。
+- 两个 prompt JSON 示例经过插件真实配置/列名验证，缺失值与代表结构筛选命中数正确；命名占位符覆盖 on_open 和 after_label，未知名及未选择参考均拒绝。未调用外部模型评估其生成 bundle 的成功率；本轮交付是 prompt 与合同验收。
+- `02_desktop.json`：输入桌面前后均为 Default，隐藏桌面子进程 exit 0；`03_render_before.png` / `04_render_changed.png` 证实实际 OpenGL 画面更新。`05_`–`08_` 为四预设视口，`09_reference_draft.png` 为真实 Qt 参考选择/草稿界面，已目视检查。
+- `10_required_checks.log`：46 项项目规定检查 passed；`git diff --check` 无空白错误。未重复大场景性能测试，未重建同版本 ZIP。
+
+首轮 `11_initial_failure.json` 因“所有预设零新增 selection”的测试假设失败；原生 `align` 确实创建或更新 `_align1`、`_align2`，`quiet=1` 亦如此，见独立原生探针 `12_align_probe.json` 及 [上游 ExecutiveAlign](https://github.com/schrodinger/pymol-open-source/blob/master/layer3/Executive.cpp)。保留其原生行为，在预设草稿和使用说明中明确提示；不删除用户选择或声称零新增。`13_navigation_wait_failure.json` 是测试只等待普通导航而未等待 Review steps 异步任务，提前读取颜色造成的失败；修正为等待 `_csv_task_id` 结束并确认目标索引，最终完整检查通过。失败未冒充通过。
+
+补查真实新候选时，`14_before_camera_fix.json` 复现了加载入口 `zoom=-1` 触发 PyMOL 全局 auto_zoom，使无相机命令的预设仍跳视角。候选加载现固定 `zoom=0`，视角由 step_cmd 决定；默认 `zoom {object}` 仍执行，辅助 Review steps 对象原本已使用 zoom=0，不修改全局设置。修复后四个预设的新候选检查通过。`15_stale_test_object.json` 是检查缺少参考的负例仍使用已被切换淘汰的测试对象名；改为取当前候选，最终整个脚本 exit 0、JSON passed。
+
+复现（工作树根目录，测试默认在独立隐藏桌面；输入已保存在 output 中，无需重复下载）：
+
+```powershell
+& 'D:/Softwares/Pymol3.1/python.exe' -I -u tests/host/17_step_presets.py
+```
+
+下一步：需要交付日常安装时，与尚未提交的性能改动一起审定版本、打包并发布；本轮没有操作用户 PyMOL 会话。真实 PyMOL 2.x 未重新验收。
+
+## 2026-11-09 0.18.0 合并发布与本机更新
+
+负责人：当前 Codex 会话。状态：进行中。用户明确授权将预设、bundle prompt、保持相机修复与上一轮切组性能优化一起提交、合并发布，再更新本机插件；不关闭或热重载当前 PyMOL 会话。版本从 0.17.1 升为 0.18.0。此节是本次发布的唯一状态记录；证据保存在 `output/18_release/`。
+
+远端已核实为 `Molaison/pymol_scripts`，main 与本地起点均为 `127c2bf`；旧 origin URL 可正常重定向，不另改远端配置。复用现有 CI 自动发布流程。下一步：提交发布变更、PR 检查/合并，等待正式 Release，然后通过原生 updater 校验安装，并在独立隐藏桌面验证实际安装目录。

@@ -8,7 +8,11 @@ BUCKET_FIELDS = STEP_FIELDS | {"label", "value"}
 
 VIEW_PRESETS = {
     "cartoon": "Cartoon overview",
+    "review_fixed_view": "Review · keep camera",
     "ppi": "PPI · protein interface",
+    "ppi_surface": "PPI · interface surface",
+    "reference_overlay": "Reference · overlay, keep coordinates",
+    "reference_align": "Reference · align candidate Cα",
     "pli": "PLI · ligand pocket",
     "oligomer": "Oligomer · subunits",
     "membrane": "Membrane · protein & lipids",
@@ -18,7 +22,7 @@ VIEW_PRESETS = {
 LIPID_SELECTION = "resn POPC+POPE+POPG+POPS+DPPC+DPPE+DOPC+DOPE+DOPS+DLPC+DMPC+CHOL+CLR"
 
 
-def viewing_preset(name, object_name, api):
+def viewing_preset(name, object_name, api, *, reference_name="", reference_object=""):
     """Build an editable, candidate-scoped recipe from the loaded structure."""
     if name not in VIEW_PRESETS:
         raise ValueError("Choose a viewing preset")
@@ -30,13 +34,19 @@ def viewing_preset(name, object_name, api):
         return api.count_atoms(selection.replace("{object}", object_name))
     commands = ["hide everything, " + target]
     note = ""
-    if name in {"ppi", "oligomer", "membrane"} and not count(protein):
+    if name.startswith("reference_"):
+        return _reference_preset(name, object_name, api, reference_name, reference_object)
+    if name in {"ppi", "ppi_surface", "oligomer", "membrane", "review_fixed_view"} and not count(protein):
         raise ValueError("This preset needs a protein in the current structure")
-    if name in {"ppi", "oligomer"}:
+    if name in {"ppi", "ppi_surface", "oligomer"}:
         chains = api.get_chains(protein.replace("{object}", object_name))
         if len(chains) < 2:
             raise ValueError("This preset needs at least two protein chains; load the biological assembly")
-    if name == "ppi":
+    if name == "review_fixed_view":
+        commands += ["show cartoon, " + protein, "util.cbc " + protein,
+                     "set cartoon_transparency, 0, " + protein]
+        note = "Camera and coordinates unchanged. Use candidates in a common coordinate frame."
+    elif name in {"ppi", "ppi_surface"}:
         # Each chain is compared with the other chains, never with itself.
         interfaces = ["byres ((%s and chain \"%s\") within 5 of (%s and not chain \"%s\"))"
                       % (protein, chain, protein, chain) for chain in chains]
@@ -46,6 +56,11 @@ def viewing_preset(name, object_name, api):
         commands += ["show cartoon, " + protein, "util.cbc " + protein,
                      "show sticks, " + interface, "util.cnc " + interface,
                      "zoom " + interface + ", 6"]
+        if name == "ppi_surface":
+            commands[-1:-1] = ["show surface, " + interface,
+                               "set transparency, 0.35, " + target,
+                               "set cartoon_transparency, 0, " + protein]
+            note = "Inter-chain residues within 5 Å; a visual neighborhood, not an interaction score."
     elif name == "pli":
         ligand = target + " and organic and not (" + LIPID_SELECTION + ")"
         if not count(ligand):
@@ -79,6 +94,32 @@ def viewing_preset(name, object_name, api):
             commands += ["show surface, " + target,
                          "set transparency, %s, %s" % ("0.65" if name == "oligomer" else "0.25", target)]
         commands += ["orient " + target, "zoom " + target + ", 3"]
+    return commands, note
+
+
+def _reference_preset(name, object_name, api, reference_name, reference_object):
+    if not reference_name or not reference_object or reference_object == object_name:
+        raise ValueError("Choose a loaded fixed object from Review steps as the reference")
+    candidate = "({object}) and polymer.protein"
+    reference = "({" + reference_name + "}) and polymer.protein"
+    for selection in (candidate.replace("{object}", object_name),
+                      reference.replace("{" + reference_name + "}", reference_object)):
+        if api.count_atoms(selection + " and name CA") < 3:
+            raise ValueError("Candidate and reference each need at least three protein Cα atoms")
+    commands = [
+        "hide everything, ({object})", "show cartoon, " + candidate,
+        "color cyan, " + candidate, "set cartoon_transparency, 0, " + candidate,
+        "show cartoon, " + reference, "color gray70, " + reference,
+        "set cartoon_transparency, 0.55, " + reference,
+    ]
+    if name == "reference_align":
+        commands.insert(0, "align " + candidate + " and name CA, " + reference + " and name CA")
+        commands.append("zoom ({object}) or ({" + reference_name + "}), 4")
+        note = ("Moves the candidate onto the fixed reference using all protein Cα atoms. "
+                "Check chain correspondence for complexes. PyMOL align creates/updates "
+                "_align1 and _align2 selections.")
+    else:
+        note = "Camera and coordinates unchanged. Requires an existing common coordinate frame."
     return commands, note
 
 
