@@ -2354,7 +2354,8 @@ def _ensure_candidate_loaded(
         if obj_name not in STATE.managed_objects:
             STATE.managed_objects.append(obj_name)
         try:
-            cmd.load(load_path_resolved, obj_name, quiet=1, zoom=-1 if focus else 0)
+            # Step commands own the camera; loading must not preempt keep-view recipes.
+            cmd.load(load_path_resolved, obj_name, quiet=1, zoom=0)
         except Exception:
             # Some Host loaders can leave a partial object before raising. Keep
             # that name owned so a transaction rollback can delete it exactly.

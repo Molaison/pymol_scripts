@@ -1,6 +1,6 @@
 # 用 Structure Annotator 审阅评分表和结构
 
-打开本地或 SSH 上的 CSV/TSV 和 PDB/CIF，在 PyMOL 中查看分数、筛选、标注并继续审阅。需要已安装带 Qt 的插件和自己的结构文件；首次安装见 [快速开始](structure_annotator_quickstart.md)。0.17.0 已正式发布，正式版及其安装包见 [最新 Release](https://github.com/Molaison/pymol_scripts/releases/latest)。
+打开本地或 SSH 上的 CSV/TSV 和 PDB/CIF，在 PyMOL 中查看分数、筛选、标注并继续审阅。需要已安装带 Qt 的插件和自己的结构文件；首次安装见 [快速开始](structure_annotator_quickstart.md)。本指南对应 0.18.0，正式版及其安装包见 [最新 Release](https://github.com/Molaison/pymol_scripts/releases/latest)。
 
 ## 打开评分表
 
@@ -35,7 +35,7 @@ design_a,structures/model_a.pdb,0.82,典型模式
 
 读取顺序是生成的 `review.json`、同目录的 `review.override.json`，再应用明确的导入选择。用户应用的配置写入 override；只打开或预览未改变的配置不会创建 override。两份配置对同目录中的表生效，独立审阅包应使用独立目录。源表、生成配置和结构文件不会被标注流程改写。
 
-要让 agent 从已有 raw 结果整理结构和评分，使用 [完整基础提示词](02_agent_review.md)。hardlink 需要同一文件系统；失败时应报告，不能静默复制或重新计算评分。
+要让 agent 从已有 raw 结果整理结构和评分，使用 [review bundle 生成提示词](02_agent_review.md)。它也覆盖固定参考、步骤和筛选组。hardlink 需要同一文件系统；失败时应报告，不能静默复制或重新计算评分。
 
 ## 筛选、排序和抽样
 
@@ -43,7 +43,7 @@ design_a,structures/model_a.pdb,0.82,典型模式
 
 筛选和排序可使用未显示的列。补全弹出时 Enter、数字键盘 Enter 或 Tab 接受列名；弹窗关闭后 Enter 才提交，**Apply filter** 可显式提交。空结果会显示空集合，错误表达式保留原视图。筛选不会删除结构或修改评分。
 
-点击 Filter 旁箭头切换命名分组；在 Filter 的 **Group** 编辑条件和排序，用 **Save…** 保存、**Delete** 删除。`filter_presets` 是可选数组，包含唯一的 `name`、`expression` 及可选的 `sort_column`、`sort_descending`。组可重叠、可为空；它们不是质量标签。人工修改写入 `review.override.json`，数组整体覆盖生成配置，`[]` 清空全部组。需要自动整理分组时可使用 [可选进阶提示词](04_reference_csv_2026-11-06.md#产物整理prompt含筛选分组)；先确认数据和阈值依据。
+点击 Filter 旁箭头切换命名分组；在 Filter 的 **Group** 编辑条件和排序，用 **Save…** 保存、**Delete** 删除。`filter_presets` 是可选数组，包含唯一的 `name`、`expression` 及可选的 `sort_column`、`sort_descending`。组可重叠、可为空；它们不是质量标签。人工修改写入 `review.override.json`，数组整体覆盖生成配置，`[]` 清空全部组。需要自动整理分组时使用 [统一生成提示词](02_agent_review.md#复制提示词) 中的筛选组要求；先确认数据和阈值依据。
 
 代表性抽样是显式审阅路线，不等同全集或无偏统计样本。检查界面中的全集、筛选集和样本数量；重新导入回到完整筛选集合。批处理不会自动继承审阅的筛选和抽样。
 
@@ -82,6 +82,8 @@ sa_export_csv "D:/review/scores_reviewed.csv"
 只引用执行到当前位置已经加载的对象；空辅助路径可跳过，但引用不存在对象会报错。`{object}` 和 `{selection}` 指 candidate；其他占位符包括 `{file}`、从 0 开始的 `{index}`、`{count}`、`{entry_id}`、`{row_number}`。标签动作还可用 `{label}`、`{value}`。未配置 `steps` 时使用 candidate 后执行 `step_cmd`。旧 `reference_column` 只映射为通用固定对象，不自动对齐、着色或调整视图。
 
 命令配置可执行 PyMOL 操作，只使用可信配置。编辑后先确认并 **Apply commands**；自定义命令的任意副作用不保证通用撤销。Viewing presets 和 AI command drafts 均先生成可编辑草稿，确认插入并 Apply 后才执行；预设依赖实际链和配体组成，不推断科学结论。
+
+蛋白设计与复合物可使用保持相机、界面表面、固定参考叠合及候选 Cα 对齐预设；具体行为和参考选择见 [Step commands 预设](02_agent_review.md#用-step-commands-预设调整显示)。
 
 ## 连接 SSH 数据源
 
@@ -193,6 +195,6 @@ sa_cache_status 1
 <a id="筛选分组0140"></a>
 - [筛选分组（0.14.0）](04_reference_csv_2026-11-06.md#%E7%AD%9B%E9%80%89%E5%88%86%E7%BB%840140)
 <a id="产物整理prompt含筛选分组"></a>
-- [产物整理prompt（含筛选分组）](04_reference_csv_2026-11-06.md#%E4%BA%A7%E7%89%A9%E6%95%B4%E7%90%86prompt%E5%90%AB%E7%AD%9B%E9%80%89%E5%88%86%E7%BB%84)
+- [产物整理prompt（含筛选分组）](02_agent_review.md#复制提示词)
 
 </details>

@@ -172,6 +172,34 @@ class NavigationAdapterTests(unittest.TestCase):
             result = function(*args, **kwargs)
         return result, output.getvalue(), errors.getvalue()
 
+    def test_binary_snapshot_still_detects_regrouping_without_name_changes(self):
+        legacy_get_session = self.fake.get_session
+        formats = []
+
+        def get_session(names="", partial=0, quiet=1, *, binary=-1):
+            formats.append(binary)
+            return legacy_get_session(names, partial, quiet)
+
+        self.fake.get_session = get_session
+        navigation.pp_nav_start(
+            source="groups", entries="root_a,root_b", zoom_policy="none"
+        )
+        original_names = set(self.fake.types)
+        enabled = set(self.fake.enabled)
+        self.fake.groups["nested"].remove("a_measurement")
+        self.fake.groups["root_b"].append("a_measurement")
+
+        result = navigation.pp_nav_next()
+
+        self.assertEqual(result["status"], "stale")
+        self.assertEqual(result["cursor"], 0)
+        self.assertEqual(result["membership_changes"]["root_a"]["removed"], ["a_measurement"])
+        self.assertEqual(result["membership_changes"]["root_b"]["added"], ["a_measurement"])
+        self.assertEqual(set(self.fake.types), original_names)
+        self.assertEqual(set(self.fake.enabled), enabled)
+        self.assertGreaterEqual(len(formats), 4)
+        self.assertEqual(set(formats), {1})
+
     def test_group_navigation_keeps_group_atomic_and_leaves_overlay_untouched(self):
         result = navigation.pp_nav_start(
             source="groups", batch_size=2, window_size=1, bind_keys=0, zoom_policy="none"
