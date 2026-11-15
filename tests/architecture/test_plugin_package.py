@@ -92,6 +92,7 @@ assert set(menus) == {
     "PymolPlugins: Capabilities", "PymolPlugins: Command Help",
     "PymolPlugins: Structure Annotator",
     "PymolPlugins: Batch Processing",
+    "PymolPlugins: RFD4 · Proteina",
     "PymolPlugins: Updates",
 }, menus
 assert all(callable(callback) for callback in menus.values())

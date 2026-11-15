@@ -79,6 +79,14 @@ Host my-lab
 
 0.17.1 起，GitHub API 匿名限流时更新器会尝试从公开 Release 页面获取稳定版本和 SHA256SUMS，无需 GitHub token；其他网络错误仍需处理。下载包继续校验 SHA256、版本和 ZIP 路径，同卷替换时保留备份，失败则恢复。若旧版更新器因 API 限流无法检查，可在 https://github.com/Molaison/pymol_scripts/releases/latest 提供 0.17.1 或更新版本后下载插件 ZIP，使用 Plugin Manager 安装并重启。首次从 0.14.x 升级仍需手动安装本 ZIP。
 
+## RFD4 · Proteina
+
+打开 **Plugin > PymolPlugins: RFD4 · Proteina**，在 PyMOL 内完成输入、条件编辑、生成、candidate 下一轮及轨迹查看。配色、Contacts 和序列选择直接使用本包工具，无需另装 RFD4 插件。
+
+首次在连接设置中填写启用 PyMOL API 的 RFD4 Studio 根地址和令牌，可使用 HTTPS 或 SSH 转发后的 localhost 地址。选择“记住登录”后，打开面板自动连接；已有独立版的连接设置和凭据直接沿用。Windows 使用当前用户 DPAPI 加密，Linux 使用 0600 用户凭据文件。模型和 AtomWorks 在服务端运行，插件需要 Python 3.9+ 和 Qt。保存轨迹需后端支持；氢键等条件评估不支持或无法判断时会明确标记。
+
+从独立版迁移时，先在 Plugin Manager 禁用旧的 `rfd4_pymol`，再完全重启。保留原连接设置和 `.pymol/rfd4_credentials`；不要同时启用两个入口。详见包内 `pymolplugins/rfd4/README.md`。
+
 ## 可配置审阅步骤
 
 review.json 的 steps 列表定义命名对象和命令的执行顺序。固定对象只加载一次，同一路径连续使用保持启用；对齐、配色和显示均由命令决定。Steps 编辑器可添加、编辑及上下移动动作；候选浏览顺序在 Filter 中设置。未配置 steps 的普通数据继续使用原 step_cmd。

@@ -85,3 +85,7 @@ reference当前合同（0.15.1）：用户明确要求常驻固定对象，已�
 当前生成提示词唯一入口为 [创建 PyMOL review bundle](docs/02_agent_review.md)，涵盖稳定候选身份、raw 评分配对、固定参考、命令顺序、筛选依据与人工 override 保护。旧指南锚点仅跳转，不再维护第二份 prompt。保持相机、界面表面、固定参考叠合和候选 Cα 对齐预设均走草稿确认；参考从已加载的固定 Review steps 对象中选择，以命名占位符随候选切换。候选加载使用 zoom=0，由 Step commands 控制相机，避免自动缩放破坏连续查看。原生 align 会创建或更新 `_align1`/`_align2`，不宣称此预设零新增 selection。状态和实测范围见同一验收记录的“Step commands 预设与 review bundle prompt”节。
 
 0.18.0 将上述预设、prompt 与切组性能优化一并交付：PR #6 已合并，正式 Release 为 https://github.com/Molaison/pymol_scripts/releases/tag/v0.18.0。本机原生 updater 已安装正式包，保留 0.17.1 备份；实际安装目录的隐藏桌面验收通过，没有关闭或热重载用户会话。恢复看同一记录“0.18.0 合并发布与本机更新”节。
+
+## 2026-11-15 RFD4 统一插件
+
+0.19.0 将 RFD4-PyMOL 0.2.1 纳入 `pymolplugins.rfd4`，唯一入口 **Plugin → PymolPlugins: RFD4 · Proteina**；统一 ZIP/更新，延迟导入，直接复用同包配色、Contacts 与序列选择。beta 和本机真实用户目录均已迁移，旧独立包及快捷入口备份退役，地址/默认 f102/凭据字节保持。两端各两次正常启动的最终 JSON passed，46 项现有检查通过。来源、安装哈希、原生宿主脚本和科学证据复用边界见 [RFD4 合并验收](docs/validation/03_rfd4_integration_2026-11-15.md)。本轮无新推理，不重提原两轮任务。
