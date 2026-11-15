@@ -1,6 +1,6 @@
 # PymolPlugins
 
-在 PyMOL 中查看、筛选和标注结构，批量处理结构对，并使用统一命令制作可视化。
+在 PyMOL 中查看、筛选和标注结构，批量处理结构对，连接 RFD4 后端设计蛋白，并使用统一工具制作可视化。
 
 [安装](#安装) · [第一次审阅](#第一次审阅) · [命令](#使用命令) · [指南](#选择指南)
 
@@ -10,7 +10,9 @@
 
 1. 从 [正式 Release](https://github.com/Molaison/pymol_scripts/releases/latest) 下载附件 `PymolPlugins-<version>.zip`。不要选择 GitHub 自动生成的 Source code ZIP，也不要解压插件包。
 2. 在 PyMOL 选择 **Plugin → Plugin Manager → Install New Plugin**，选择下载的 ZIP。
-3. 完全退出并重启 PyMOL。Plugin 菜单中出现 **PymolPlugins: Structure Annotator** 和 **PymolPlugins: Batch Processing**。
+3. 完全退出并重启 PyMOL。Plugin 菜单中出现 **PymolPlugins: Structure Annotator**、**PymolPlugins: Batch Processing** 和 **PymolPlugins: RFD4 · Proteina**。
+
+0.19.0 将 RFD4 原生面板纳入同一插件包：输入、条件编辑、candidate 生成及下一轮、轨迹与氢键条件检查均在 PyMOL 内操作。模型通过 HTTPS 或 SSH 转发连接服务端，已有连接和登录配置沿用。见 [RFD4 使用与迁移](pymolplugins/rfd4/README.md)。
 
 0.18.0 增加保持相机、界面表面、固定参考叠合和候选 Cα 对齐预设，并优化大场景切组时的分组读取，仍逐次识别手动改组。准备结构与评分表可直接使用 [review bundle 生成提示词](docs/02_agent_review.md)。其他功能见 [操作指南](docs/01_group_interaction_styles.md) 和 [SSH 指南](docs/structure_annotator_csv_walkthrough.md#连接-ssh-数据源)。
 
@@ -51,6 +53,7 @@ pp_undo
 
 | 任务 | 指南 |
 | --- | --- |
+| 蛋白设计、candidate 下一轮、轨迹与局部条件检查 | [RFD4 · Proteina](pymolplugins/rfd4/README.md) |
 | 导入 CSV、SSH、筛选、Review steps、导出和缓存 | [Structure Annotator 完整指南](docs/structure_annotator_csv_walkthrough.md) |
 | 让 agent 整理已有结果，再导入和标注 | [整理并审阅运行产物](docs/02_agent_review.md) |
 | 成对处理结构、预览并保存结果 | [Batch Processing](docs/batch_processing_specification.md#usage) |

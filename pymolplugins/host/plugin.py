@@ -674,6 +674,12 @@ def show_updates_from_toolkit():
     show_updates()
 
 
+def show_rfd4_from_toolkit():
+    """Open the bundled design panel without loading a model into PyMOL."""
+    from pymolplugins.rfd4 import open_panel
+    return open_panel()
+
+
 def __init_plugin__(app=None):
     from pymol.plugins import addmenuitemqt
 
@@ -683,6 +689,7 @@ def __init_plugin__(app=None):
     addmenuitemqt("PymolPlugins: Command Help", pp_help)
     addmenuitemqt("PymolPlugins: Structure Annotator", show_structure_annotator_from_toolkit)
     addmenuitemqt("PymolPlugins: Batch Processing", show_batch_processing_from_toolkit)
+    addmenuitemqt("PymolPlugins: RFD4 · Proteina", show_rfd4_from_toolkit)
     addmenuitemqt("PymolPlugins: Updates", show_updates_from_toolkit)
     from .updater_widgets import start_update_check
     start_update_check()
