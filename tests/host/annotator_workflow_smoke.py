@@ -106,8 +106,12 @@ def check_filters(panel, annotation, qt_test, qt, app, rows):
         wait_for(app, popup.isVisible)
         qt_test.keyClick(target, key)
         app.processEvents()
-        assert panel.filter_edit.text() == "AC.iptm", panel.filter_edit.text()
-        assert panel.filter_dialog.isVisible(), "Accepting a column completion submitted the filter"
+        if key == qt.Key_Tab:
+            assert panel.filter_edit.text() == "AC.iptm", panel.filter_edit.text()
+        else:
+            assert panel.filter_edit.text() == "AC.ip", panel.filter_edit.text()
+            assert panel.filter_error_label.isVisible(), "Enter must validate the current input"
+        assert panel.filter_dialog.isVisible()
         assert not panel._csv_task_id and annotation.STATE.filter_text == initial_filter
         assert not popup.isVisible()
     panel.filter_edit.setText("AC.iptm >= 0.8 and score_")
@@ -116,7 +120,7 @@ def check_filters(panel, annotation, qt_test, qt, app, rows):
     wait_for(app, popup.isVisible)
     qt_test.keyClick(popup, qt.Key_Down)
     highlighted = str(popup.currentIndex().data())
-    qt_test.keyClick(popup, qt.Key_Return)
+    qt_test.keyClick(popup, qt.Key_Tab)
     assert panel.filter_edit.text() == "AC.iptm >= 0.8 and " + highlighted
     assert panel.filter_dialog.isVisible() and not panel._csv_task_id
     panel.filter_edit.setText("AC.iptm >= 0.8 and full_pass == True")

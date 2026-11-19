@@ -117,9 +117,10 @@ def _header(panel, layout):
     panel.quick_start_button = QtWidgets.QToolButton()
     panel.quick_start_button.setText("?")
     panel.quick_start_button.setProperty("role", "icon")
-    panel.quick_start_button.setAccessibleName("Quick start")
-    panel.quick_start_button.setToolTip("Quick start")
-    panel.quick_start_button.clicked.connect(lambda: panel.source_location.show_quick_start())
+    panel.quick_start_button.setAccessibleName("Getting started")
+    panel.quick_start_button.setToolTip("Getting started · 入门向导")
+    from pymolplugins.host.wizard import show_wizard
+    panel.quick_start_button.clicked.connect(lambda: show_wizard("review"))
     header.addWidget(panel.quick_start_button)
     panel.window_mode_button = WindowModeButton(panel)
     header.addWidget(panel.window_mode_button)
@@ -278,6 +279,8 @@ def _csv_fields(panel, form):
     extra_form.addRow(advanced)
     panel.csv_preview_btn = _button("Check file paths", panel._preview_csv)
     mapping_form.addRow(panel.csv_preview_btn)
+    panel.bundle_check_btn = _button("Check review bundle", panel._check_review_bundle)
+    form.addRow(panel.bundle_check_btn)
 
 
 def _review_page(panel):
@@ -355,11 +358,11 @@ def _filter_dialog(panel):
     panel.filter_preset_combo = QtWidgets.QComboBox()
     panel.filter_preset_combo.setAccessibleName("Filter group")
     panel.filter_preset_combo.activated.connect(panel._select_filter_preset)
-    panel.filter_save_button = _button("Save…", panel._save_filter_preset)
+    panel.filter_save_button = _button("Save group…", panel._save_filter_preset)
     panel.filter_delete_button = _button("Delete", panel._delete_filter_preset, "quiet")
     panel.filter_delete_button.setEnabled(False)
     panel.filter_group_row = _row(panel.filter_preset_combo, panel.filter_save_button, panel.filter_delete_button)
-    form.addRow("Group", panel.filter_group_row)
+    form.addRow("Filter group", panel.filter_group_row)
     panel.filter_group_label = form.labelForField(panel.filter_group_row)
     panel.filter_mode_combo = QtWidgets.QComboBox()
     panel.filter_mode_combo.addItems(["Text search", "Column conditions"])
@@ -375,6 +378,12 @@ def _filter_dialog(panel):
     panel.sort_desc_cb = QtWidgets.QCheckBox("Descending")
     form.addRow("Find by", panel.filter_mode_combo)
     form.addRow(panel.filter_edit)
+    panel.filter_expression_tools = _row(
+        _button("Add condition…", panel._add_filter_condition),
+        _button("Group conditions", panel._group_filter_conditions),
+    )
+    panel.filter_expression_tools.hide()
+    form.addRow(panel.filter_expression_tools)
     form.addRow("Sort by", panel.sort_column_combo)
     form.addRow(panel.sort_desc_cb)
     panel.filter_error_label = QtWidgets.QLabel()
@@ -507,8 +516,10 @@ def _settings_page(panel):
     panel.command_draft_label.setProperty("role", "muted")
     panel.command_draft_label.setWordWrap(True)
     panel.commands_apply_btn = _button("Apply commands", panel._apply_commands, "primary")
+    panel.commands_view_btn = _button("Apply and view…", panel._apply_commands_and_view)
     command_layout.addWidget(panel.command_draft_label)
     command_layout.addWidget(panel.commands_apply_btn)
+    command_layout.addWidget(panel.commands_view_btn)
     layout.addWidget(commands)
     panel.settings_save_btn = _button("Save settings", panel._save_ui_state)
     panel.settings_save_btn.setParent(panel)

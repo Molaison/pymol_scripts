@@ -63,7 +63,7 @@
 
 4. 筛选组（有数据依据时才增加）
 - 可选 filter_presets 数组，每组包含唯一 name、expression，可选 sort_column、sort_descending（布尔值）。根据实际数据覆盖优先审阅、指标不一致、缺失/异常或代表性模式，通常 3–6 组；不要为凑数量造组。
-- 表达式只用实际 CSV 列、常量、比较、and/or/not、括号、contains(列, "文字")、is None / is not None；特殊列名用反引号。禁止 Python、in、算术、分位数函数或引用其他组名。例：label is not None；score1 is None（须替换真实列名）。
+- 表达式只用实际 CSV 列、常量、比较、and/or/not、括号、contains(列, "文字")、startswith(列, "文字")、endswith(列, "文字")、is None / is not None；特殊列名用反引号。文本匹配忽略大小写。禁止 Python、in、算术、分位数函数或引用其他组名。例：label is not None；score1 is None（须替换真实列名）。
 - 阈值先用已约定或有来源的判据。若以已有分数分布分层，先求出具体阈值再写入表达式，并注明这是探索性分层，不是通过标准；不重新运行结构评分。
 - 允许重叠。用实际 CSV 计算每组命中数、组间重叠和未覆盖数，注明有意保留的空组。不拆分/复制每组结构，不自动填写人工标签。除非明确指定默认子集，打开时保留全集，不设置 filter_text 隐藏候选。
 
@@ -84,7 +84,7 @@
 ## 导入并标注
 
 1. 将 `sum_scores.csv` 和生成的 `review.json` 放在同一目录，保留表中相对路径所指向的结构文件。
-2. 打开 **Plugin → PymolPlugins: Structure Annotator**，在 **Open from** 选择本机或已有 SSH 主机，选择 `sum_scores.csv`，点击 **Open**。结构列选 `structure_path`；需要 ID 身份时将导入选项的 **Row ID column** 设为 `id`。
+2. 打开 **Plugin → PymolPlugins: Structure Annotator**，在 **Open from** 选择本机或已有 SSH 主机，选择 bundle 文件夹或 `sum_scores.csv`，点击 **Open**。插件会使用 `structure_path`；需要 ID 身份时将导入选项的 **Row ID column** 设为 `id`。
 3. 在 **Review** 查看结构、选定的评分列和代表性 `label`。选择人工标签，点击 **Save and next**；稍后可用 **Data → Continue last review** 继续。
 4. 如需交接，使用 **Data → Export review handoff…** 导出进度与标签摘要；它不包含结构文件。导出带标注的表格时选择新的输出路径。
 

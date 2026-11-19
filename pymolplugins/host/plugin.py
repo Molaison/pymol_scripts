@@ -674,9 +674,22 @@ def show_updates_from_toolkit():
     show_updates()
 
 
+def pp_wizard(topic="welcome"):
+    """Open the toolkit introduction and step-by-step guide.
+
+    Args:
+        topic: welcome, data, review, tools, or finish.
+    Returns:
+        The shared modeless Qt wizard.
+    """
+    from .wizard import show_wizard
+    return show_wizard(topic)
+
+
 def __init_plugin__(app=None):
     from pymol.plugins import addmenuitemqt
 
+    addmenuitemqt("PymolPlugins: Getting Started", pp_wizard)
     addmenuitemqt("PymolPlugins: Load Toolkit", pp_load)
     addmenuitemqt("PymolPlugins: Doctor", pp_doctor)
     addmenuitemqt("PymolPlugins: Capabilities", pp_capabilities)
@@ -699,6 +712,7 @@ _register_host_command("pp_load", pp_load)
 _register_host_command("pp_doctor", pp_doctor)
 _register_host_command("pp_capabilities", pp_capabilities)
 _register_host_command("pp_help", pp_help)
+_register_host_command("pp_wizard", pp_wizard)
 _register_host_command("pp_review_groups", pp_review_groups)
 
 try:

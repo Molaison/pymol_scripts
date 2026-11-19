@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--child", action="store_true")
 parser.add_argument("--align-probe", action="store_true")
+parser.add_argument("--workflow-stage", choices=["bundle", "chains", "presets"])
 parser.add_argument("--plugin-root", type=Path, help="Validate an installed package instead of source")
 parser.add_argument("--output", type=Path, default=ROOT / "output/17_step_presets")
 args = parser.parse_args()
@@ -113,6 +114,10 @@ if not args.child:
     print(json.dumps(launch), flush=True)
     raise SystemExit(launch["exit_code"])
 
+import faulthandler
+fault_log = (OUTPUT / "03_native_fault.log").open("w", encoding="utf-8")
+faulthandler.enable(fault_log)
+
 from pymol import cmd, gui, invocation
 from pymol.Qt import QtCore, QtWidgets
 from PyQt5.QtTest import QTest
@@ -198,6 +203,8 @@ try:
         # Two candidate files in a translated frame make alignment movement observable.
         reference_path = directory / "reference.pdb"
         cmd.save(str(reference_path), "fixture")
+        if args.workflow_stage == "chains":
+            cmd.translate([0, 3, 0], "fixture and chain D")
         cmd.translate([12, 6, 0], "fixture")
         candidate_paths = [directory / "candidate_a.pdb", directory / "candidate_b.pdb"]
         for path in candidate_paths:
@@ -246,7 +253,114 @@ try:
         assert first != second
         cmd.set_view(camera)
         report["checks"]["hidden_desktop_render_updates"] = "passed"
+        if args.workflow_stage == "bundle":
+            panel.id_column_edit.setText("id")
+            panel.main_tabs.setCurrentIndex(1)
+            app.processEvents()
+            panel.main_tabs.currentWidget().ensureWidgetVisible(panel.bundle_check_btn)
+            assert panel.bundle_check_btn.isVisible()
+            flush_writes()
+            scene_before = cmd.get_session("", partial=1, quiet=1, binary=1)["names"]
+            files_before = {path.name: path.read_bytes() for path in directory.glob("*")
+                            if path.suffix in {".csv", ".pdb", ".json"}}
+            QTest.mouseClick(panel.bundle_check_btn, QtCore.Qt.LeftButton)
+            wait_for(app, lambda: not panel._csv_task_id)
+            checked = panel._bundle_check_dialog.report
+            assert checked["errors"] == 0 and checked["paths_checked"] == 4, checked
+            assert cmd.get_session("", partial=1, quiet=1, binary=1)["names"] == scene_before
+            assert all((directory / name).read_bytes() == data for name, data in files_before.items())
+            assert panel._bundle_check_dialog.grab().save(str(OUTPUT / "05_bundle_check.png"))
+            report["checks"]["bundle_check"] = checked
+            report["checks"]["read_only_scene_and_files"] = "passed"
+            panel._bundle_check_dialog.close()
+            broken = dict(review, display_columns=["missing_column"],
+                          filter_presets=[{"name": "bad", "expression": "missing_score > 1"}])
+            review_path.write_text(json.dumps(broken), encoding="utf-8")
+            rows[1].update(id=rows[0]["id"], structure_path="missing.pdb", reference_path="")
+            with table.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=columns)
+                writer.writeheader()
+                writer.writerows(rows)
+            broken_before = (table.read_bytes(), review_path.read_bytes())
+            QTest.mouseClick(panel.bundle_check_btn, QtCore.Qt.LeftButton)
+            wait_for(app, lambda: not panel._csv_task_id)
+            broken_report = panel._bundle_check_dialog.report
+            assert broken_report["errors"] >= 4, broken_report
+            assert broken_before == (table.read_bytes(), review_path.read_bytes())
+            assert cmd.get_session("", partial=1, quiet=1, binary=1)["names"] == scene_before
+            panel._bundle_check_dialog.grab().save(str(OUTPUT / "06_bundle_errors.png"))
+            report["checks"]["invalid_bundle"] = broken_report
+            panel._bundle_check_dialog.close()
+            panel.close()
+            flush_writes()
+            report["status"] = "passed"
+            raise SystemExit(0)
         # An unrelated object and a manual selection must survive every preset.
+        if args.workflow_stage == "presets":
+            panel.step_cmd_edit.clear()
+            assert panel._apply_commands()
+            dialog = ai_widgets.AICommandDialog(panel)
+            dialog.show()
+            dialog.preset_combo.setCurrentIndex(dialog.preset_combo.findData("review_fixed_view"))
+            QTest.mouseClick(dialog.preset_button, QtCore.Qt.LeftButton)
+            edited = dialog.preview_editors["on_open"].toPlainText() + "\ncolor salmon, {candidate}"
+            dialog.preview_editors["on_open"].setPlainText(edited)
+            before_style = atom_style(annotation.STATE.current_object)
+            before_camera = cmd.get_view()
+            QtCore.QTimer.singleShot(100, lambda: QTest.mouseClick(
+                app.activeModalWidget().button(QtWidgets.QMessageBox.No), QtCore.Qt.LeftButton))
+            QTest.mouseClick(dialog.apply_view_button, QtCore.Qt.LeftButton)
+            assert not annotation.STATE.step_cmd and not panel.step_cmd_edit.toPlainText()
+            assert atom_style(annotation.STATE.current_object) == before_style
+
+            def name_preset():
+                box = app.activeModalWidget()
+                assert isinstance(box, QtWidgets.QInputDialog)
+                box.setTextValue("My target review")
+                box.accept()
+
+            QtCore.QTimer.singleShot(100, name_preset)
+            QTest.mouseClick(dialog.save_preset_button, QtCore.Qt.LeftButton)
+            assert dialog.preset_combo.findData("saved:My target review") >= 0
+            app.processEvents()
+            assert dialog.grab().save(str(OUTPUT / "10_saved_preset.png"))
+            dialog.close()
+            dialog = ai_widgets.AICommandDialog(panel)
+            dialog.show()
+            dialog.preset_combo.setCurrentIndex(dialog.preset_combo.findData("saved:My target review"))
+            QTest.mouseClick(dialog.preset_button, QtCore.Qt.LeftButton)
+            assert dialog.preview_editors["on_open"].toPlainText() == edited
+            QtCore.QTimer.singleShot(100, confirm_insert)
+            QTest.mouseClick(dialog.apply_view_button, QtCore.Qt.LeftButton)
+            wait_for(app, lambda: not panel._csv_task_id and panel._pending_navigation is None)
+            assert annotation.STATE.step_cmd == edited
+            assert all(color == cmd.get_color_index("salmon") for color, _ in atom_style(annotation.STATE.current_object))
+            assert max(abs(a-b) for a, b in zip(before_camera, cmd.get_view())) < 1e-5
+            navigate(panel, 1)
+            assert all(color == cmd.get_color_index("salmon") for color, _ in atom_style(annotation.STATE.current_object))
+            assert float(abs(cmd.get_coords(reference) - ref_coords).max()) == 0
+            panel.step_cmd_edit.setPlainText(edited + "\ncolor teal, {candidate}")
+            QtCore.QTimer.singleShot(100, confirm_insert)
+            panel._apply_commands_and_view()
+            wait_for(app, lambda: not panel._csv_task_id and panel._pending_navigation is None)
+            assert all(color == cmd.get_color_index("teal") for color, _ in atom_style(annotation.STATE.current_object))
+            capture("11_applied_view.png")
+            panel.close()
+            flush_writes()
+            annotation.STATE = annotation.AnnotatorState(preload_enabled=False)
+            panel = annotation.show_structure_annotator_panel()
+            open_table(panel, table, app, QTest, QtCore.Qt)
+            assert "color teal" in panel.step_cmd_edit.toPlainText()
+            assert "My target review" in ai_widgets.AICommandDialog(panel).saved_presets
+            assert all(path.read_bytes() == content for path, content in originals.items())
+            assert review_path.read_bytes() == review_bytes
+            report["checks"].update(cancel_changes_nothing="passed", named_preset_reopen="passed",
+                                     apply_view_switch_and_override_reopen="passed", source_files_unchanged="passed")
+            panel.close()
+            flush_writes()
+            report["status"] = "passed"
+            raise SystemExit(0)
+
         cmd.load(str(reference_path), "unrelated")
         cmd.hide("everything", "unrelated")
         cmd.color("magenta", "unrelated")
@@ -254,9 +368,9 @@ try:
         selection_names = cmd.get_names("selections")
         manual_members = cmd.index("manual_selection")
         external_style = atom_style("unrelated")
-        for number, name in enumerate(
-            ["review_fixed_view", "ppi_surface", "reference_overlay", "reference_align"], 5
-        ):
+        preset_names = (["ppi_surface", "reference_target_align"] if args.workflow_stage == "chains"
+                        else ["review_fixed_view", "ppi_surface", "reference_overlay", "reference_align"])
+        for number, name in enumerate(preset_names, 5):
             panel.step_cmd_edit.clear()
             assert panel._apply_commands()
             navigate(panel, 0)
@@ -272,9 +386,24 @@ try:
                 assert dialog.reference_row.isVisible()
                 assert dialog.reference_combo.count() == 2
                 dialog.reference_combo.setCurrentIndex(dialog.reference_combo.findData("reference"))
+            if args.workflow_stage == "chains":
+                if name == "reference_target_align":
+                    QTest.mouseClick(dialog.preset_button, QtCore.Qt.LeftButton)
+                    assert not dialog.insert_button.isEnabled()
+                    assert "Choose an existing protein chain" in dialog.status.text()
+                dialog.target_chain_combo.setCurrentIndex(dialog.target_chain_combo.findData("A"))
+                dialog.binder_chain_combo.setCurrentIndex(dialog.binder_chain_combo.findData("A"))
+                QTest.mouseClick(dialog.preset_button, QtCore.Qt.LeftButton)
+                assert "different chains" in dialog.status.text()
+                dialog.binder_chain_combo.setCurrentIndex(dialog.binder_chain_combo.findData("D"))
+                dialog.reference_chain_combo.setCurrentIndex(dialog.reference_chain_combo.findData("A"))
             QTest.mouseClick(dialog.preset_button, QtCore.Qt.LeftButton)
             assert dialog.insert_button.isEnabled(), dialog.status.text()
             recipe = dialog.preview_editors["on_open"].toPlainText()
+            if name == "reference_target_align":
+                assert 'chain "A" and name CA' in recipe and 'chain "D"' in recipe
+                app.processEvents()
+                dialog.grab().save(str(OUTPUT / "10_chain_draft.png"))
             assert atom_style(candidate) == style and atom_style(reference) == reference_style
             assert cmd.get_view() == camera and not annotation.STATE.step_cmd
             assert float(abs(cmd.get_coords(candidate) - before).max()) == 0
@@ -293,9 +422,15 @@ try:
             candidate = annotation.STATE.current_object
             moved = float(abs(cmd.get_coords(candidate) - before).max())
             assert float(abs(cmd.get_coords(reference) - ref_coords).max()) == 0
-            if name == "reference_align":
+            if name in {"reference_align", "reference_target_align"}:
                 assert moved > 5
-                assert cmd.rms_cur(candidate + " and name CA", reference + " and name CA") < 0.01
+                fit = " and chain A" if name == "reference_target_align" else ""
+                delta = cmd.get_coords(candidate + fit + " and name CA") - cmd.get_coords(reference + fit + " and name CA")
+                assert float((delta * delta).sum(axis=1).mean() ** 0.5) < 0.01
+                if fit:
+                    binder_delta = cmd.get_coords(candidate + " and chain D") - cmd.get_coords(reference + " and chain D")
+                    assert float(abs(binder_delta - [0, 3, 0]).max()) < 0.01
+                    report["checks"]["binder_pose_preserved_3A"] = "passed"
             else:
                 assert moved == 0
             if name in {"review_fixed_view", "reference_overlay"}:
@@ -303,13 +438,15 @@ try:
             if name == "ppi_surface":
                 assert any(reps & 4 for _, reps in atom_style(candidate))
             expected_selections = set(selection_names)
-            if name == "reference_align":
+            if name in {"reference_align", "reference_target_align"}:
                 expected_selections.update(("_align1", "_align2"))
                 report["checks"]["native_alignment_selections"] = ["_align1", "_align2"]
             assert set(cmd.get_names("selections")) == expected_selections
             assert cmd.index("manual_selection") == manual_members
             assert atom_style("unrelated") == external_style
             capture(f"{number:02d}_{name}.png")
+            report["progress"] = name + ": switching candidate"
+            (OUTPUT / "01_result.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
             switch_camera = cmd.get_view()
             navigate(panel, 1)
             switched = annotation.STATE.current_object
@@ -318,12 +455,39 @@ try:
             assert float(abs(cmd.get_coords(reference) - ref_coords).max()) == 0
             if name in {"review_fixed_view", "reference_overlay"}:
                 assert max(abs(a-b) for a, b in zip(switch_camera, cmd.get_view())) < 1e-5
-            if name == "reference_align":
-                assert cmd.rms_cur(switched + " and name CA", reference + " and name CA") < 0.01
+            if name in {"reference_align", "reference_target_align"}:
+                fit = " and chain A" if name == "reference_target_align" else ""
+                observed = {}
+                cmd.iterate("all", "observed.setdefault(model, set()).add(chain)", space={"observed": observed})
+                report["switch_objects"] = {"current": switched, "chains": {key: sorted(value) for key, value in observed.items()}}
+                delta = cmd.get_coords(switched + fit + " and name CA") - cmd.get_coords(reference + fit + " and name CA")
+                assert float((delta * delta).sum(axis=1).mean() ** 0.5) < 0.01
+                if fit:
+                    binder_delta = cmd.get_coords(switched + " and chain D") - cmd.get_coords(reference + " and chain D")
+                    assert float(abs(binder_delta - [0, 3, 0]).max()) < 0.01
             report["presets"][name] = {"commands": recipe, "candidate_max_movement": moved,
                                       "reference_max_movement": 0, "candidate_switch": "passed",
                                       "status": "passed"}
             dialog.deleteLater()
+
+        if args.workflow_stage == "chains":
+            loaded_names = set()
+            for index in range(12):
+                navigate(panel, index % 2)
+                loaded = annotation.STATE.current_object
+                assert loaded not in loaded_names
+                loaded_names.add(loaded)
+                delta = cmd.get_coords(loaded + " and chain A and name CA") - cmd.get_coords(reference + " and chain A and name CA")
+                assert float((delta * delta).sum(axis=1).mean() ** 0.5) < 0.01
+            report["checks"]["twelve_aligned_reload_names"] = "passed"
+            assert all(path.read_bytes() == content for path, content in originals.items())
+            report["progress"] = "chains: closing panel"
+            (OUTPUT / "01_result.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+            panel.close()
+            flush_writes()
+            report["checks"]["source_files_unchanged"] = "passed"
+            report["status"] = "passed"
+            raise SystemExit(0)
 
         candidate = annotation.STATE.current_object
         context = ai_widgets.current_context(panel)

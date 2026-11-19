@@ -23,7 +23,7 @@ import traceback
 import sys
 from pymolplugins.annotation.filtering import compile_filter
 from pymolplugins.annotation.persistence import pending_errors, submit_write
-from pymolplugins.annotation.sources.csv_source import CsvReadCancelled, read_csv_header
+from pymolplugins.annotation.sources.csv_source import CsvReadCancelled, CsvSourceError, read_csv_header
 from pymolplugins.annotation.review_config import default_fields, decode_value, field_key, missing_required, validate_fields, validate_score_config
 from pymolplugins.annotation.review_steps import ReviewObjects, effective_steps, validate_steps
 from pymolplugins.annotation.scene_groups import CandidateBundles, ancestors, candidates as scene_candidates, delete_owned, group_parents, write_manifest
@@ -1540,6 +1540,9 @@ def _resolve_annotation_path(path: str) -> str:
     return path
 
 
+_candidate_load_serial = globals().get("_candidate_load_serial", 0)
+
+
 def _object_name_for_index(path: str, index: int) -> str:
     base = os.path.basename(path)
     base_lower = base.lower()
@@ -1562,7 +1565,11 @@ def _object_name_for_index(path: str, index: int) -> str:
     digest = hashlib.sha1(
         identity.encode("utf-8", errors="surrogatepass")
     ).hexdigest()[:8]
-    return f"{OBJECT_PREFIX}_{index + 1:05d}_{base_token}_{digest}"
+    prefix = f"{OBJECT_PREFIX}_{index + 1:05d}_{base_token}_{digest}_load"
+    for name in STATE.managed_objects:
+        if name.startswith(prefix):
+            return name
+    return prefix + str(_candidate_load_serial + 1)
 
 
 def _object_exists(object_name: str) -> bool:
@@ -2321,6 +2328,7 @@ def _ensure_candidate_loaded(
     run_commands: bool = True,
     existing=None,
 ) -> Optional[str]:
+    global _candidate_load_serial
     if not STATE.files:
         return None
     index = index % len(STATE.files)
@@ -2331,6 +2339,11 @@ def _ensure_candidate_loaded(
         raise RuntimeError("Candidate name already belongs to the scene: " + obj_name)
 
     if obj_name not in existing:
+        # PyMOL can retain invalid named selections after an aligned object is
+        # deleted. Give each actual load a fresh name; live objects keep theirs.
+        if obj_name in STATE.managed_objects:
+            STATE.managed_objects.remove(obj_name)
+            obj_name = _object_name_for_index(path, index)
         load_path = path
         if STATE.entries:
             materialized = _materialize_index(
@@ -2354,6 +2367,7 @@ def _ensure_candidate_loaded(
         if obj_name not in STATE.managed_objects:
             STATE.managed_objects.append(obj_name)
         try:
+            _candidate_load_serial += 1
             # Step commands own the camera; loading must not preempt keep-view recipes.
             cmd.load(load_path_resolved, obj_name, quiet=1, zoom=0)
         except Exception:
@@ -3335,6 +3349,29 @@ def _prepare_csv_preview(
     )
 
 
+def _prepare_review_bundle_check(csv_path, *, cancel_event=None, progress=None, **options):
+    from .review_check import check_bundle
+    canonical = normalize_source_path(csv_path)
+    before = _csv_file_fingerprint(canonical, cancel_event=cancel_event)
+    mapping = {key: options[key] for key in
+               ("mapping_profile", "stage_root", "stage_alias", "target_format", "wsl_distribution")
+               if key in options}
+    mapping.setdefault("mapping_profile", DEFAULT_PROFILE_NAME)
+
+    def resolve(dataset):
+        return _resolve_csv_dataset(dataset, read_only_mappings=True,
+                                    cancel_event=cancel_event, **mapping)
+
+    arguments = {key: options[key] for key in
+                 ("path_column", "id_column", "encoding", "delimiter", "source_base")
+                 if key in options}
+    report = check_bundle(canonical, resolve_dataset=resolve, cancel_event=cancel_event,
+                          progress=progress, **arguments)
+    if _csv_file_fingerprint(canonical, cancel_event=cancel_event) != before:
+        raise RuntimeError("CSV changed during bundle check; retry")
+    return report
+
+
 def _prepare_csv_header(csv_path, encoding=DEFAULT_ENCODING, delimiter=AUTO_DELIMITER,
                         *, cancel_event=None, progress=None, prefer_saved=False):
     _check_csv_preparation_cancelled(cancel_event)
@@ -3351,6 +3388,43 @@ def _prepare_csv_header(csv_path, encoding=DEFAULT_ENCODING, delimiter=AUTO_DELI
     header["input_delimiter"] = delimiter
     _check_csv_preparation_cancelled(cancel_event)
     return header
+
+
+_STRUCTURE_PATH_HEADERS = ("structure_path", "structure_file", "pdb_path", "file_path")
+
+
+def _find_folder_table(path, *, cancel_event=None):
+    """Find the canonical bundle or a uniquely identifiable structure table."""
+    folder = normalize_source_path(path)
+    if is_ssh_path(folder):
+        remote = parse_ssh_path(folder)
+        entries = SshClient(remote).list_directory(cancel_event=cancel_event)["entries"]
+        files = {entry["name"]: remote.at(entry["path"]).uri for entry in entries if entry.get("file")}
+    else:
+        with os.scandir(_long_path(folder)) as entries:
+            files = {entry.name: os.path.join(folder, entry.name) for entry in entries if entry.is_file()}
+    tables = {name: file for name, file in files.items() if name.lower().endswith((".csv", ".tsv", ".tab"))}
+    canonical = next((file for name, file in tables.items() if name.lower() == "sum_scores.csv"), "")
+    if canonical or not tables:
+        return canonical
+    config = read_review_file(next(iter(tables.values())), cancel_event=cancel_event).config
+    configured = config.get("path_column")
+    headers = (configured,) if configured else _STRUCTURE_PATH_HEADERS
+    matches = []
+    for name, file in tables.items():
+        _check_csv_preparation_cancelled(cancel_event)
+        try:
+            columns = read_csv_header(file if is_ssh_path(file) else _long_path(file),
+                                      cancel_event=cancel_event)["columns"]
+        except CsvReadCancelled:
+            raise
+        except CsvSourceError:
+            continue
+        if any(header in columns for header in headers):
+            matches.append(name)
+    if len(matches) > 1:
+        raise ValueError("Several structure tables found. Open a table directly: " + ", ".join(sorted(matches)))
+    return tables[matches[0]] if matches else ""
 
 
 def _prepare_csv_load(
@@ -3907,15 +3981,20 @@ class _PreparedDirectoryLoad:
     state_path: str
 
 
-def _prepare_directory_load(path, pattern, runtime, *, restore_saved=True,
+def _prepare_directory_load(path, pattern, runtime, *, restore_saved=True, detect_table=False,
                             cancel_event=None, progress=None):
     """Discover files and read legacy annotations without accessing live STATE."""
     directory = normalize_source_path(path)
     _check_csv_preparation_cancelled(cancel_event)
-    saved = _read_persisted_dataset_state(directory, "directory") if restore_saved else None
+    if detect_table:
+        table = _find_folder_table(directory, cancel_event=cancel_event)
+        if table:
+            return table
+    saved = _read_persisted_dataset_state(directory, "directory")
     config = dict(runtime.config)
-    if saved:
+    if saved and restore_saved:
         config.update(saved["config"])
+    config["filter_presets"] = (saved or {}).get("config", {}).get("filter_presets", [])
     config["pattern"] = str(pattern or (saved or {}).get("config", {}).get("pattern") or STRUCTURE_PATTERN)
     if is_ssh_path(directory):
         from .sources.ssh_source import load_ssh_directory
@@ -3936,7 +4015,7 @@ def _prepare_directory_load(path, pattern, runtime, *, restore_saved=True,
     entries = tuple(entry for entry in all_entries if not config["skip_annotated"] or entry.id not in annotated)
     if not entries:
         raise ValueError("All matching structures are already annotated. Disable 'Skip annotated structures' to reopen them.")
-    position = (saved or {}).get("position")
+    position = (saved or {}).get("position") if restore_saved else None
     if not restore_saved and runtime.source_mode == "directory" and _path_identity(directory) == _path_identity(runtime.dataset_dir):
         position = {"index": runtime.index, "entry_id": runtime.entry_id}
     index = _resume_index(directory, [entry.source_path for entry in entries], position, entries)
@@ -3972,7 +4051,6 @@ def _commit_prepared_directory_load(plan):
         STATE.steps = []
         STATE.step_assets = {}
         STATE.step_materialized = {}
-        STATE.filter_presets = []
         STATE.sampling = {}
         STATE.filtered_count = len(plan.entries)
         STATE.display_columns = []
@@ -4128,7 +4206,8 @@ def sa_load_groups(parent: str = "", review_path: str = "scene-review.json", res
         STATE.reference_column, STATE.steps = "", []
         STATE.step_assets, STATE.step_materialized, STATE.materialized_paths = {}, {}, {}
         STATE.filter_text, STATE.sort_column = "", ""
-        STATE.filter_presets, STATE.sampling, STATE.display_columns = [], {}, []
+        STATE.filter_presets = (saved or {}).get("config", {}).get("filter_presets", [])
+        STATE.sampling, STATE.display_columns = {}, []
         STATE.dataset = AnnotationDataset("groups", path, os.path.dirname(path), entries,
                                           columns=("group",))
         STATE.all_entries, STATE.filtered_count = list(entries), len(entries)
@@ -5790,7 +5869,44 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.filter_error_label.hide()
         self.filter_dialog.show()
         self.filter_dialog.raise_()
+        self.filter_dialog.activateWindow()
         self.filter_edit.setFocus()
+
+    def _show_new_filter_group(self):
+        self._show_filters()
+        if self.filter_mode_combo.currentIndex() == 0:
+            self.filter_edit.clear()
+        self.filter_mode_combo.setCurrentIndex(1)
+        self._refresh_filter_presets(preferred="")
+
+    def _add_filter_condition(self):
+        from .qt_widgets import filter_condition_dialog
+
+        if STATE.dataset is None or not STATE.dataset.columns:
+            return
+        edit = self.filter_edit
+        condition = filter_condition_dialog(self.filter_dialog, STATE.dataset.columns)
+        if not condition:
+            return
+        if not edit.hasSelectedText() and edit.cursorPosition() == len(edit.text()) and edit.text().strip():
+            try:
+                compile_filter(edit.text(), STATE.dataset.columns)
+            except ValueError:
+                pass
+            else:
+                condition = ("and " if edit.text()[-1].isspace() else " and ") + condition
+        edit.insert(condition)
+        edit.setFocus()
+
+    def _group_filter_conditions(self):
+        edit = self.filter_edit
+        if not edit.hasSelectedText():
+            edit.selectAll()
+        selected = edit.selectedText()
+        edit.insert("(" + selected + ")")
+        if not selected:
+            edit.setCursorPosition(edit.cursorPosition() - 1)
+        edit.setFocus()
 
     def _apply_filters(self):
         try:
@@ -5805,9 +5921,9 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._apply_view()
 
     def _refresh_filter_presets(self, preferred=None):
-        table = STATE.source_mode == "csv" and STATE.dataset is not None
-        self.filter_group_row.setVisible(table)
-        self.filter_group_label.setVisible(table)
+        has_dataset = STATE.dataset is not None
+        self.filter_group_row.setVisible(has_dataset)
+        self.filter_group_label.setVisible(has_dataset)
         query = self.filter_edit.text().strip()
         self.filter_preset_combo.blockSignals(True)
         self.filter_preset_combo.clear()
@@ -5823,7 +5939,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.filter_preset_combo.setCurrentIndex(selected)
         self.filter_preset_combo.blockSignals(False)
         self.filter_delete_button.setEnabled(bool(selected))
-        self.filter_save_button.setEnabled(table and self.filter_mode_combo.currentIndex() == 1)
+        self.filter_save_button.setEnabled(has_dataset and self.filter_mode_combo.currentIndex() == 1)
         self._refresh_filter_button()
 
     def _refresh_filter_button(self):
@@ -5849,9 +5965,9 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
 
     def _save_filter_preset(self):
         from .filtering import validate_filter_presets
-        if STATE.dataset is None or STATE.source_mode != "csv":
+        if STATE.dataset is None:
             return
-        name, accepted = QtWidgets.QInputDialog.getText(self.filter_dialog, "Save filter", "Name",
+        name, accepted = QtWidgets.QInputDialog.getText(self.filter_dialog, "Save filter group", "Name",
                                                        text=self.filter_preset_combo.currentData() or "")
         if not accepted:
             return
@@ -5897,6 +6013,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             action.triggered.connect(lambda _checked=False, name=preset["name"]: self._apply_filter_preset(name))
         self.filter_menu.addSeparator()
         self.filter_menu.addAction("Edit filters…", self._show_filters)
+        self.filter_menu.addAction("New filter group…", self._show_new_filter_group).setEnabled(STATE.dataset is not None)
 
     def _apply_filter_preset(self, name):
         self._refresh_filter_presets(preferred=name)
@@ -6295,7 +6412,9 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
     def _filter_mode_changed(self, *args):
         conditions = self.filter_mode_combo.currentIndex() == 1
         if hasattr(self, "filter_save_button"):
-            self.filter_save_button.setEnabled(conditions and STATE.source_mode == "csv" and STATE.dataset is not None)
+            self.filter_save_button.setEnabled(conditions and STATE.dataset is not None)
+        if hasattr(self, "filter_expression_tools"):
+            self.filter_expression_tools.setVisible(conditions)
         self.filter_edit.setPlaceholderText('For example: AC.iptm >= 0.8 and full_pass == True' if conditions else "Search row values")
         if "filter" in self._column_bindings:
             self._column_bindings["filter"].enabled = conditions
@@ -6525,7 +6644,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.delimiter_combo.setCurrentText(str(result["input_delimiter"]))
         path_column = self.path_column_edit.text() or source.get("path_column", "")
         if path_column not in columns:
-            path_column = next((name for name in ("structure_path", "structure_file", "pdb_path", "file_path") if name in columns), "")
+            path_column = next((name for name in _STRUCTURE_PATH_HEADERS if name in columns), "")
         self.path_column_edit.setText(path_column)
         self.id_column_edit.setText(self.id_column_edit.text() or str(source.get("id_column") or ""))
         self.label_column_edit.setText(self.label_column_edit.text() or str(source.get("label_column") or (saved.get("config") or {}).get("label_column") or ""))
@@ -6628,6 +6747,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.csv_preview_btn.setText("Check file paths")
         self.source_open_button.setText("Open")
         self.csv_preview_btn.setEnabled(csv_mode and not busy)
+        self.bundle_check_btn.setEnabled(csv_mode and not busy)
         self.source_open_button.setEnabled(not busy and bool(self.source_path_edit.text().strip()))
         if busy and self._csv_task_kind == "preview":
             self.csv_preview_btn.setText("Cancel preview")
@@ -6743,7 +6863,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._source_mode_changed()
         self.status_label.setText(
             {"headers": "Reading column names…", "load": "Reading CSV and preparing the first structure…",
-             "preview": "Checking CSV paths…", "view": "Applying filter and sort…",
+             "preview": "Checking CSV paths…", "check": "Checking review bundle…",
+             "view": "Applying filter and sort…",
              "steps": "Preparing review objects; Cancel keeps the current step unchanged…",
              "directory": "Scanning folder and reading existing annotations…",
              "annotations": "Saving selected annotations…", "annotation_undo": "Undoing annotations…"}[kind]
@@ -6830,6 +6951,22 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             self._accept_csv_header(result)
             self._source_mode_changed()
             return
+        if kind == "directory" and isinstance(result, str):
+            self._clear_csv_task()
+            path = self.source_location.set_source(result)
+            self._set_source_type_for_path(path, "csv")
+            self.source_path_edit.setText(path)
+            self._pending_csv_action = "load"
+            self._set_csv_source_widgets(result)
+            return
+        if kind == "check":
+            self._clear_csv_task()
+            from .review_check_widgets import ReviewCheckDialog
+            self._bundle_check_dialog = ReviewCheckDialog(result, self)
+            self._bundle_check_dialog.show()
+            self.status_label.setText(
+                f"Bundle check: {result['errors']} errors, {result['warnings']} warnings.")
+            return
         if kind == "view":
             try:
                 _commit_prepared_view(result)
@@ -6907,6 +7044,10 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._rebuild_value_controls(sync_to_state=False)
         self._refresh_status()
         self.main_tabs.setCurrentWidget(self.review_tab)
+
+    def _check_review_bundle(self) -> None:
+        if not self._csv_task_id and self._csv_access_ready():
+            self._start_csv_task("check", _prepare_review_bundle_check, self._csv_arguments())
 
     def _preview_csv(self) -> None:
         if self._csv_task_id:
@@ -7140,6 +7281,22 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             self._show_error(str(exc))
             return False
 
+    def _apply_commands_and_view(self, *, confirmed=False):
+        if self._csv_task_id or self._pending_navigation is not None:
+            self._show_error("Wait for the current candidate to finish loading before applying commands.")
+            return False
+        if not confirmed and QtWidgets.QMessageBox.question(
+                self, "Apply commands and view current candidate?",
+                "Apply the edited commands and reload the current candidate?\n"
+                "On-open Review steps will execute. After-label commands are saved for future labels.",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
+            return False
+        if not self._apply_commands():
+            return False
+        self._reload()
+        return True
+
     def _sync_to_state(
         self, update_directory: bool = True, persist: bool = True,
         update_source: bool = False,
@@ -7259,9 +7416,14 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             return
         arguments = self._directory_arguments()
         self._sync_to_state(update_directory=False, persist=False)
+        history = self._history_restore or {}
+        resume_directory = history.get("source_mode") == "directory" and (
+            _path_identity(history["dataset_dir"]) == _path_identity(arguments["path"])
+        )
+        detect_table = self.source_type_combo.currentData() == "auto" and not resume_directory
         self._start_csv_task("directory", _prepare_directory_load, arguments,
                              runtime=_capture_csv_runtime_context(),
-                             worker_arguments=dict(arguments, restore_saved=False))
+                             worker_arguments=dict(arguments, restore_saved=False, detect_table=detect_table))
 
     def _next(self) -> None:
         self._request_navigation(STATE.index + 1)

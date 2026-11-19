@@ -26,11 +26,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 from workspace_helpers import isolate_workspace_settings
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--stage", required=True, choices=["measure", "qualify", "api", "edits", "compare"])
+parser.add_argument("--stage", required=True, choices=["measure", "qualify", "api", "edits", "compare", "repaint"])
 parser.add_argument("--variant", required=True, choices=["before", "after"])
 parser.add_argument("--isolated", action="store_true")
+parser.add_argument("--output", type=Path)
+parser.add_argument("--baseline", default="127c2bf")
 args = parser.parse_args()
-output = ROOT / "output" / "16_group_navigation"
+output = (args.output or ROOT / "output" / "16_group_navigation").resolve()
 output.mkdir(parents=True, exist_ok=True)
 result_name = f"{args.variant}_edits" if args.stage == "edits" else args.variant
 if args.stage == "compare":
@@ -191,7 +193,8 @@ if args.isolated:
         startup = win32process.STARTUPINFO()
         startup.lpDesktop = "winsta0\\" + desktop_name
         command = [sys.executable, "-I", "-u", str(Path(__file__).resolve()),
-                   "--stage", args.stage, "--variant", args.variant]
+                   "--stage", args.stage, "--variant", args.variant,
+                   "--output", str(output), "--baseline", args.baseline]
         process, thread, pid, _ = win32process.CreateProcess(
             sys.executable, subprocess.list2cmdline(command), None, None,
             False, 0x08000000, None, str(ROOT), startup,
@@ -221,9 +224,9 @@ if args.isolated:
 report = {"variant": args.variant, "status": "running", "scenarios": [], "checks": {}}
 source = ROOT / "pymolplugins/navigation/commands.py"
 baseline_source = None
-if args.variant == "before" and args.stage in {"measure", "edits"}:
+if args.variant == "before" and args.stage in {"measure", "edits", "repaint"}:
     baseline_source = subprocess.check_output(
-        ["git", "-C", str(ROOT), "show", "127c2bf:pymolplugins/navigation/commands.py"]
+        ["git", "-C", str(ROOT), "show", args.baseline + ":pymolplugins/navigation/commands.py"]
     )
 report["source_sha256"] = hashlib.sha256(
     baseline_source if baseline_source is not None else source.read_bytes()
@@ -259,6 +262,20 @@ def repaint():
     window.pymolwidget._pymolProcess()
     window.pymolwidget.repaint()
     application.processEvents()
+
+
+def timed_repaint():
+    phases = {}
+    for label, action in (
+        ("events_before", application.processEvents),
+        ("pymol_process", window.pymolwidget._pymolProcess),
+        ("repaint", window.pymolwidget.repaint),
+        ("events_after", application.processEvents),
+    ):
+        began = time.perf_counter()
+        action()
+        phases[label] = (time.perf_counter() - began) * 1000
+    return phases
 
 
 def capture(name):
@@ -381,13 +398,27 @@ try:
             assert nav.pp_nav_next().get("status") != "error"
             repaint()
         navigation_ms, paint_ms, total_ms = [], [], []
+        phase_samples = {}
+        reused_panels = 0
         for _ in range(15):
+            panel_before = window.contentsPanelFrame.content_sa_gb
             began = time.perf_counter()
             result = nav.pp_nav_next()
             applied = time.perf_counter()
             assert result.get("status") != "error", result
-            repaint()
+            if args.stage == "repaint":
+                for label, elapsed in timed_repaint().items():
+                    phase_samples.setdefault(label, []).append(elapsed)
+            else:
+                repaint()
             painted = time.perf_counter()
+            panel_after = window.contentsPanelFrame.content_sa_gb
+            reused_panels += panel_before is panel_after
+            enabled_now = set(cmd.get_names("all", enabled_only=1))
+            for tile in panel_after.object_tile_list:
+                if tile.rec.name in nav._CONTROLLER.managed_names:
+                    assert bool(tile.rec.visible) == (tile.rec.name in enabled_now)
+                    assert tile.radioButton.isChecked() == bool(tile.rec.visible)
             navigation_ms.append((applied - began) * 1000)
             paint_ms.append((painted - applied) * 1000)
             total_ms.append((painted - began) * 1000)
@@ -396,11 +427,15 @@ try:
             "atoms": cmd.count_atoms("all"), "start_ms": start_ms,
             "navigation": summary(navigation_ms), "qt_repaint": summary(paint_ms),
             "total": summary(total_ms),
+            "phases": {label: summary(values) for label, values in phase_samples.items()},
+            "reused_panels": reused_panels,
         }
         profile = cProfile.Profile()
         profile.enable()
         for _ in range(3):
             nav.pp_nav_next()
+            if args.stage == "repaint":
+                repaint()
         profile.disable()
         stats = pstats.Stats(profile)
         scenario["profile_top"] = [
@@ -416,6 +451,51 @@ try:
             f"with Qt repaint {statistics.median(total_ms):.1f} ms"
         )
         scenario["screenshot"] = capture(str(count))
+        if args.variant == "after":
+            panel = window.contentsPanelFrame
+
+            def panel_state():
+                return {
+                    tile.rec.name: (
+                        tile.rec.visible, tile.radioButton.isChecked(),
+                        bool(tile.property("active")),
+                        bool(tile.property("active_group_inactive")),
+                        tile.isVisible(), tile.group_active,
+                    ) for tile in panel.content_sa_gb.object_tile_list
+                }
+
+            state_before = panel_state()
+            panel._populate()
+            repaint()
+            state_after = panel_state()
+            differences = {
+                name: {"fast": value, "native": state_after.get(name)}
+                for name, value in state_before.items() if state_after.get(name) != value
+            }
+            assert not differences, ("Fast panel differs from native rebuild", differences)
+            scenario["native_panel_equivalence"] = "passed"
+            assert not hasattr(panel, "_pp_restore_visibility")
+            if count == 180:
+                panel.grab().save(str(output / "after_objects_panel.png"))
+        if args.stage == "repaint":
+            scenario["probes"] = {}
+            # Change only diagnostic-process settings; never the user's host.
+            for label, setting, value in (
+                ("no_internal_gui", "internal_gui", 0),
+                ("no_scene_updates", "suspend_updates", 1),
+            ):
+                original = cmd.get_setting_int(setting)
+                cmd.set(setting, value)
+                repaint()
+                samples = []
+                for _ in range(3):
+                    began = time.perf_counter()
+                    nav.pp_nav_next()
+                    repaint()
+                    samples.append((time.perf_counter() - began) * 1000)
+                scenario["probes"][label] = summary(samples)
+                cmd.set(setting, original)
+                repaint()
         if count == 60:
             assert nav.pp_nav_stop().get("status") != "error"
             cmd.set("suspend_updates", 1)
@@ -475,6 +555,35 @@ try:
         cmd.sync()
         recovered = nav.pp_nav_next()
         assert recovered.get("status") not in {"error", "stale"}, (name, recovered)
+    if args.stage == "edits" and args.variant == "after":
+        from pymol import gui
+        gui.get_qtwindow = lambda: window
+        nav.pp_nav_goto(4)
+        nav.pp_nav_pin("candidate_177")
+        cmd.do("group candidate_177, model_179")
+        before = scene_state()
+        cursor = nav._CONTROLLER.session.cursor
+        assert nav.pp_nav_next()["status"] == "stale"
+        assert nav.pp_nav_refresh()["status"] == "preview"
+        assert scene_state() == before
+        nav.pp_nav_refresh(dialog=1)
+        dialog = window._pp_group_refresh_dialog
+        application.processEvents()
+        cmd.do("group detail_179, manual_overlay")
+        QTest.mouseClick(dialog.refresh_button, QtCore.Qt.LeftButton)
+        assert not dialog.refresh_button.isEnabled()
+        assert nav._CONTROLLER.session.cursor == cursor
+        dialog.close()
+        nav.pp_nav_refresh(dialog=1)
+        dialog = window._pp_group_refresh_dialog
+        application.processEvents()
+        assert dialog.grab().save(str(output / "08_refresh_changes.png"))
+        QTest.mouseClick(dialog.refresh_button, QtCore.Qt.LeftButton)
+        assert nav._CONTROLLER.session.cursor == cursor
+        assert nav._CONTROLLER.session.pinned_entry_ids == {"group:candidate_177"}
+        assert nav._CONTROLLER.keys_bound
+        assert nav.pp_nav_next().get("status") not in {"error", "stale"}
+        report["checks"]["confirmed_refresh_and_concurrent_edit"] = "passed"
     assert nav.pp_nav_stop().get("status") != "error"
     report["checks"]["repair_then_resume"] = "passed"
     report["binary_setting_after"] = cmd.get_setting_int("pse_binary_dump")

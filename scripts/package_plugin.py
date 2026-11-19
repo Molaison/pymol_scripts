@@ -23,7 +23,8 @@ INSTALL_TEXT = """# 安装 PymolPlugins（{version}）
 
 1. 在 PyMOL 打开 **Plugin > Plugin Manager > Install New Plugin**。
 2. 选择下载的原始 ZIP；不要解压。安装完成后完全退出并重启 PyMOL。
-3. 打开 **Plugin > PymolPlugins: Structure Annotator**。右上角 **?** 随时可查看帮助。无需输入 PyMOL 命令。
+3. 打开 **Plugin > PymolPlugins: Getting Started** 查看五步入门向导与功能介绍。
+   向导中的按钮可直接打开数据和审阅界面；Structure Annotator 右上角 **?** 也可随时重开向导。
 4. 在 **Open from** 选择 **This computer**，或选择已有的 SSH **Host** 别名。
 5. 在 **Path** 粘贴真实的结构文件夹、CSV 或 TSV 路径；也可以用 **Browse…**。
 6. 点 **Open**。一般不用改 **Import options**。如需 **Structure column**，

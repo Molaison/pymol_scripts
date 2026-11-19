@@ -44,6 +44,7 @@ ENUMS = {
     "cgo_policy": ("static", "skip_callback", "rebuild"),
 }
 COMMAND_ENUMS = {
+    ("pp_wizard", "topic"): ("welcome", "data", "review", "tools", "finish"),
     ("pp_group", "action"): ("info", "enable", "disable"),
     ("show_structure_annotator_panel", "mode"): ("docked", "floating"),
     ("pp_show", "mode"): ("show", "hide"),

@@ -88,6 +88,7 @@ sys.modules[updates.__name__] = updates
 bundle = importlib.import_module("pymol_plugins")
 bundle.__init_plugin__()
 assert set(menus) == {
+    "PymolPlugins: Getting Started",
     "PymolPlugins: Load Toolkit", "PymolPlugins: Doctor",
     "PymolPlugins: Capabilities", "PymolPlugins: Command Help",
     "PymolPlugins: Structure Annotator",

@@ -22,6 +22,7 @@ REVIEW_KEYS = ("path_column", "display_columns", "label_column", "reference_colu
 class ReviewFile:
     config: dict
     signatures: tuple
+    layers: tuple = ()
 
 
 def review_paths(table_path):
@@ -101,9 +102,9 @@ def _remote_signature(value):
     return {key: item for key, item in value.items() if key != "content"}
 
 
-def read_review_file(table_path, *, cancel_event=None):
+def read_review_file(table_path, *, cancel_event=None, validate=True):
     """Merge generated defaults then user overrides; absence is optional."""
-    config, signatures = {}, []
+    config, signatures, layers = {}, [], []
     paths = review_paths(table_path)
     if is_ssh_path(table_path):
         remote, remote_paths = _remote_review_paths(table_path)
@@ -113,7 +114,11 @@ def read_review_file(table_path, *, cancel_event=None):
             if value["status"] != "missing":
                 try:
                     raw = json.loads(base64.b64decode(value["content"]).decode("utf-8-sig"))
-                    config.update(validate_review_config(raw, validate_order=False))
+                    layers.append((path, raw))
+                    if validate:
+                        raw = validate_review_config(raw, validate_order=False)
+                    if isinstance(raw, dict):
+                        config.update(raw)
                 except (UnicodeError, ValueError) as exc:
                     raise ValueError(f"Cannot load remote {path}: {exc}") from exc
         paths = paths[1:]
@@ -125,12 +130,17 @@ def read_review_file(table_path, *, cancel_event=None):
         try:
             with open(windows_long_path(path), encoding="utf-8-sig") as handle:
                 raw = json.load(handle)
-            config.update(validate_review_config(raw, validate_order=False))
+            layers.append((path, raw))
+            if validate:
+                raw = validate_review_config(raw, validate_order=False)
+            if isinstance(raw, dict):
+                config.update(raw)
         except (OSError, UnicodeError, ValueError) as exc:
             raise ValueError(f"Cannot load {path}: {exc}") from exc
         if _signature(path) != before:
             raise RuntimeError(f"Review configuration changed while reading: {path}")
-    return ReviewFile(validate_review_config(config), tuple(signatures))
+    return ReviewFile(validate_review_config(config) if validate else config,
+                      tuple(signatures), tuple(layers))
 
 
 def check_review_unchanged(table_path, review, *, cancel_event=None):
