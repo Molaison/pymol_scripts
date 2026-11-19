@@ -16,12 +16,39 @@ def qt_enum(group, name):
 
 
 class ScoresTable(QtWidgets.QTableView):
-    """Keep Shift-wheel horizontal across the table and its header."""
+    """Keep comparison clicks separate from annotation selection."""
+
+    compareRequested = QtCore.Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
         self._wheel_fraction = 0.0
+        self.compare_enabled = False
+        self._handled_press = False
+
+    def mousePressEvent(self, event):
+        ctrl = qt_enum("KeyboardModifier", "ControlModifier")
+        shift = qt_enum("KeyboardModifier", "ShiftModifier")
+        index = self.indexAt(event.pos())
+        if self.compare_enabled and index.isValid() and event.button() == qt_enum("MouseButton", "LeftButton"):
+            if event.modifiers() == ctrl:
+                self._handled_press = True
+                self.compareRequested.emit(index)
+            elif event.modifiers() == (ctrl | shift):
+                self._handled_press = True
+                self.selectionModel().select(index, QtCore.QItemSelectionModel.Toggle | QtCore.QItemSelectionModel.Rows)
+            if self._handled_press:
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._handled_press:
+            self._handled_press = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def scroll_shift_wheel(self, event):
         if not event.modifiers() & qt_enum("KeyboardModifier", "ShiftModifier"):

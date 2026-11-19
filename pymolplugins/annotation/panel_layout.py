@@ -320,6 +320,12 @@ def _quick_views(panel):
             menu.aboutToShow.connect(lambda: panel._fill_mass_view_menu(menu))
             button.setMenu(menu)
             button.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
+    panel.compare_toggle = QtWidgets.QToolButton(panel.quick_views)
+    panel.compare_toggle.setText("Compare")
+    panel.compare_toggle.setCheckable(True)
+    panel.compare_toggle.setProperty("role", "view")
+    panel.compare_toggle.setToolTip("Ctrl+click a candidate to add or remove its comparison overlay.")
+    layout.addWidget(panel.compare_toggle)
     panel.quick_view_status = ElidedLabel()
     panel.quick_view_status.setProperty("role", "muted")
     panel.quick_view_status.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
@@ -358,6 +364,7 @@ def _interface_cavity_controls(panel):
 
 
 def _review_page(panel):
+    from .comparison import ComparisonBar
     from .plugin import _DatasetTableModel, _get_bg_executor
     from .qt_widgets import ScoresTable
     from .score_headers import ScoreProfileHeader
@@ -365,6 +372,9 @@ def _review_page(panel):
     layout = QtWidgets.QVBoxLayout(page)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.addWidget(_quick_views(panel))
+    panel.compare_bar = ComparisonBar(page)
+    panel.compare_toggle.toggled.connect(panel.compare_bar.setVisible)
+    layout.addWidget(panel.compare_bar)
     layout.addWidget(_interface_cavity_controls(panel))
     panel.review_splitter = QtWidgets.QSplitter(qt_enum("Orientation", "Horizontal"))
     candidates = card("candidateCard")
