@@ -5,9 +5,11 @@ from pymol.Qt import QtCore, QtWidgets
 
 
 class CavityControls(QtWidgets.QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, on_toggle=None):
         super().__init__(parent)
         self.checks, self.volumes, self.objects = {}, {}, {}
+        self.on_toggle = on_toggle
+        toggle = on_toggle or self._set_layer
         layout = QtWidgets.QGridLayout(self)
         layout.setContentsMargins(4, 0, 4, 0)
         layout.setVerticalSpacing(2)
@@ -21,7 +23,7 @@ class CavityControls(QtWidgets.QWidget):
             dot.setStyleSheet(f"color: {color};")
             check = QtWidgets.QCheckBox(caption)
             check.setChecked(True)
-            check.toggled.connect(lambda enabled, layer=kind: self._set_layer(layer, enabled))
+            check.toggled.connect(lambda enabled, layer=kind: toggle(layer, enabled))
             volume = QtWidgets.QLabel("—")
             volume.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
             for column, widget in enumerate((dot, check, volume)):
@@ -41,7 +43,8 @@ class CavityControls(QtWidgets.QWidget):
         self.setToolTip(rendered.tooltip)
         for kind, check in self.checks.items():
             self.volumes[kind].setText(f"{rendered.volumes[kind]:.1f} Å³")
-            self._set_layer(kind, check.isChecked())
+            if self.on_toggle is None:
+                self._set_layer(kind, check.isChecked())
 
     def _set_layer(self, kind, visible):
         name = self.objects.get(kind)
