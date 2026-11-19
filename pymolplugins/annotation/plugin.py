@@ -34,11 +34,12 @@ from pymolplugins.annotation.review_actions import save_annotations, undo_annota
 from pymolplugins.annotation.score_summary import prepare_score_summary
 from pymolplugins.annotation.command_templates import format_commands
 from pymolplugins.annotation.review_file import (
-    REVIEW_KEYS, check_review_unchanged, read_review_file, review_paths,
+    REVIEW_KEYS, bundle_table_name, check_review_unchanged, read_review_file, review_paths,
     validate_review_columns, write_review_override,
 )
 from pymolplugins.annotation.path_formats import rewrite_path
 from pymolplugins.targets.commands import _execute_checked
+from pymolplugins.core.source_paths import clean_pasted_path, file_url_path, is_file_url
 from pymolplugins.remote.ssh import (
     SshCancelled, SshClient, SshLocation, is_ssh_path, normalize_source_path,
     parse_ssh_path, ssh_progress,
@@ -3472,9 +3473,21 @@ def _find_folder_table(path, *, cancel_event=None):
             files = {entry.name: os.path.join(folder, entry.name) for entry in entries if entry.is_file()}
     tables = {name: file for name, file in files.items() if name.lower().endswith((".csv", ".tsv", ".tab"))}
     canonical = next((file for name, file in tables.items() if name.lower() == "sum_scores.csv"), "")
-    if canonical or not tables:
+    if not tables:
+        return ""
+    review = read_review_file(canonical or next(iter(tables.values())), cancel_event=cancel_event)
+    for layer, raw in review.layers:
+        if ntpath.basename(layer) == "review.json":
+            named = bundle_table_name(raw)
+            if named in tables:
+                return tables[named]
+            if named and os.name == "nt" and not is_ssh_path(folder):
+                match = next((file for name, file in tables.items() if name.casefold() == named.casefold()), "")
+                if match:
+                    return match
+    if canonical:
         return canonical
-    config = read_review_file(next(iter(tables.values())), cancel_event=cancel_event).config
+    config = review.config
     configured = config.get("path_column")
     headers = (configured,) if configured else _STRUCTURE_PATH_HEADERS
     matches = []
@@ -4054,10 +4067,23 @@ def _prepare_directory_load(path, pattern, runtime, *, restore_saved=True, detec
     """Discover files and read legacy annotations without accessing live STATE."""
     directory = normalize_source_path(path)
     _check_csv_preparation_cancelled(cancel_event)
-    if detect_table:
+    selected_file = None
+    selected_manifest = False
+    if not is_ssh_path(directory) and os.path.isfile(_long_path(directory)):
+        basename = os.path.basename(directory)
+        if re.fullmatch(STRUCTURE_PATTERN, basename, re.IGNORECASE):
+            selected_file, directory = directory, os.path.dirname(directory)
+        elif detect_table and basename.lower() == "review.json":
+            directory = os.path.dirname(directory)
+            selected_manifest = True
+        else:
+            raise ValueError("Open a folder, a score table, review.json, or a PDB/CIF structure.")
+    if detect_table and selected_file is None:
         table = _find_folder_table(directory, cancel_event=cancel_event)
         if table:
             return table
+        if selected_manifest:
+            raise ValueError("No score table found beside review.json.")
     saved = _read_persisted_dataset_state(directory, "directory")
     config = dict(runtime.config)
     if saved and restore_saved:
@@ -4070,8 +4096,8 @@ def _prepare_directory_load(path, pattern, runtime, *, restore_saved=True, detec
         all_entries = list(remote_dataset.entries)
         baseline = {}
     else:
-        files = _list_structure_files(directory, config["pattern"], config["prefer_gz"],
-                                      cancel_event=cancel_event, progress=progress)
+        files = [selected_file] if selected_file else _list_structure_files(
+            directory, config["pattern"], config["prefer_gz"], cancel_event=cancel_event, progress=progress)
         all_entries = _directory_entries(directory, files)
         baseline = _directory_annotation_baseline(all_entries, cancel_event=cancel_event, progress=progress)
     if not all_entries:
@@ -4080,7 +4106,7 @@ def _prepare_directory_load(path, pattern, runtime, *, restore_saved=True, detec
     values = store.snapshot()
     review_fields = config.get("annotation_fields") or default_fields(normalize_label_key(config["label_name"]), _split_values(config["values_text"]))
     annotated = frozenset(entry.id for entry in all_entries if _reviewed(review_fields, values.get(entry.id, {})))
-    entries = tuple(entry for entry in all_entries if not config["skip_annotated"] or entry.id not in annotated)
+    entries = tuple(entry for entry in all_entries if selected_file or not config["skip_annotated"] or entry.id not in annotated)
     if not entries:
         raise ValueError("All matching structures are already annotated. Disable 'Skip annotated structures' to reopen them.")
     position = (saved or {}).get("position") if restore_saved else None
@@ -5409,6 +5435,10 @@ class _HistoryCompletionFilter(QtCore.QObject if _HAS_QT_ASYNC else object):
         if event.type() != QtCore.QEvent.KeyPress:
             return super().eventFilter(obj, event)
         popup = self.binding.completer.popup()
+        if self.binding.submit is not None and event.key() in (_qt_enum("Key", "Key_Return"), _qt_enum("Key", "Key_Enter")):
+            popup.hide()
+            self.binding.submit()
+            return True
         if popup.isVisible():
             if event.key() in (_qt_enum("Key", "Key_Tab"), _qt_enum("Key", "Key_Return"), _qt_enum("Key", "Key_Enter")):
                 index = popup.currentIndex()
@@ -5430,12 +5460,14 @@ class _HistoryCompletionBinding:
         multiline: bool = False,
         separator: str = "",
         suggestions=None,
+        submit=None,
     ):
         self.widget = widget
         self.field = field
         self.multiline = bool(multiline)
         self.separator = str(separator)
         self.suggestions = suggestions
+        self.submit = submit
         self._accepting = False
         self.model = QtCore.QStringListModel([], widget)
         self.completer = QtWidgets.QCompleter(widget)
@@ -6165,6 +6197,11 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
 
     @staticmethod
     def _detected_source_mode(path):
+        path = clean_pasted_path(path)
+        try:
+            path = file_url_path(path)
+        except ValueError:
+            return "directory"
         if is_ssh_path(path):
             path = path.split("?", 1)[0]
         return "csv" if path.lower().endswith((".csv", ".tsv", ".tab", ".txt")) else "directory"
@@ -6192,9 +6229,24 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._source_path_changed()
 
     def _source_path_edited(self):
+        if not self._normalize_source_entry():
+            return
         self._update_source_mode()
         if self._source_mode() == "csv":
             self._csv_path_edited()
+
+    def _normalize_source_entry(self):
+        path = clean_pasted_path(self.source_path_edit.text())
+        try:
+            if is_file_url(path):
+                path = self.source_location.set_source(path)
+                self._source_location_changed()
+        except ValueError as exc:
+            self._show_error(str(exc))
+            return False
+        if path != self.source_path_edit.text():
+            self.source_path_edit.setText(path)
+        return True
 
     def _source_location_changed(self):
         if not hasattr(self, "csv_edit") or self._syncing_widgets:
@@ -6205,14 +6257,13 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._source_widgets_csv_path = ""
         self._prepared_preview = None
         self.local_mapping_group.setVisible(not self.source_location.remote)
-        self.source_path_edit.setPlaceholderText("Remote folder or CSV / TSV path" if self.source_location.remote else "Folder or CSV / TSV file")
+        self.source_path_edit.setPlaceholderText("Remote folder or table path" if self.source_location.remote else "Paste a path or file link")
 
     def _source_access_ready(self, path=None):
         try:
             path = self.source_path_edit.text().strip() if path is None else path
-            self.source_location.source(path or "~")
-            if (os.name == "nt" and not self.source_location.remote
-                    and path.startswith("/") and not path.startswith("//")):
+            effective = self.source_location.source(path or "~")
+            if os.name == "nt" and effective.startswith("/") and not effective.startswith("//"):
                 raise ValueError("This is a Linux path. Choose its SSH server in Open from, or enter a Windows drive path.")
         except ValueError as exc:
             self._show_error(str(exc))
@@ -6474,7 +6525,9 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         from .qt_widgets import ColumnCompletion, CommandCompletion
         self._refresh_mapping_profiles("custom" if not STATE.files else STATE.mapping_profile)
         self._history_bindings = [
-            _HistoryCompletionBinding(self.source_path_edit, "csv_path", suggestions=lambda query: self._source_history_suggestions(None, query)),
+            _HistoryCompletionBinding(self.source_path_edit, "csv_path",
+                                      suggestions=lambda query: self._source_history_suggestions(None, query),
+                                      submit=self._load_dataset),
             _HistoryCompletionBinding(
                 self.encoding_combo.lineEdit(), "csv_encoding"
             ),
@@ -6881,7 +6934,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.source_path_edit.setEnabled(not busy)
         self.source_browse_button.setEnabled(not busy)
         self.source_type_combo.setEnabled(not busy)
-        self.source_path_edit.setPlaceholderText("Remote folder or CSV / TSV path" if self.source_location.remote else "Folder or CSV / TSV file")
+        self.source_path_edit.setPlaceholderText("Remote folder or table path" if self.source_location.remote else "Paste a path or file link")
         self.history_button.setEnabled(not busy)
         self.history_action.setEnabled(not busy)
         annotation_busy = self._csv_task_kind in {"annotations", "annotation_undo"}
@@ -7728,6 +7781,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         return {"path": self.source_location.source(self.dir_edit.text().strip()), "pattern": self.pattern_edit.text().strip() or STRUCTURE_PATTERN}
 
     def _load_dataset(self) -> None:
+        if not self._normalize_source_entry():
+            return
         self._update_source_mode()
         if self._source_mode() == "csv":
             self._load_csv_dataset()

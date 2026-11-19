@@ -15,7 +15,8 @@ from .review_steps import effective_steps, validate_steps
 from pymolplugins.remote.ssh import SshClient, is_ssh_path, parse_ssh_path, ssh_source_root
 
 
-REVIEW_KEYS = ("path_column", "display_columns", "label_column", "reference_column", "step_cmd", "bucket_cmds", "filter_presets", "steps", "filter_text", "sort_column", "sort_descending")
+REVIEW_KEYS = ("path_column", "id_column", "display_columns", "label_column", "reference_column", "step_cmd", "bucket_cmds", "filter_presets", "steps", "filter_text", "sort_column", "sort_descending")
+_BUNDLE_TABLE_FIELDS = ("path_column", "display_columns", "label_column", "id_column")
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,27 @@ class ReviewFile:
     config: dict
     signatures: tuple
     layers: tuple = ()
+
+
+def bundle_table_name(raw):
+    if not isinstance(raw, dict) or raw.get("mode") != "bundle":
+        return ""
+    name = raw.get("scores_file", "sum_scores.csv")
+    if not isinstance(name, str) or not name.strip():
+        return ""
+    name = ntpath.normpath(name)
+    return name if ntpath.basename(name) == name else ""
+
+
+def review_table_layer(path, raw, table_path):
+    """Read the table options of a PyMOL skill bundle alongside its declared table."""
+    if not isinstance(raw, dict) or raw.get("mode") != "bundle" or ntpath.basename(path) != "review.json":
+        return raw
+    source = parse_ssh_path(table_path).path if is_ssh_path(table_path) else table_path
+    compare = ntpath.normcase if os.name == "nt" and not is_ssh_path(table_path) else str
+    if compare(ntpath.basename(source)) != compare(bundle_table_name(raw)):
+        return {}
+    return {name: raw[name] for name in _BUNDLE_TABLE_FIELDS if name in raw}
 
 
 def review_paths(table_path):
@@ -42,7 +64,7 @@ def validate_review_config(raw, *, validate_order=True):
     if unknown:
         raise ValueError("Unknown review options: " + ", ".join(sorted(unknown)))
     result = dict(raw)
-    for name in ("path_column", "label_column", "reference_column", "step_cmd", "filter_text", "sort_column"):
+    for name in ("path_column", "id_column", "label_column", "reference_column", "step_cmd", "filter_text", "sort_column"):
         if name in raw and not isinstance(raw[name], str):
             raise ValueError(name + " must be a string")
     if "path_column" in raw and not raw["path_column"].strip():
@@ -73,7 +95,7 @@ def validate_review_config(raw, *, validate_order=True):
 def validate_review_columns(config, columns):
     """Reject stale named columns before any structures or commands are loaded."""
     selected = list(config.get("display_columns", []))
-    selected += [config[key] for key in ("path_column", "label_column", "reference_column") if config.get(key)]
+    selected += [config[key] for key in ("path_column", "id_column", "label_column", "reference_column") if config.get(key)]
     missing = [name for name in selected if name not in columns]
     if missing:
         raise ValueError("Review configuration names unknown table columns: " + ", ".join(dict.fromkeys(missing)))
@@ -116,6 +138,7 @@ def read_review_file(table_path, *, cancel_event=None, validate=True):
                 try:
                     raw = json.loads(base64.b64decode(value["content"]).decode("utf-8-sig"))
                     layers.append((path, raw))
+                    raw = review_table_layer(path, raw, table_path)
                     if validate:
                         raw = validate_review_config(raw, validate_order=False)
                     if isinstance(raw, dict):
@@ -132,6 +155,7 @@ def read_review_file(table_path, *, cancel_event=None, validate=True):
             with open(windows_long_path(path), encoding="utf-8-sig") as handle:
                 raw = json.load(handle)
             layers.append((path, raw))
+            raw = review_table_layer(path, raw, table_path)
             if validate:
                 raw = validate_review_config(raw, validate_order=False)
             if isinstance(raw, dict):

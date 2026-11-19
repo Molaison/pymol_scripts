@@ -153,10 +153,11 @@ def _source_page(panel):
     panel.source_mode_combo.currentIndexChanged.connect(panel._source_mode_changed)
     panel.source_mode_combo.hide()
     panel.source_path_edit = QtWidgets.QLineEdit()
-    panel.source_path_edit.setPlaceholderText("Folder or CSV / TSV file")
+    panel.source_path_edit.setPlaceholderText("Paste a path or file link")
     panel.source_path_edit.setAccessibleName("Source path")
     panel.source_path_edit.textChanged.connect(panel._source_path_changed)
     panel.source_path_edit.editingFinished.connect(panel._source_path_edited)
+    panel.source_path_edit.returnPressed.connect(panel._load_dataset)
     panel.dir_edit = panel.csv_edit = panel.source_path_edit
     panel.source_browse_button = QtWidgets.QToolButton()
     panel.source_browse_button.setText("Browse…")
