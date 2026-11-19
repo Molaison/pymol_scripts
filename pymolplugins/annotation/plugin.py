@@ -7563,14 +7563,27 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         return owner, None, None, lambda _: _execute_checked(cmd, line)
 
     def _draw_candidate_view(self, owner, source, action, draw, data, exclusive):
-        from .bundle_view import _draw_bundle
+        from .bundle_view import _draw_bundle, draw_bundle_cavity, prepare_bundle_cavity
         from .review_view_presets import draw_review_view
 
         with _capture_command_products(owner):
             if action is None:
                 draw(data)
-            else:
-                draw_review_view(cmd, source, action, draw, data, exclusive=exclusive or action is _draw_bundle)
+                return
+            followup = draw_review_view(cmd, source, action, draw, data, exclusive=exclusive or action is _draw_bundle)
+        if action is not _draw_bundle or followup is None:
+            return
+        try:
+            compute, draw_cavity = prepare_bundle_cavity(cmd, owner, *followup)
+        except Exception as error:
+            self._view_jobs.warnings.append(f"Pocket cavity skipped · {error}")
+            return
+
+        def show_cavity(result):
+            with _capture_command_products(owner):
+                return draw_review_view(cmd, source, draw_bundle_cavity, draw_cavity, result)
+
+        self._view_jobs.start_cavity(compute, show_cavity)
 
     def _start_candidate_views(self, recipes=(), warnings=()):
         from .bundle_view import BundleViewRequest

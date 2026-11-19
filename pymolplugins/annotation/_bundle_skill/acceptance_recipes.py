@@ -15,7 +15,7 @@ from pymol import CmdException, cmd
 from pymol.cgo import ALPHA, BEGIN, COLOR, END, LINE_LOOP, TRIANGLE_STRIP, VERTEX
 
 
-_SCRIPT_DIR = Path(inspect.currentframe().f_code.co_filename).resolve().parent
+_SCRIPT_DIR = Path(inspect.currentframe().f_code.co_filename).absolute().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
@@ -29,7 +29,7 @@ from acceptance_bundle import (
     acc_store_scene,
     asset_name,
 )
-from acceptance_pocket_void import pocket_void_dots
+from acceptance_pocket_void import pocket_cavity_layers
 
 
 def _text(value, default: str) -> str:
@@ -278,10 +278,10 @@ def ligand_pocket_review(
 
     contact_scope = pocket_name if _truthy(show_polar_contacts, True) else "none"
     distances = _pocket_distances(identity, contact_scope, ligand_name, float(polar_cutoff), covalent_link)
-    cavity_object, cavity_count = ("", 0)
+    cavity_layers = {}
     if _truthy(show_cavity, True):
-        cavity_object, cavity_count = pocket_void_dots(identity, protein, ligand_name, centers=cavity_centers)
-    if cavity_object:
+        cavity_layers = pocket_cavity_layers(identity, protein, ligand_name, centers=cavity_centers)
+    for cavity_object in cavity_layers:
         cmd.disable(cavity_object)
 
     # Membrane complexes use a single view that retains both kinds of evidence.
@@ -313,11 +313,10 @@ def ligand_pocket_review(
         for distance in distances.values():
             cmd.enable(distance)
         cmd.set("label_distance_digits", 2)
-    if cavity_object:
+    for cavity_object in cavity_layers:
         cmd.enable(cavity_object)
     message = [str(identity)]
-    if cavity_object:
-        message.append("Blue dots: enclosed probe-sized pocket void")
+    message.extend(legend for legend, count in cavity_layers.values())
     for kind, legend in (
         ("polar_contacts", "Teal dashes: candidate polar contacts"),
         ("short_contacts", "Magenta dashes: short contacts"),
@@ -331,7 +330,8 @@ def ligand_pocket_review(
         overlay = membrane_surface_review(identity, protein, **membrane)
         message.append("Ochre / green: hydrophobic / hydrophilic surface")
         if membrane.get("bounds"):
-            message.append("Sheets: membrane–water interfaces")
+            # PyMOL's scene-message wizard expects ASCII text.
+            message.append("Sheets: membrane-water interfaces")
         if membrane.get("core_bounds"):
             message.append("Rims: hydrophobic core boundaries")
         if overlay["bias_labels"]:
@@ -339,19 +339,27 @@ def ligand_pocket_review(
         cmd.reset()
         cmd.turn("x", 70)
         cmd.zoom(f"({protein}) or ({ligand_name})", float(focus_padding) + 4)
-        cmd.scene(focus_scene, "store", message="\n".join(message))
+        if focus_scene:
+            cmd.scene(focus_scene, "store", message="\n".join(message))
     else:
-        acc_store_scene(
-            focus_scene,
-            zoom_selection=f"({ligand_name}) or ({pocket_name})",
-            padding=float(focus_padding),
-            message="\n".join(message),
-        )
+        focus_selection = f"({ligand_name}) or ({pocket_name})"
+        if focus_scene:
+            acc_store_scene(
+                focus_scene,
+                zoom_selection=focus_selection,
+                padding=float(focus_padding),
+                message="\n".join(message),
+            )
+        else:
+            cmd.orient(focus_selection)
+            cmd.zoom(focus_selection, float(focus_padding))
 
-    scenes.append(focus_scene)
+    if focus_scene:
+        scenes.append(focus_scene)
     chosen = overview_scene if overview_scene in scenes and _text(initial_scene, "focus").lower() == "overview" else focus_scene
-    cmd.scene(chosen, "recall")
-    if _truthy(bind_keys, True):
+    if chosen:
+        cmd.scene(chosen, "recall")
+    if scenes and _truthy(bind_keys, True):
         acc_bind_review_keys("scene")
     return {
         "identity": str(identity),
@@ -360,8 +368,8 @@ def ligand_pocket_review(
         "pocket_surface": pocket_surface_name,
         "polar_contacts": distances.get("polar_contacts", ""),
         "distances": distances,
-        "cavity_dots": cavity_object,
-        "cavity_count": cavity_count,
+        "cavity_dots": next(iter(cavity_layers), ""),
+        "cavity_count": sum(count for legend, count in cavity_layers.values()),
         "membrane": overlay,
         "scenes": scenes,
         "initial_scene": chosen,

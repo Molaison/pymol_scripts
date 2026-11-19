@@ -13,6 +13,11 @@ class ViewJobs:
         self.timer = QtCore.QTimer(panel)
         self.timer.setInterval(20)
         self.timer.timeout.connect(self._advance)
+        self.cavity_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pymol-cavity")
+        self.cavity_timer = QtCore.QTimer(panel)
+        self.cavity_timer.setInterval(75)
+        self.cavity_timer.timeout.connect(self._advance_cavity)
+        self.cavity_job = None
         self.queue = deque()
         self.job = None
 
@@ -29,18 +34,47 @@ class ViewJobs:
 
     def cancel(self):
         self.timer.stop()
+        self.cavity_timer.stop()
         self.queue.clear()
         if self.job is not None:
             self.job[0].cancel()
             self.job = None
+        if self.cavity_job is not None:
+            self.cavity_job[0].cancel()
+            self.cavity_job = None
 
     def close(self):
         self.cancel()
         self.pool.shutdown(wait=False, cancel_futures=True)
+        self.cavity_pool.shutdown(wait=False, cancel_futures=True)
 
-    def _status(self, message):
+    def _status(self, message, tooltip=""):
         self.panel.quick_view_status.setText(message)
-        self.panel.quick_view_status.setToolTip(message)
+        self.panel.quick_view_status.setToolTip(tooltip or message)
+
+    def start_cavity(self, compute, draw):
+        self.cavity_job = (self.cavity_pool.submit(compute), draw)
+        self.cavity_timer.start()
+        self._status("Pocket cavity · calculating…")
+
+    def _advance_cavity(self):
+        if self.cavity_job is None:
+            return
+        future, draw = self.cavity_job
+        if not self.is_current(self.identity):
+            self.cancel()
+            return
+        if not future.done():
+            return
+        self.cavity_timer.stop()
+        self.cavity_job = None
+        try:
+            self._status(*draw(future.result()))
+        except Exception as exc:
+            detail = str(exc).strip() or type(exc).__name__
+            message = f"Pocket cavity skipped · {detail.splitlines()[0]}"
+            print(f"Structure Annotator: {message}")
+            self._status(message)
 
     def _advance(self):
         if not self.is_current(self.identity):
@@ -68,4 +102,5 @@ class ViewJobs:
             self.warnings.append(message)
         if self.job is None and not self.queue:
             self.timer.stop()
-            self._status(self.warnings[-1] if self.warnings else "")
+            if self.cavity_job is None:
+                self._status(self.warnings[-1] if self.warnings else "")

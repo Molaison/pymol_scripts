@@ -130,7 +130,7 @@ def draw_review_view(api, source, action, draw, data, *, exclusive=False):
     overlays = _OVERLAYS.setdefault(api, {})
     key = source, action
     try:
-        draw(data)
+        result = draw(data)
     except Exception:
         for name in set(api.get_names("objects")) - existing:
             api.delete(name)
@@ -145,6 +145,7 @@ def draw_review_view(api, source, action, draw, data, *, exclusive=False):
             del overlays[old]
     if current - existing:
         overlays[key] = current - existing
+    return result
 
 
 def _indices(source, ids):
