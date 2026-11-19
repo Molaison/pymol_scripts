@@ -13,6 +13,7 @@ VIEW_PRESETS = {
     "ppi_surface": "PPI · interface surface",
     "reference_overlay": "Reference · overlay, keep coordinates",
     "reference_align": "Reference · align candidate Cα",
+    "reference_target_align": "Reference · align target, compare binder",
     "pli": "PLI · ligand pocket",
     "oligomer": "Oligomer · subunits",
     "membrane": "Membrane · protein & lipids",
@@ -22,7 +23,8 @@ VIEW_PRESETS = {
 LIPID_SELECTION = "resn POPC+POPE+POPG+POPS+DPPC+DPPE+DOPC+DOPE+DOPS+DLPC+DMPC+CHOL+CLR"
 
 
-def viewing_preset(name, object_name, api, *, reference_name="", reference_object=""):
+def viewing_preset(name, object_name, api, *, reference_name="", reference_object="",
+                   target_chain=None, binder_chain=None, reference_chain=None):
     """Build an editable, candidate-scoped recipe from the loaded structure."""
     if name not in VIEW_PRESETS:
         raise ValueError("Choose a viewing preset")
@@ -35,7 +37,8 @@ def viewing_preset(name, object_name, api, *, reference_name="", reference_objec
     commands = ["hide everything, " + target]
     note = ""
     if name.startswith("reference_"):
-        return _reference_preset(name, object_name, api, reference_name, reference_object)
+        return _reference_preset(name, object_name, api, reference_name, reference_object,
+                                 target_chain, binder_chain, reference_chain)
     if name in {"ppi", "ppi_surface", "oligomer", "membrane", "review_fixed_view"} and not count(protein):
         raise ValueError("This preset needs a protein in the current structure")
     if name in {"ppi", "ppi_surface", "oligomer"}:
@@ -48,8 +51,14 @@ def viewing_preset(name, object_name, api, *, reference_name="", reference_objec
         note = "Camera and coordinates unchanged. Use candidates in a common coordinate frame."
     elif name in {"ppi", "ppi_surface"}:
         # Each chain is compared with the other chains, never with itself.
-        interfaces = ["byres ((%s and chain \"%s\") within 5 of (%s and not chain \"%s\"))"
-                      % (protein, chain, protein, chain) for chain in chains]
+        if target_chain is not None or binder_chain is not None:
+            target_part, binder = _candidate_chains(object_name, api, target_chain, binder_chain)
+            protein = "((" + target_part + ") or (" + binder + "))"
+            interfaces = ["byres ((%s) within 5 of (%s))" % (target_part, binder),
+                          "byres ((%s) within 5 of (%s))" % (binder, target_part)]
+        else:
+            interfaces = ["byres ((%s and chain \"%s\") within 5 of (%s and not chain \"%s\"))"
+                          % (protein, chain, protein, chain) for chain in chains]
         interface = "(" + " or ".join("(" + value + ")" for value in interfaces) + ")"
         if not count(interface):
             raise ValueError("No inter-chain protein contacts within 5 Å")
@@ -97,11 +106,32 @@ def viewing_preset(name, object_name, api, *, reference_name="", reference_objec
     return commands, note
 
 
-def _reference_preset(name, object_name, api, reference_name, reference_object):
+def _chain_selection(placeholder, object_name, chain, api):
+    if chain is None or chain not in api.get_chains("(%s) and polymer.protein" % object_name):
+        raise ValueError("Choose an existing protein chain for " + placeholder)
+    if any(char in chain for char in '"\\\r\n;{}'):
+        raise ValueError("This chain identifier cannot be used in a command template")
+    return '({' + placeholder + '}) and polymer.protein and chain "' + chain + '"'
+
+
+def _candidate_chains(object_name, api, target_chain, binder_chain):
+    target = _chain_selection("object", object_name, target_chain, api)
+    binder = _chain_selection("object", object_name, binder_chain, api)
+    if target_chain == binder_chain:
+        raise ValueError("Target and binder must be different chains")
+    return target, binder
+
+
+def _reference_preset(name, object_name, api, reference_name, reference_object,
+                      target_chain=None, binder_chain=None, reference_chain=None):
     if not reference_name or not reference_object or reference_object == object_name:
         raise ValueError("Choose a loaded fixed object from Review steps as the reference")
     candidate = "({object}) and polymer.protein"
     reference = "({" + reference_name + "}) and polymer.protein"
+    binder = None
+    if name == "reference_target_align":
+        candidate, binder = _candidate_chains(object_name, api, target_chain, binder_chain)
+        reference = _chain_selection(reference_name, reference_object, reference_chain, api)
     for selection in (candidate.replace("{object}", object_name),
                       reference.replace("{" + reference_name + "}", reference_object)):
         if api.count_atoms(selection + " and name CA") < 3:
@@ -112,11 +142,16 @@ def _reference_preset(name, object_name, api, reference_name, reference_object):
         "show cartoon, " + reference, "color gray70, " + reference,
         "set cartoon_transparency, 0.55, " + reference,
     ]
-    if name == "reference_align":
+    if binder is not None:
+        commands += ["show cartoon, " + binder, "color orange, " + binder,
+                     "set cartoon_transparency, 0, " + binder]
+    if name in {"reference_align", "reference_target_align"}:
         commands.insert(0, "align " + candidate + " and name CA, " + reference + " and name CA")
         commands.append("zoom ({object}) or ({" + reference_name + "}), 4")
-        note = ("Moves the candidate onto the fixed reference using all protein Cα atoms. "
-                "Check chain correspondence for complexes. PyMOL align creates/updates "
+        note = (("Fits target-chain Cα atoms and moves the whole candidate; binder pose is preserved. "
+                 if binder is not None else
+                 "Moves the candidate using all protein Cα atoms. Check chain correspondence. ")
+                + "PyMOL align creates/updates "
                 "_align1 and _align2 selections.")
     else:
         note = "Camera and coordinates unchanged. Requires an existing common coordinate frame."

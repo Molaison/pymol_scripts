@@ -1,4 +1,4 @@
-"""AI command preparation in the existing Automation page, never execution."""
+"""Command drafts, saved presets, and explicitly confirmed application."""
 
 import json
 import os
@@ -251,6 +251,9 @@ class AICommandDialog(QtWidgets.QDialog):
         self.preset_combo.addItem("Choose a viewing preset…", "")
         for key, title in VIEW_PRESETS.items():
             self.preset_combo.addItem(title, key)
+        self.saved_presets = json.loads(str(window_settings().value("command_presets", "{}")))
+        for name in sorted(self.saved_presets):
+            self.preset_combo.addItem("Saved · " + name, "saved:" + name)
         self.preset_button = QtWidgets.QPushButton("Use preset")
         self.preset_button.setAutoDefault(False)
         self.preset_button.clicked.connect(self.use_preset)
@@ -271,8 +274,22 @@ class AICommandDialog(QtWidgets.QDialog):
         reference_layout.addWidget(self.reference_combo, 1)
         layout.addWidget(self.reference_row)
         self.reference_row.hide()
-        self.preset_combo.currentIndexChanged.connect(
-            lambda: self.reference_row.setVisible(str(self.preset_combo.currentData()).startswith("reference_")))
+        self.chain_row = QtWidgets.QWidget()
+        chain_layout = QtWidgets.QFormLayout(self.chain_row)
+        chain_layout.setContentsMargins(0, 0, 0, 0)
+        self.target_chain_combo = QtWidgets.QComboBox()
+        self.binder_chain_combo = QtWidgets.QComboBox()
+        self.reference_chain_combo = QtWidgets.QComboBox()
+        chain_layout.addRow("Target chain", self.target_chain_combo)
+        chain_layout.addRow("Binder chain", self.binder_chain_combo)
+        chain_layout.addRow("Reference chain", self.reference_chain_combo)
+        layout.addWidget(self.chain_row)
+        self._fill_chains(self.target_chain_combo, current_context(self.panel)["object"])
+        self._fill_chains(self.binder_chain_combo, current_context(self.panel)["object"])
+        self.reference_combo.currentIndexChanged.connect(self._reference_chains)
+        self.preset_combo.currentIndexChanged.connect(self._preset_fields)
+        self._reference_chains()
+        self._preset_fields()
         self.triggers = QtWidgets.QListWidget()
         self.triggers.setMaximumHeight(110)
         for key in command_editors(self.panel):
@@ -318,9 +335,16 @@ class AICommandDialog(QtWidgets.QDialog):
         self.insert_button.setToolTip("Replace selected command drafts only. Use Apply commands in Settings to enable them.")
         self.insert_button.setEnabled(False)
         self.insert_button.clicked.connect(self.insert)
+        self.apply_view_button = QtWidgets.QPushButton("Apply and view…")
+        self.apply_view_button.setEnabled(False)
+        self.apply_view_button.clicked.connect(lambda: self.insert(execute=True))
+        self.save_preset_button = QtWidgets.QPushButton("Save preset…")
+        self.save_preset_button.clicked.connect(self.save_preset)
         close = QtWidgets.QPushButton("Close")
         close.clicked.connect(self.reject)
         footer.addWidget(self.insert_button)
+        footer.addWidget(self.apply_view_button)
+        footer.addWidget(self.save_preset_button)
         footer.addWidget(close)
         layout.addLayout(footer)
 
@@ -330,6 +354,24 @@ class AICommandDialog(QtWidgets.QDialog):
                                       else connection["model"] or "Custom API")
         self.connection_label.setToolTip(connection["base_url"] if connection["mode"] == "custom"
                                         else "Use the provider and model from your existing Codex configuration")
+
+    def _fill_chains(self, combo, object_name):
+        combo.clear()
+        combo.addItem("Choose a chain…", None)
+        if object_name:
+            for chain in cmd.get_chains("(%s) and polymer.protein" % object_name):
+                combo.addItem(chain or "(blank)", chain)
+
+    def _reference_chains(self):
+        objects = current_context(self.panel)["review_objects"]
+        self._fill_chains(self.reference_chain_combo, objects.get(self.reference_combo.currentData(), ""))
+
+    def _preset_fields(self):
+        name = str(self.preset_combo.currentData())
+        self.reference_row.setVisible(name.startswith("reference_"))
+        explicit = name == "reference_target_align"
+        self.chain_row.setVisible(explicit or name in {"ppi", "ppi_surface"})
+        self.reference_chain_combo.setEnabled(explicit)
 
     def configure_connection(self):
         self.connection_dialog = AIConnectionDialog(self)
@@ -356,6 +398,7 @@ class AICommandDialog(QtWidgets.QDialog):
             self.preview_editors[key] = edit
             self.previews.addTab(edit, "On open" if key == "on_open" else key[12:])
         self.insert_button.setEnabled(True)
+        self.apply_view_button.setEnabled(True)
 
     def use_preset(self):
         from .ai_commands import SCHEMA
@@ -364,11 +407,25 @@ class AICommandDialog(QtWidgets.QDialog):
             self.request_steps = self.selected_steps()
             if not self.request_steps:
                 raise ValueError("Select a trigger first")
+            name = str(self.preset_combo.currentData())
+            if name.startswith("saved:"):
+                saved = self.saved_presets[name[6:]]
+                missing = set(self.request_steps) - set(saved)
+                if missing:
+                    raise ValueError("Saved preset has no commands for: " + ", ".join(sorted(missing)))
+                drafts = self._parse_texts({key: saved[key] for key in self.request_steps},
+                                          self.request_steps, self.context)
+                self.show_drafts(drafts)
+                self.feedback("Saved preset ready")
+                return
             reference = self.reference_combo.currentData()
             commands, note = viewing_preset(
                 self.preset_combo.currentData(), self.context["object"], cmd,
                 reference_name=reference,
-                reference_object=self.context["review_objects"].get(reference, ""))
+                reference_object=self.context["review_objects"].get(reference, ""),
+                **({key + "_chain": getattr(self, key + "_chain_combo").currentData()
+                    for key in ("target", "binder", "reference")}
+                   if self.chain_row.isVisible() else {}))
             document = {"schema": SCHEMA, "steps": [
                 {"step_id": key, "commands": commands} for key in self.request_steps]}
             drafts = parse_draft(json.dumps(document), self.request_steps, self.context, cmd)
@@ -381,6 +438,43 @@ class AICommandDialog(QtWidgets.QDialog):
         self.status.setText(text)
         self.status.setStyleSheet("color: " + ("#982e36" if error else "#2854ab") + ";")
 
+    def _parse_texts(self, texts, steps, context):
+        from .ai_commands import SCHEMA
+        document = {"schema": SCHEMA, "steps": [
+            {"step_id": key, "commands": [line for line in text.splitlines()
+                                        if line.strip() and not line.lstrip().startswith("#")]}
+            for key, text in texts.items()]}
+        return parse_draft(json.dumps(document), steps, context, cmd)
+
+    def save_preset(self):
+        try:
+            texts = ({key: edit.toPlainText() for key, edit in self.preview_editors.items()}
+                     if self.preview_editors else self.selected_steps())
+            if not texts:
+                raise ValueError("Select a trigger with commands first")
+            drafts = self._parse_texts(texts, texts, current_context(self.panel))
+            name, ok = QtWidgets.QInputDialog.getText(self, "Save command preset", "Preset name")
+            if not ok or not name.strip():
+                return
+            name = name.strip()
+            if name in self.saved_presets and QtWidgets.QMessageBox.question(
+                    self, "Replace saved preset?", name, QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
+                return
+            self.saved_presets[name] = drafts
+            settings = window_settings()
+            settings.setValue("command_presets", json.dumps(self.saved_presets, ensure_ascii=False))
+            settings.sync()
+            if settings.status() != QtCore.QSettings.NoError:
+                raise OSError("Could not save command presets")
+            key = "saved:" + name
+            if self.preset_combo.findData(key) < 0:
+                self.preset_combo.addItem("Saved · " + name, key)
+            self.preset_combo.setCurrentIndex(self.preset_combo.findData(key))
+            self.feedback("Preset saved: " + name)
+        except Exception as exc:
+            self.feedback(str(exc), True)
+
     def generate(self):
         if self.process is not None:
             return
@@ -391,6 +485,7 @@ class AICommandDialog(QtWidgets.QDialog):
             return
         self.response = None
         self.insert_button.setEnabled(False)
+        self.apply_view_button.setEnabled(False)
         try:
             self.context = current_context(self.panel)
             if not self.context["object"] or not cmd.count_atoms(self.context["object"]):
@@ -433,6 +528,7 @@ class AICommandDialog(QtWidgets.QDialog):
         for widget in (self.preset_combo, self.preset_button, self.connection_button, self.request_edit):
             widget.setEnabled(True)
         self.insert_button.setEnabled(bool(self.preview_editors))
+        self.apply_view_button.setEnabled(bool(self.preview_editors))
 
     def finished(self, process, code):
         if process is not self.process:
@@ -472,7 +568,7 @@ class AICommandDialog(QtWidgets.QDialog):
         self._idle()
         self.feedback(message)
 
-    def insert(self):
+    def insert(self, execute=False):
         from .ai_commands import SCHEMA
         try:
             editors = command_editors(self.panel)
@@ -488,14 +584,21 @@ class AICommandDialog(QtWidgets.QDialog):
         except Exception as exc:
             self.feedback("Not inserted — " + str(exc), True)
             return
-        answer = QtWidgets.QMessageBox.question(self, "Replace selected command drafts?",
-            "Replace drafts for %d selected triggers? Other editors are unchanged.\n"
-            "Nothing will execute. You must still use Apply commands in Settings." % len(drafts),
+        answer = QtWidgets.QMessageBox.question(self,
+            "Apply commands and view current candidate?" if execute else "Replace selected command drafts?",
+            ("Apply these commands and reload the current candidate?\n"
+             "On-open Review steps will execute. After-label commands are saved for future labels."
+             if execute else
+             "Replace drafts for %d selected triggers? Other editors are unchanged.\n"
+             "Nothing will execute. You must still use Apply commands in Settings." % len(drafts)),
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
         if answer != QtWidgets.QMessageBox.Yes:
             return
         for key, text in drafts.items():
             editors[key].setPlainText(text)
+        if execute and not self.panel._apply_commands_and_view(confirmed=True):
+            self.feedback("Commands could not be applied; check the editor error.", True)
+            return
         self.accept()
 
     def reject(self):

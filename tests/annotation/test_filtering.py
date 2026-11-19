@@ -26,6 +26,15 @@ class ColumnFilterTests(unittest.TestCase):
             with self.subTest(expression=expression), self.assertRaises(FilterSyntaxError):
                 compile_filter(expression, self.columns)
 
+    def test_field_text_prefix_suffix_and_negation(self):
+        predicate = compile_filter(
+            'startswith(`source batch`, "RUN") and endswith(notes, ".CIF") and not contains(notes, "skip")',
+            self.columns,
+        )
+        self.assertTrue(predicate({"source batch": "run A", "notes": "model.cif"}))
+        self.assertFalse(predicate({"source batch": "run A", "notes": "SKIP.cif"}))
+        self.assertFalse(predicate({"source batch": "run A", "notes": ""}))
+
 
 class FilterPresetTests(unittest.TestCase):
     def test_old_review_and_named_views_share_the_existing_filter_language(self):

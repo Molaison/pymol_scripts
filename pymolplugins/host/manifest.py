@@ -22,7 +22,7 @@ CANONICAL_MODULES = (
 )
 
 CANONICAL_COMMANDS = {
-    "toolkit": ("pp_load", "pp_doctor", "pp_capabilities", "pp_help", "pp_review_groups"),
+    "toolkit": ("pp_load", "pp_doctor", "pp_capabilities", "pp_help", "pp_wizard", "pp_review_groups"),
     "tasks": (
         "pp_show", "pp_nav", "pp_align", "pp_orient",
         "pp_contacts", "pp_metrics", "pp_jobs", "pp_undo",
@@ -34,7 +34,7 @@ CANONICAL_COMMANDS = {
         "pp_nav_prev_batch", "pp_nav_goto", "pp_nav_pin", "pp_nav_unpin",
         "pp_nav_clear_pins", "pp_nav_register_hook", "pp_nav_unregister_hook",
         "pp_nav_clear_hooks", "pp_nav_context", "pp_nav_sync_from_scene",
-        "pp_nav_status", "pp_nav_stop",
+        "pp_nav_status", "pp_nav_refresh", "pp_nav_stop",
     ),
     "follow": (
         "pp_follow_arm", "pp_follow_apply", "pp_follow_rebase",

@@ -363,6 +363,8 @@ def _navigation_action(navigation, action: str, target: str, force: object):
         return navigation.pp_nav_unpin(target)
     if action == "stop":
         return navigation.pp_nav_stop(force=force)
+    if action == "refresh":
+        return navigation.pp_nav_refresh(dialog=1)
     raise ValueError(
         "action must be start/next/prev/next-page/prev-page/goto/pin/unpin/status/stop"
     )
@@ -374,6 +376,8 @@ def _navigation_status(verb: str, result: object) -> str:
     raw = str(result.get("status", ""))
     if raw == "boundary" or result.get("no_change"):
         return "unchanged"
+    if raw == "preview":
+        return "preview"
     if raw in {"stopped", "forced_stopped"}:
         return raw
     if verb == "status" or raw == "inactive":
@@ -394,6 +398,7 @@ _NAVIGATION_DELEGATES = {
     "pin": "pp_nav_pin",
     "unpin": "pp_nav_unpin",
     "status": "pp_nav_status",
+    "refresh": "pp_nav_refresh",
     "stop": "pp_nav_stop",
 }
 
@@ -442,7 +447,7 @@ def pp_nav(
         elif verb not in {
             "start", "next", "prev", "previous", "back", "next-page",
             "next_page", "prev-page", "prev_page", "goto", "pin", "unpin",
-            "status", "stop",
+            "status", "refresh", "stop",
         }:
             if target_value:
                 raise ValueError("both action and target look like navigation targets")

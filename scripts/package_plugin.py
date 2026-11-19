@@ -23,7 +23,8 @@ INSTALL_TEXT = """# 安装 PymolPlugins（{version}）
 
 1. 在 PyMOL 打开 **Plugin > Plugin Manager > Install New Plugin**。
 2. 选择下载的原始 ZIP；不要解压。安装完成后完全退出并重启 PyMOL。
-3. 打开 **Plugin > PymolPlugins: Structure Annotator**。右上角 **?** 随时可查看帮助。无需输入 PyMOL 命令。
+3. 打开 **Plugin > PymolPlugins: Getting Started** 查看五步入门向导与功能介绍。
+   向导中的按钮可直接打开数据和审阅界面；Structure Annotator 右上角 **?** 也可随时重开向导。
 4. 在 **Open from** 选择 **This computer**，或选择已有的 SSH **Host** 别名。
 5. 在 **Path** 粘贴真实的结构文件夹、CSV 或 TSV 路径；也可以用 **Browse…**。
 6. 点 **Open**。一般不用改 **Import options**。如需 **Structure column**，
@@ -32,7 +33,7 @@ INSTALL_TEXT = """# 安装 PymolPlugins（{version}）
 
 保存后进入下一条。普通点选只修改草稿，不会立即保存。快捷键、Alt+数字和 Ctrl+click 是可选的加速方式，不是开始审阅的前提。相对结构路径默认相对于表格目录；CSV 和结构源文件不会被标注流程改写。
 
-已有 `sum_scores.csv` 和同目录 `review.json` 时，打开 CSV 即可读取配置；`display_columns` 必须使用表中实际存在的字段，`label` 是描述性名称，人工标签另存。修改配置写入 `review.override.json`，不会覆盖生成的 `review.json`。
+直接打开含 `sum_scores.csv` 的文件夹时，插件会使用该表及同目录的 `review.json`。没有这个文件时，插件会打开唯一带结构路径列的表，或按目录导入结构文件。`display_columns` 必须使用表中实际存在的字段，`label` 是描述性名称，人工标签另存。修改配置写入 `review.override.json`。
 
 ## SSH 开始前
 
@@ -93,7 +94,7 @@ review.json 的 steps 列表定义命名对象和命令的执行顺序。固定�
 
 ## 筛选分组
 
-review.json可选filter_presets。Filter旁下拉箭头可一键切组；Filter窗口可改条件和排序，用Save…保存同名或新组，Delete删除。编辑写入review.override.json，不覆盖生成配置、不改人工标签。分组允许重叠。
+用 Filter 旁的下拉箭头切换或新建命名组。在 Column conditions 中用 Add condition… 选择字段与条件，用 Group conditions 加括号。Enter 提交当前输入，Tab 或鼠标接受补全。Save group… 保存当前条件和排序，Delete 删除所选组。CSV 源的分组修改写入 review.override.json。分组允许重叠。
 
 ## 其他入口
 

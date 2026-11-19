@@ -645,10 +645,22 @@ class NavigationController:
                 expected_enabled.update(self._ancestors(name))
         existing = set(_get_names("all"))
         enabled = set(_get_names("all", 1))
-        for name in sorted(self.managed_names.union(self.retired_file_names)):
-            should_enable = name in expected_enabled
-            if name in existing and (name in enabled) != should_enable:
-                (_require_cmd().enable if should_enable else _require_cmd().disable)(name)
+        restore_panel = None
+        if self.source == "groups" and not self.hooks:
+            from pymolplugins.navigation.qt_panel import arm_visibility_update
+            restore_panel = arm_visibility_update({
+                name: name in expected_enabled
+                for name in self.managed_names
+                if name in existing and (name in enabled) != (name in expected_enabled)
+            })
+        try:
+            for name in sorted(self.managed_names.union(self.retired_file_names)):
+                should_enable = name in expected_enabled
+                if name in existing and (name in enabled) != should_enable:
+                    (_require_cmd().enable if should_enable else _require_cmd().disable)(name)
+        finally:
+            if restore_panel:
+                restore_panel()
         existing_after = set(_get_names("all"))
         self.retired_file_names.intersection_update(existing_after)
         missing = sorted(self.managed_names.difference(existing_after))
@@ -853,6 +865,8 @@ class NavigationController:
     def stop(self, keep_loaded: bool = False) -> Dict[str, List[str]]:
         """Best-effort ownership release, retaining failures for a later retry."""
 
+        from pymolplugins.navigation.qt_panel import cancel_visibility_update
+        cancel_visibility_update()
         errors: Dict[str, List[str]] = {"cleanup": [], "visibility": []}
         attempted_retired: Dict[str, Exception] = {}
         existing_before = set(_get_names("all"))
@@ -901,7 +915,8 @@ class NavigationController:
         else:
             attempted_visibility: Dict[str, Exception] = {}
             existing_before = set(_get_names("all"))
-            for name in sorted(self.managed_names.intersection(existing_before)):
+            restore_names = set(self.original_enabled)
+            for name in sorted(restore_names.intersection(existing_before)):
                 was_enabled = bool(self.original_enabled.get(name, False))
                 try:
                     (_require_cmd().enable if was_enabled else _require_cmd().disable)(
@@ -911,7 +926,7 @@ class NavigationController:
                     attempted_visibility[name] = exc
             existing_after = set(_get_names("all"))
             enabled_after = set(_get_names("all", 1))
-            for name in sorted(tuple(self.managed_names)):
+            for name in sorted(restore_names):
                 if name not in existing_after:
                     self._forget_managed_name(name, loaded=False)
                     continue
@@ -919,6 +934,7 @@ class NavigationController:
                 if (name in enabled_after) == was_enabled:
                     self._forget_managed_name(name, loaded=False)
                     continue
+                self.managed_names.add(name)  # Retain failed visibility restoration for retry.
                 detail = attempted_visibility.get(name)
                 errors["visibility"].append(
                     "%s: %s"
@@ -1342,7 +1358,7 @@ def _command_transition(method: str, *args) -> Dict[str, object]:
             _error_response(
                 command_name,
                 exc,
-                "run pp_nav_stop, then restart navigation to accept the new group membership",
+                "run pp_nav_refresh to inspect changes, then pp_nav_refresh confirm=1 to accept",
                 status="stale",
                 membership_changes=exc.changes,
                 scene_preserved=True,
@@ -1407,6 +1423,71 @@ def _command_transition(method: str, *args) -> Dict[str, object]:
             include_traceback=True,
             scene_preserved=False,
         )
+
+
+def _group_refresh_plan(controller):
+    if controller.source != "groups" or controller.degraded:
+        raise NavigationError("refresh requires an active, non-degraded groups session")
+    surviving = [entry.group_name for entry in controller.session.entries
+                 if _is_group(entry.group_name)]
+    if not surviving:
+        raise NavigationError("no navigation groups remain; stop navigation")
+    entries = _build_entries("groups", surviving, ".", STRUCTURE_PATTERN)
+    if not entries:
+        raise NavigationError("no non-empty navigation groups remain; stop navigation")
+    old = controller.session
+    ids = [entry.id for entry in entries]
+    current_id = old.entries[old.cursor].id
+    position = ids.index(current_id) if current_id in ids else min(old.cursor, len(entries) - 1)
+    changes = controller._group_membership_changes()
+    return entries, {
+        "membership_changes": changes,
+        "removed_entries": [entry.id for entry in old.entries if entry.id not in ids],
+        "current_entry": entries[position].id, "cursor": position,
+        "position_preserved": current_id in ids,
+        "parents": _group_parent_snapshot(),
+    }
+
+
+def pp_nav_refresh(confirm: object = 0, dialog: object = 0) -> Dict[str, object]:
+    """Inspect live group changes; explicitly accept them without moving the scene.
+
+    Args:
+        confirm: Accept the current grouping when 1; otherwise preview only.
+        dialog: Show a changes dialog with an explicit Refresh button.
+    Returns:
+        Change details and the preserved or replacement cursor.
+    """
+    global _CONTROLLER
+    try:
+        controller = _controller()
+        entries, plan = _group_refresh_plan(controller)
+        if as_bool(dialog):
+            from pymolplugins.navigation.refresh_dialog import show_refresh_dialog
+            show_refresh_dialog(controller, plan)
+            return dict(plan, status="preview", scene_preserved=True)
+        if not as_bool(confirm):
+            print("Group changes: " + json.dumps(plan["membership_changes"], ensure_ascii=False))
+            print("Accept: pp_nav_refresh confirm=1 | Dialog: pp_nav_refresh dialog=1")
+            return dict(plan, status="preview", scene_preserved=True)
+        old = controller.session
+        session = NavigationSession(entries, old.batch_size, old.window_size, old.stride, old.wrap)
+        session.cursor = plan["cursor"]
+        session.pinned_entry_ids = old.pinned_entry_ids.intersection(entry.id for entry in entries)
+        refreshed = NavigationController(source="groups", session=session, zoom_policy=controller.zoom_policy)
+        refreshed.original_enabled.update(controller.original_enabled)
+        # Keep the old visibility lease until stop, including removed empty groups
+        # and former ancestors. They are not toggled during subsequent navigation.
+        refreshed.hooks = list(controller.hooks)
+        refreshed.keys_bound = controller.keys_bound
+        refreshed.previous_key_mappings = dict(controller.previous_key_mappings)
+        refreshed.installed_key_mappings = dict(controller.installed_key_mappings)
+        _CONTROLLER = refreshed
+        print("Groups refreshed; current=%s. Continue with pp_nav_next." % plan["current_entry"])
+        return dict(refreshed.status(), **plan, status="refreshed", scene_preserved=True)
+    except Exception as exc:
+        return _error_response("pp_nav_refresh", exc, "correct the grouping or run pp_nav_stop",
+                               scene_preserved=True, include_traceback=not isinstance(exc, NavigationError))
 
 
 def pp_nav_next() -> Dict[str, object]:
@@ -1938,6 +2019,7 @@ def register_commands(command_api=None) -> None:
         "pp_nav_context": pp_nav_context,
         "pp_nav_sync_from_scene": pp_nav_sync_from_scene,
         "pp_nav_status": pp_nav_status,
+        "pp_nav_refresh": pp_nav_refresh,
         "pp_nav_stop": pp_nav_stop,
     }
     for name, function in commands.items():

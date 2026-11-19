@@ -1,8 +1,20 @@
 """Column expressions for CSV views, interpreted without executing Python."""
 
 import ast
+import keyword
 import math
 import operator
+
+
+COMPARISON_OPERATORS = ("==", "!=", "<", "<=", ">", ">=")
+TEXT_OPERATORS = {"contains": operator.contains, "startswith": str.startswith, "endswith": str.endswith}
+
+
+def column_expression(name):
+    """Spell a column name for insertion into a filter."""
+    if all(part.isidentifier() and not keyword.iskeyword(part) for part in name.split(".")):
+        return name
+    return f"`{name}`"
 
 
 class FilterSyntaxError(ValueError):
@@ -113,7 +125,7 @@ def _compare(left, right, operation):
 def compile_filter(expression, columns):
     """Compile a column condition into a callable accepting raw row metadata.
 
-    Supports comparisons, and/or/not, parentheses, contains(column, text), and
+    Supports comparisons, and/or/not, parentheses, text matching functions, and
     ``is None``. Backticks quote names containing spaces or punctuation.
     """
     text = str(expression).strip()
@@ -160,7 +172,14 @@ def _compile_node(node, columns, aliases):
                 raise FilterSyntaxError("Use 'is None' or 'is not None' for empty cells")
         values = [_compile_node(value, columns, aliases) for value in [node.left] + node.comparators]
         return lambda row: all(_compare(values[i](row), values[i+1](row), op) for i, op in enumerate(node.ops))
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "contains" and len(node.args) == 2 and not node.keywords:
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id in TEXT_OPERATORS and len(node.args) == 2 and not node.keywords):
         value, needle = [_compile_node(arg, columns, aliases) for arg in node.args]
-        return lambda row: str(needle(row)).casefold() in str(value(row) or "").casefold()
+        match = TEXT_OPERATORS[node.func.id]
+
+        def text_match(row):
+            cell = value(row)
+            return match(str(cell if cell is not None else "").casefold(), str(needle(row)).casefold())
+
+        return text_match
     raise FilterSyntaxError("Unsupported filter; use column comparisons joined with and/or")
