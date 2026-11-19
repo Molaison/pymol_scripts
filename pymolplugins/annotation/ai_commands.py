@@ -98,13 +98,17 @@ Supported console forms (use positional arguments shown; only shown named option
         + "\nOnly output the specified JSON structure, no Markdown or additional words.")
 
 
-def validate_native(line, api):
-    """Validate one AI console line without cmd.do or scene mutations."""
+def validate_native(line, api, *, local_presets=False):
+    """Validate one command without scene mutations."""
     from pymol import parsing, util
+    from .review_view_presets import REVIEW_VIEW_COMMANDS, parse_review_command
 
     if any(c in line for c in ";\\\x00\r\n"):
         raise ValueError("Use one command per array item, without semicolons or line continuation")
     name = line.split(None, 1)[0]
+    if local_presets and name in REVIEW_VIEW_COMMANDS:
+        parse_review_command(line, api)
+        return
     if name not in COMMANDS:
         raise ValueError("Unsupported AI command: %s" % name)
     function = getattr(util, name[5:]) if name.startswith("util.") else getattr(api, name)
@@ -160,7 +164,7 @@ def validate_native(line, api):
             raise ValueError("byres must be 0 or 1")
 
 
-def parse_draft(text, steps, context, api):
+def parse_draft(text, steps, context, api, *, local_presets=False):
     """Strict full-document parse -> existing editor strings, all-or-nothing."""
     try:
         result = _strict_json_loads(text)
@@ -200,7 +204,7 @@ def parse_draft(text, steps, context, api):
                           {} if key == "on_open" else {values["value"]: template}, objects)
         for number, rendered in format_commands(template, values):
             try:
-                validate_native(rendered, api)
+                validate_native(rendered, api, local_presets=local_presets)
             except Exception as exc:
                 raise ValueError("%s, command %d: %s" % (key, number, str(exc) or type(exc).__name__)) from exc
         drafts[key] = template

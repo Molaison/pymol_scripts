@@ -9,6 +9,7 @@ from html import escape
 
 from pymol.Qt import QtCore, QtWidgets
 
+from pymolplugins.core.source_paths import clean_pasted_path, file_url_path, is_file_url
 from pymolplugins.remote.ssh import (
     SshClient, SshLocation, default_ssh_program, is_ssh_path, parse_ssh_path,
     ssh_profiles, ssh_progress,
@@ -290,6 +291,9 @@ class SourceLocationControls(QtWidgets.QWidget):
         return True
 
     def source(self, path):
+        path = clean_pasted_path(path)
+        if is_file_url(path):
+            return file_url_path(path)
         if is_ssh_path(path):
             return parse_ssh_path(path).uri
         if not self.remote or not path:
@@ -298,6 +302,7 @@ class SourceLocationControls(QtWidgets.QWidget):
 
     def set_source(self, source):
         """Restore connection choices and return only the path for the input."""
+        source = clean_pasted_path(source)
         self.blockSignals(True)
         try:
             if is_ssh_path(source):
@@ -308,7 +313,7 @@ class SourceLocationControls(QtWidgets.QWidget):
                 self.connection.setCurrentText(remote.profile)
                 return remote.path
             self.connection.setCurrentIndex(0)
-            return source
+            return file_url_path(source)
         finally:
             self.blockSignals(False)
 

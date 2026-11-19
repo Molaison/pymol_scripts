@@ -15,6 +15,8 @@ import posixpath
 import re
 from typing import Callable, Dict, Mapping, Optional, Sequence, Tuple, Union
 
+from pymolplugins.core.source_paths import file_url_path
+
 from .path_formats import convert_path, rewrite_path, validate_distribution, validate_format, validate_rewrites
 
 
@@ -593,6 +595,7 @@ class PathResolver:
             return _invalid(raw, "path contains a NUL byte")
         rewritten = rewrite_path(raw.strip(), self.rewrites)
         try:
+            rewritten = file_url_path(rewritten)
             result = self._resolve(rewritten, source_base=source_base, require_exists=require_exists)
         except ValueError as exc:
             result = _invalid(raw, str(exc))

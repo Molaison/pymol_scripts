@@ -218,6 +218,39 @@ class NavigationAdapterTests(unittest.TestCase):
         self.assertNotIn("a_measurement", self.fake.visible_names())
         self.assertIn("overlay", self.fake.enabled)
 
+    def test_refresh_keeps_cursor_pins_hooks_keys_and_scene_until_next(self):
+        navigation.pp_nav_start(source="groups", entries="root_a,root_b", zoom_policy="none", bind_keys=1)
+        navigation.pp_nav_goto(2)
+        navigation.pp_nav_pin("root_a")
+        navigation.pp_nav_register_hook("color cyan, {object}")
+        before_keys = dict(self.fake.key_mappings)
+        self.fake.groups["root_b"].append("a_cgo")
+        self.fake.groups["root_a"].remove("a_cgo")
+        enabled = set(self.fake.enabled)
+        preview = navigation.pp_nav_refresh()
+        self.assertEqual(preview["status"], "preview")
+        self.assertEqual(self.fake.enabled, enabled)
+        result = navigation.pp_nav_refresh(confirm=1)
+        self.assertEqual(result["status"], "refreshed")
+        self.assertEqual(result["current_entry"], "group:root_b")
+        self.assertEqual(navigation._CONTROLLER.session.pinned_entry_ids, {"group:root_a"})
+        self.assertTrue(navigation._CONTROLLER.hooks)
+        self.assertEqual(self.fake.key_mappings, before_keys)
+        self.assertEqual(self.fake.enabled, enabled)
+        self.assertNotIn(navigation.pp_nav_next().get("status"), {"error", "stale"})
+
+    def test_refresh_removed_current_uses_remaining_group_and_restores_original_visibility(self):
+        original = set(self.fake.enabled)
+        navigation.pp_nav_start(source="groups", entries="root_a,root_b", zoom_policy="none")
+        self.fake.groups["root_a"] = []
+        result = navigation.pp_nav_refresh(confirm=1)
+        self.assertEqual(result["status"], "refreshed")
+        self.assertFalse(result["position_preserved"])
+        self.assertEqual(result["current_entry"], "group:root_b")
+        navigation.pp_nav_next()
+        self.assertEqual(navigation.pp_nav_stop()["status"], "stopped")
+        self.assertEqual(self.fake.enabled, original)
+
     def test_group_containers_preserve_hidden_children_and_scene_sync(self):
         self.fake.enabled.difference_update({"root_a", "a_cgo", "nested"})
         original = set(self.fake.enabled)

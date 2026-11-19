@@ -15,13 +15,91 @@ from .review_steps import effective_steps, validate_steps
 from pymolplugins.remote.ssh import SshClient, is_ssh_path, parse_ssh_path, ssh_source_root
 
 
-REVIEW_KEYS = ("path_column", "display_columns", "label_column", "reference_column", "step_cmd", "bucket_cmds", "filter_presets", "steps", "filter_text", "sort_column", "sort_descending")
+REVIEW_KEYS = ("path_column", "id_column", "display_columns", "label_column", "reference_column", "step_cmd", "bucket_cmds", "filter_presets", "steps", "filter_text", "sort_column", "sort_descending")
+_BUNDLE_TABLE_FIELDS = ("path_column", "display_columns", "label_column", "id_column")
+_LEGACY_BUNDLE_STEPS = {
+    (
+        "/from pathlib import Path",
+        "/from runpy import run_path",
+        '/bundle_step_path = Path(r"{file}").parent.parent / "pymol" / "acceptance_collection.py"',
+        '/run_path(str(bundle_step_path))["acc_bundle_step"]("{object}", r"{file}")',
+    ),
+    (
+        "/from pathlib import Path",
+        "/from runpy import run_path",
+        '/bundle_source = Path(r"{file}")',
+        '/bundle_script = bundle_source.parent.parent / "pymol" / "acceptance_collection.py"',
+        '/bundle_renderer = run_path(str(bundle_script))["acc_bundle_step"]',
+        '/bundle_renderer("{object}", bundle_source)',
+    ),
+}
 
 
 @dataclass(frozen=True)
 class ReviewFile:
     config: dict
     signatures: tuple
+    layers: tuple = ()
+
+
+def bundle_table_name(raw):
+    if not isinstance(raw, dict) or raw.get("mode") != "bundle":
+        return ""
+    name = raw.get("scores_file", "sum_scores.csv")
+    if not isinstance(name, str) or not name.strip():
+        return ""
+    name = ntpath.normpath(name)
+    return name if ntpath.basename(name) == name else ""
+
+
+def review_table_layer(path, raw, table_path):
+    """Read the table options of a PyMOL skill bundle alongside its declared table."""
+    if not isinstance(raw, dict) or ntpath.basename(path) != "review.json":
+        return raw
+    if raw.get("mode") == "bundle":
+        if not bundle_matches_table(raw, table_path):
+            return {}
+        raw = {name: raw[name] for name in (*_BUNDLE_TABLE_FIELDS, "step_cmd") if name in raw}
+        raw.setdefault("step_cmd", "")
+    return {**raw, "step_cmd": ""} if is_legacy_bundle_step(raw.get("step_cmd")) else raw
+
+
+def is_legacy_bundle_step(step_cmd):
+    if not isinstance(step_cmd, str):
+        return False
+    lines = tuple(line.strip() for line in step_cmd.splitlines() if line.strip())
+    return lines in _LEGACY_BUNDLE_STEPS
+
+
+def _uses_bundle_sidecar(step_cmd):
+    """Recognize a migrated sidecar when the shared command is disabled."""
+    if not isinstance(step_cmd, str):
+        return False
+    if is_legacy_bundle_step(step_cmd):
+        return True
+    text_call = '/bundle_renderer("{object}", str(bundle_source))'
+    path_call = '/bundle_renderer("{object}", bundle_source)'
+    return is_legacy_bundle_step(step_cmd.replace(text_call, path_call))
+
+
+def bundle_matches_table(raw, table_path):
+    source = parse_ssh_path(table_path).path if is_ssh_path(table_path) else table_path
+    compare = ntpath.normcase if os.name == "nt" and not is_ssh_path(table_path) else str
+    return compare(ntpath.basename(source)) == compare(bundle_table_name(raw))
+
+
+def bundle_view_config(review, table_path, *, step_cmd=""):
+    """Choose the built-in view after merging the effective shared command."""
+    if step_cmd.strip() and not is_legacy_bundle_step(step_cmd):
+        return None
+    for path, raw in review.layers:
+        if ntpath.basename(path) != "review.json":
+            continue
+        if bundle_table_name(raw) and bundle_matches_table(raw, table_path):
+            return raw
+        if isinstance(raw, dict) and not bundle_table_name(raw) and _uses_bundle_sidecar(raw.get("step_cmd")):
+            return {"view_sidecar": "bundle_view.json", "path_column": raw.get("path_column", "structure_path")}
+    return None
 
 
 def review_paths(table_path):
@@ -41,7 +119,7 @@ def validate_review_config(raw, *, validate_order=True):
     if unknown:
         raise ValueError("Unknown review options: " + ", ".join(sorted(unknown)))
     result = dict(raw)
-    for name in ("path_column", "label_column", "reference_column", "step_cmd", "filter_text", "sort_column"):
+    for name in ("path_column", "id_column", "label_column", "reference_column", "step_cmd", "filter_text", "sort_column"):
         if name in raw and not isinstance(raw[name], str):
             raise ValueError(name + " must be a string")
     if "path_column" in raw and not raw["path_column"].strip():
@@ -72,7 +150,7 @@ def validate_review_config(raw, *, validate_order=True):
 def validate_review_columns(config, columns):
     """Reject stale named columns before any structures or commands are loaded."""
     selected = list(config.get("display_columns", []))
-    selected += [config[key] for key in ("path_column", "label_column", "reference_column") if config.get(key)]
+    selected += [config[key] for key in ("path_column", "id_column", "label_column", "reference_column") if config.get(key)]
     missing = [name for name in selected if name not in columns]
     if missing:
         raise ValueError("Review configuration names unknown table columns: " + ", ".join(dict.fromkeys(missing)))
@@ -101,19 +179,25 @@ def _remote_signature(value):
     return {key: item for key, item in value.items() if key != "content"}
 
 
-def read_review_file(table_path, *, cancel_event=None):
+def read_review_file(table_path, *, cancel_event=None, validate=True):
     """Merge generated defaults then user overrides; absence is optional."""
-    config, signatures = {}, []
+    config, signatures, layers = {}, [], []
     paths = review_paths(table_path)
     if is_ssh_path(table_path):
         remote, remote_paths = _remote_review_paths(table_path)
-        values = SshClient(remote).read_small_files(remote_paths, cancel_event=cancel_event)
+        from pymolplugins.remote.import_cache import recent_review_files
+        values = recent_review_files(remote, remote_paths, cancel_event=cancel_event)
         for path, value in zip(remote_paths, values):
             signatures.append(_remote_signature(value))
             if value["status"] != "missing":
                 try:
                     raw = json.loads(base64.b64decode(value["content"]).decode("utf-8-sig"))
-                    config.update(validate_review_config(raw, validate_order=False))
+                    layers.append((path, raw))
+                    raw = review_table_layer(path, raw, table_path)
+                    if validate:
+                        raw = validate_review_config(raw, validate_order=False)
+                    if isinstance(raw, dict):
+                        config.update(raw)
                 except (UnicodeError, ValueError) as exc:
                     raise ValueError(f"Cannot load remote {path}: {exc}") from exc
         paths = paths[1:]
@@ -125,12 +209,18 @@ def read_review_file(table_path, *, cancel_event=None):
         try:
             with open(windows_long_path(path), encoding="utf-8-sig") as handle:
                 raw = json.load(handle)
-            config.update(validate_review_config(raw, validate_order=False))
+            layers.append((path, raw))
+            raw = review_table_layer(path, raw, table_path)
+            if validate:
+                raw = validate_review_config(raw, validate_order=False)
+            if isinstance(raw, dict):
+                config.update(raw)
         except (OSError, UnicodeError, ValueError) as exc:
             raise ValueError(f"Cannot load {path}: {exc}") from exc
         if _signature(path) != before:
             raise RuntimeError(f"Review configuration changed while reading: {path}")
-    return ReviewFile(validate_review_config(config), tuple(signatures))
+    return ReviewFile(validate_review_config(config) if validate else config,
+                      tuple(signatures), tuple(layers))
 
 
 def check_review_unchanged(table_path, review, *, cancel_event=None):

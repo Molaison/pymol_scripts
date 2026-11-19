@@ -34,7 +34,7 @@
 }
 ```
 - display_columns 优先选人工最需要的 4–6 项，按重要性排序；真实指标不足四项时如实列出，不补造字段。
-- review.json 不接受 id_column；id 保存在 CSV，需要以它作为标注身份时在 Import options 中选择 Row ID column。
+- 可在 review.json 里用 id_column 指定 CSV 的唯一标注身份列，也可在 Import options 中选择 Row ID column。
 - step_cmd 是整批共用模板。保留字面量 {object}/{selection}/{candidate}，它们都指当前候选；不写死 sa_* 临时对象名，不逐候选生成命令。
 - 保持共同坐标系审阅时，去掉 orient/zoom/center 和 align/super，只设置显示、颜色及对象级透明度。相机保持不动需要候选本来就在可比坐标系中；不要因此偷偷对齐。
 - 界面查看先确认真实链名；把命令限制在当前候选的蛋白链和指定参考。5 Å 邻域可用于显示接触区域，不能当成结合或成功的评分结论。不要创建无必要的命名 selection。
@@ -63,7 +63,7 @@
 
 4. 筛选组（有数据依据时才增加）
 - 可选 filter_presets 数组，每组包含唯一 name、expression，可选 sort_column、sort_descending（布尔值）。根据实际数据覆盖优先审阅、指标不一致、缺失/异常或代表性模式，通常 3–6 组；不要为凑数量造组。
-- 表达式只用实际 CSV 列、常量、比较、and/or/not、括号、contains(列, "文字")、is None / is not None；特殊列名用反引号。禁止 Python、in、算术、分位数函数或引用其他组名。例：label is not None；score1 is None（须替换真实列名）。
+- 表达式只用实际 CSV 列、常量、比较、and/or/not、括号、contains(列, "文字")、startswith(列, "文字")、endswith(列, "文字")、is None / is not None；特殊列名用反引号。文本匹配忽略大小写。禁止 Python、in、算术、分位数函数或引用其他组名。例：label is not None；score1 is None（须替换真实列名）。
 - 阈值先用已约定或有来源的判据。若以已有分数分布分层，先求出具体阈值再写入表达式，并注明这是探索性分层，不是通过标准；不重新运行结构评分。
 - 允许重叠。用实际 CSV 计算每组命中数、组间重叠和未覆盖数，注明有意保留的空组。不拆分/复制每组结构，不自动填写人工标签。除非明确指定默认子集，打开时保留全集，不设置 filter_text 隐藏候选。
 
@@ -84,21 +84,36 @@
 ## 导入并标注
 
 1. 将 `sum_scores.csv` 和生成的 `review.json` 放在同一目录，保留表中相对路径所指向的结构文件。
-2. 打开 **Plugin → PymolPlugins: Structure Annotator**，在 **Open from** 选择本机或已有 SSH 主机，选择 `sum_scores.csv`，点击 **Open**。结构列选 `structure_path`；需要 ID 身份时将导入选项的 **Row ID column** 设为 `id`。
+2. 打开 **Plugin → PymolPlugins: Structure Annotator**，在 **Open data** 粘贴文件夹、`sum_scores.csv` 或相邻的 `review.json` 路径，按 Enter 或点 **Open**。也接受 `file:///` 链接。文件夹和 `review.json` 会优先打开 Bundle 声明的 `scores_file`。
 3. 在 **Review** 查看结构、选定的评分列和代表性 `label`。选择人工标签，点击 **Save and next**；稍后可用 **Data → Continue last review** 继续。
 4. 如需交接，使用 **Data → Export review handoff…** 导出进度与标签摘要；它不包含结构文件。导出带标注的表格时选择新的输出路径。
 
-插件不会把源表中的 `label` 当成人工质量结论；配置修改写入 `review.override.json`，人工标注另存，不覆盖生成的配置、评分表或结构文件。打开失败时检查路径、列名及 JSON 是否与实际表格一致。详见 [CSV、SSH 与审阅步骤](structure_annotator_csv_walkthrough.md)。
+插件从 Bundle 清单读取结构路径列、显示列、标签列和可选的行 ID。结构载入后，插件按 `review.json` 自动应用 PyMOL skill 的视图，包括已声明的配体口袋、共价连接和校准膜。切换候选时会重新应用视图。视图失败时，**Review** 显示原因，结构、评分和候选切换仍可用。配置修改写入 `review.override.json`，人工标注另存。[CSV、SSH 与审阅步骤](structure_annotator_csv_walkthrough.md)
+
+配体口袋先显示，空腔随后在后台计算。青点表示水大小的探针可从外部进入、较大探针进不去的凹槽。紫点表示水大小的探针能放进去、但无法沿当前构象通到外部的封闭空间。**Review** 显示两类区域的探针中心体积。输入结构或算法变更时重新计算。缺少 NumPy 或 SciPy 时，插件从 PyPI 自动准备本地计算依赖。任何依赖或计算错误只影响空腔层。
+
+插件安装包自带 Bundle 渲染器。更新 PyMOL skill 的 Bundle 渲染时，同步更新插件 `pymolplugins/annotation/_bundle_skill/` 的脚本和 skill 的 `references/BUNDLE_MODE.md`，再运行 `python scripts/package_plugin.py`。
 
 ## 用 Step commands 预设调整显示
 
-打开 **Viewing presets…**，选择预设和触发时机，点 **Use preset** 检查草稿，再 **Insert draft… → 确认 → Apply commands**。生成和插入都不执行命令；应用后在下次打开/重载候选或保存对应标签时执行。
+在 **Review** 顶部直接点 **Cartoon、Interface、Membrane** 或 **MASS**。选中的视图会跟随本次会话的候选切换。Interface 默认使用 4 Å，箭头菜单可选 6 Å。MASS 默认给所有蛋白链分别渐变，箭头菜单可选一条链。再次点当前视图后，后续候选使用保存的命令。
+
+候选结构先加载，界面几何和膜定位在后台计算。预设不适用时，Review 工具栏会显示原因，可以继续切换候选。
+
+需要保存自定义工作流时，打开 **Settings → Saved commands… → Preset editor…**。选择预设和触发时机，点 **Use preset** 生成草稿，再用 **Insert draft…** 和 **Apply commands** 保存。用 **Settings → Run command once…** 直接试跑当前编辑器的命令。窗口菜单提供 **Fit to screen**。
 
 | 预设 | 适用场景 | 相机/坐标 |
 | --- | --- | --- |
 | Review · keep camera | 同坐标系连续查看蛋白候选 | 都保持 |
+| Interface · contacts and voids | 蛋白界面或配体口袋。可选 4 或 6 Å 邻域，以及显示全部邻域侧链或仅显示参与已检出相互作用的侧链。空腔与 Bundle 共用双探针算法和缓存 | 缩放到界面，后台空腔不会再移动视角 |
 | PPI · interface surface | 显示蛋白链间 5 Å 邻域的表面和侧链 | 缩放到界面，坐标保持 |
+| Membrane · hydrophobic surface and planes | 叠加半透明疏水性表面。用脂质头基或本地 TmDet 估算膜边界，并显示边界附近的 Tyr、Trp、Arg、Lys 侧链 | 都保持 |
+| MASS paper · residue-number gradient | 只选 Binder chain 就为 binder 上色。也选 Target chain 时，两条链分别按自己的残基编号范围使用同一色板 | 都保持 |
 | Reference · overlay, keep coordinates | 青色候选与灰色半透明固定参考叠合 | 都保持 |
 | Reference · align candidate Cα | 按全部蛋白 Cα 对齐候选到固定参考 | 移动候选并缩放，参考不动 |
 
 两个 Reference 预设需在 **Fixed reference** 选择已加载的固定 Review steps 对象。复合物可能需要将草稿改为特定链；全蛋白 Cα 预设不推断链对应。原生 `align` 会创建或更新 `_align1`、`_align2` 选择，草稿提示中也会说明。预设根据当前结构生成，异构候选应检查链选择是否适用。
+
+Interface 中，青绿色细虚线表示极性接触，粉色粗虚线表示盐桥，紫色珠线表示 π–π 堆叠，蓝色散点表示局部空隙估计。配体相互作用取决于载入结构里的原子类型、电荷和键级。
+
+Membrane 优先使用结构中两层可识别的磷脂头基。其余结构由本地 TmDet 4.1.9 推断。TmDet 不可用或运行失败时，改用疏水 α 螺旋几何估算。PyMOL 控制台会报告本次使用的方法。Windows 本机预览使用 Debian WSL 中用户级安装的 TmDet 和 wwPDB CCD。膜定位在本机执行。

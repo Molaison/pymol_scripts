@@ -1,6 +1,7 @@
 import unittest
+from types import SimpleNamespace
 
-from pymolplugins.annotation.filtering import FilterSyntaxError, compile_filter, validate_filter_presets
+from pymolplugins.annotation.filtering import FilterSyntaxError, compile_filter, compile_view_filter, validate_filter_presets
 
 
 class ColumnFilterTests(unittest.TestCase):
@@ -26,8 +27,31 @@ class ColumnFilterTests(unittest.TestCase):
             with self.subTest(expression=expression), self.assertRaises(FilterSyntaxError):
                 compile_filter(expression, self.columns)
 
+    def test_field_text_prefix_suffix_and_negation(self):
+        predicate = compile_filter(
+            'startswith(`source batch`, "RUN") and endswith(notes, ".CIF") and not contains(notes, "skip")',
+            self.columns,
+        )
+        self.assertTrue(predicate({"source batch": "run A", "notes": "model.cif"}))
+        self.assertFalse(predicate({"source batch": "run A", "notes": "SKIP.cif"}))
+        self.assertFalse(predicate({"source batch": "run A", "notes": ""}))
+
+    def test_view_range_uses_exact_integers_and_preserves_text_search(self):
+        entry = SimpleNamespace(metadata={"score": "9007199254740993"},
+                                display_name="Candidate", source_path="model.pdb", resolved_path="mapped/file.pdb")
+        query = 'where:text_search("mapped") and 9007199254740993 <= score <= 9007199254740993'
+        self.assertTrue(compile_view_filter("mapped", ("score",))(entry))
+        self.assertTrue(compile_view_filter(query, ("score",))(entry))
+        entry.metadata["score"] = "9007199254740992"
+        self.assertFalse(compile_view_filter(query, ("score",))(entry))
+        self.assertFalse(compile_view_filter(query.replace("mapped", "absent"), ("score",))(entry))
+
 
 class FilterPresetTests(unittest.TestCase):
+    def test_loaded_presets_drop_unmatched_parentheses(self):
+        groups = validate_filter_presets([{"name": "High", "expression": "((score > 2)"}], ["score"])
+        self.assertEqual(groups[0]["expression"], "(score > 2)")
+
     def test_old_review_and_named_views_share_the_existing_filter_language(self):
         from pymolplugins.annotation.review_file import validate_review_config, validate_review_columns
         old = {"path_column": "path", "display_columns": ["score"]}

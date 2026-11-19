@@ -1,6 +1,6 @@
 # 用 Structure Annotator 审阅评分表和结构
 
-打开本地或 SSH 上的 CSV/TSV 和 PDB/CIF，在 PyMOL 中查看分数、筛选、标注并继续审阅。需要已安装带 Qt 的插件和自己的结构文件；首次安装见 [快速开始](structure_annotator_quickstart.md)。本指南对应 0.18.0，正式版及其安装包见 [最新 Release](https://github.com/Molaison/pymol_scripts/releases/latest)。
+打开本地或 SSH 上的 CSV/TSV 和 PDB/CIF，在 PyMOL 中查看分数、筛选、标注并继续审阅。首次安装见 [快速开始](structure_annotator_quickstart.md)。目录自动识别和新版 Filter 操作对应当前开发分支。已发布安装包见 [最新 Release](https://github.com/Molaison/pymol_scripts/releases/latest)。
 
 ## 打开评分表
 
@@ -8,6 +8,10 @@
 2. **Open from** 选择 **This computer** 或已配置的 SSH 主机；在 **Path** 选择结构目录或 CSV/TSV，点击 **Open**。
 3. 如提示 **Structure column**，选择指向 `.pdb`、`.cif` 或其 `.gz` 文件的列。相对路径默认相对于表格所在目录；需要时在 **Import options → File locations** 指定基准目录或映射。
 4. 在 **Review** 查看当前结构及选定的评分列。选择标签，再点击 **Save and next**；保存成功后进入下一条。
+
+直接打开文件夹时，**Detect from path** 优先使用同级的 `sum_scores.csv`。如果没有该文件，插件会查找带结构路径列的 CSV/TSV。只找到一张时直接打开，找不到时按目录导入结构。多张表都符合时，可直接输入所需表格的路径；需要跳过评分表时，可在 **Import options → Input type** 选择 **Folder**。
+
+SSH 导入会在本机保留最近 5 个远程来源的表格、表头、目录清单和审阅配置。单项缓存上限 64 MiB，总计 256 MiB。打开时用 SSH 检查文件版本，命中后从本机读取。用 **Data → Remote data → Check for updates and reload** 检查并刷新当前远程来源。用 **Clear remote import cache** 清理这些本机副本。结构文件仍使用原有的结构缓存。
 
 例子只说明表格格式；将路径和字段替换成自己的真实数据：
 
@@ -39,11 +43,25 @@ design_a,structures/model_a.pdb,0.82,典型模式
 
 ## 筛选、排序和抽样
 
-在 **Filter → Text search** 搜索名称、路径或元数据；在 **Column conditions** 输入基于实际列的条件，例如 `score1 >= 0.8 and score2 is not None`。示例阈值只演示语法，不代表科学通过标准。可用 `contains(notes, "candidate")`，带空格或标点的列名用反引号。建议从实际评分字段、方向和先前约定确定条件。
+在 **Filter → Text search** 搜索名称、路径或元数据。在 **Column conditions → Add condition…** 选择字段，再选择包含、不包含、开头、结尾、为空或比较，也可以直接输入 `score1 >= 0.8 and contains(notes, "candidate")`。文本包含、开头和结尾匹配忽略大小写。选中条件后点 **Group conditions** 加括号，未选中文本时将整条表达式括起来。
 
-筛选和排序可使用未显示的列。补全弹出时 Enter、数字键盘 Enter 或 Tab 接受列名；弹窗关闭后 Enter 才提交，**Apply filter** 可显式提交。空结果会显示空集合，错误表达式保留原视图。筛选不会删除结构或修改评分。
+筛选和排序可使用未显示的列。补全支持列名、`and`、`or`、`not`、比较符和文本匹配函数。用 Tab 或鼠标接受补全，用 Enter 提交当前输入。空结果会显示空集合，错误表达式保留原视图。
 
-点击 Filter 旁箭头切换命名分组；在 Filter 的 **Group** 编辑条件和排序，用 **Save…** 保存、**Delete** 删除。`filter_presets` 是可选数组，包含唯一的 `name`、`expression` 及可选的 `sort_column`、`sort_descending`。组可重叠、可为空；它们不是质量标签。人工修改写入 `review.override.json`，数组整体覆盖生成配置，`[]` 清空全部组。需要自动整理分组时使用 [统一生成提示词](02_agent_review.md#复制提示词) 中的筛选组要求；先确认数据和阈值依据。
+补全 `startswith`、`endswith` 或 `contains` 时，先选中字段占位符。用 Tab 或鼠标选好字段后，输入要匹配的文本，再按 Enter 应用。
+
+**Scores** 表头按当前显示的候选行统计。类别列显示最常见的三种值、占比和其余类别的占比，缺失单独计数。数值列显示直方图和最小值、最大值。筛选或抽样后，统计随表格更新。
+
+把鼠标放在 **Scores** 表格或表头上，按住 **Shift** 滚动滚轮可横向浏览列。
+
+点击类别或 **Missing** 的复选框可选中或取消。点 **Other ▸** 展开其余类别，用复选框逐项选，或用 **Select all**、**Clear all** 批量选择，再点 **Apply**。打开明细时保留原来的勾选。
+
+同列选项用 `or` 组合，各列之间用 `and`。直方图重新拖选会替换该列的表头范围，端点取所选柱子内的实际最小值和最大值。已筛选的列会保留满足其他条件的选项和范围，选中的类别即使当前计数为零也可以取消。
+
+**Filter** 中的 `header_filter(…)` 显示表头管理的条件，可继续编辑。提交或保存组时会移除引号外的落单括号。打开旧表头叠加格式的筛选时，会合并重复类别，并保留每列最后一个范围。
+
+输入字段比较或匹配函数的值时，补全会提供该列的实际取值。类别值会按输入匹配，并在表达式中自动加引号。数值列会建议实际数值。**Add condition…** 里的 Value 也使用所选列的取值。
+
+点击 Filter 旁箭头切换命名分组，或选 **New filter group…** 创建。编辑条件和排序后点 **Save group…**，用 **Delete** 删除所选组。CSV 源的人工修改写入 `review.override.json`，目录和场景组的修改写入各自的审阅状态。`filter_presets` 数组的每项包含唯一的 `name`、`expression` 及可选的 `sort_column`、`sort_descending`。组可重叠、可为空；override 中的 `[]` 清空全部组。需要自动整理分组时使用 [统一生成提示词](02_agent_review.md#复制提示词) 中的筛选组要求。
 
 代表性抽样是显式审阅路线，不等同全集或无偏统计样本。检查界面中的全集、筛选集和样本数量；重新导入回到完整筛选集合。批处理不会自动继承审阅的筛选和抽样。
 

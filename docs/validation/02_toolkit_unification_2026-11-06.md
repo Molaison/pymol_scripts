@@ -241,3 +241,99 @@ python scripts/package_plugin.py
 ```
 
 用户下次启动 PyMOL 即使用 0.18.0；若仍有未退出的实例，待用户自行完整重启后生效。本次无需再次安装，也无待监督运行。人工链对应及 PyMOL 2.x 验收边界与上一节一致。
+
+## 2026-11-09 Review workflow 后续优化
+
+负责人：当前 Codex 会话。状态：进行中；分支 `codex/review-workflow-next`，基线 `6dc39dd`。用户要求依次完成：①整次切组性能；②review bundle 检查入口；③明确链选择的预设；④手动改组后确认刷新继续；⑤应用并查看与命名预设。本节复用为唯一恢复记录，实验输出归 `output/19_review_workflow/`。
+
+先拆分实测事件处理、PyMOL 更新与绘制成本，再保留有证据的优化；不猜链角色，不静默接受手动改组。所有 GUI 验收用独立隐藏桌面，不切输入桌面、不操作用户会话。本轮实现授权不包含新一轮发布或替换日常安装。
+
+### ① 整次切组性能：完成
+
+profile 定位到本机 PyMOL 3.1 Qt ContentsPanel 的全量对象控件重建，而非单纯 GPU 绘制。新增 `navigation/qt_panel.py`，仅在无 hook 的 groups 导航开关对象期间复用已有控件；精确核对列表结构与展开状态，未知布局、结构变化、异常均回到原生路径，finally 恢复原生回调。不改安装文件、画质或全局设置；成员关系仍每步从 PyMOL 实时读取。
+
+同一 Host 的60组/57,096原子，15次整次切换中位数 **606.02 → 65.71 ms**；180组/169,416原子 **1902.85 → 67.41 ms**。证据：`output/19_review_workflow/01_redraw/before.json` 与 `07_panel_differences/after.json` 均 passed；每个优化场景15次均复用控件。对象开关、父组样式、可见性与强制原生重建等价；五类手动改组、原生方向键、恢复继续通过。前后180组 OpenGL截图已查看，结构和视角一致；两个 `_desktop.json` 输入桌面均 Default、exit 0。40项 panel/adapter 单测通过。
+
+保留初次60组等价断言失败的 `01_redraw/after_initial_equivalence_failure.json`；补充差异诊断后5组及完整60/180组均通过，初次缺少字段差异不能追溯其具体原因。`02_`–`06_`为快路径未命中、逐条原生 invalidation 诊断及小场景 canary，不替代最终07证据。没有重跑已完成的旧版binary优化。当前无此项待监督进程；下一步②。
+
+### ② bundle 检查：完成
+
+导入页 `Check review bundle` 复用后台导入任务，报告候选/参考路径、ID、列、步骤顺序、过滤命中数和 override 覆盖。`09_bundle_complete/01_result.json` passed：正常两候选/四路径及损坏 bundle 均经真实 Qt 按钮运行，具体错误可见，场景、CSV/PDB/review 文件不变。此为本地构造的已知输入验收，不代表真实科学产物的统计成功率。
+
+### ③ 明确链选择：完成，补验连续重载
+
+PPI 预设可限定两条链；新增 `Reference · align target, compare binder`，明确选择候选靶标链、binder 链、固定参考链。仅靶标 Cα 参与拟合，整个候选随之移动。`10_chains/01_result.json` passed：真实 1BRS A/D 链，两候选切换，目标重合误差 <0.01 Å，binder 保留人为设置的 3 Å 相对位移，固定参考和源文件不变；空选择/相同链拒绝。
+
+初次测试在第二候选调用 `rms_cur` 时触发 Windows 0xc0000374（`12_rms_cur_crash.log`）。直接坐标测量进一步证明：对象仍含 A/D 链，但同名 selection 无法取坐标（`14_invalid_named_object.json`）。候选反复删除后复用同名导致的 Host 问题通过每次实际加载使用新会话对象名解决；仍在场的候选与固定参考继续复用。修改后两候选验收通过，正在补验12次连续对齐重载。原生 `align` 的 `_align1/_align2` 行为仍保留。
+
+### ④ 改组后继续：完成
+
+`pp_nav_refresh` 只读列出变化；`confirm=1` 显式接受；`pp_nav refresh` / `pp_nav_refresh dialog=1` 打开确认界面。保留仍存在的当前组、pin、hooks、快捷键和原始可见性恢复记录；当前组删除时选择最近剩余位置并说明。刷新本身不执行 hook、不移动场景，下次导航使用新成员。
+
+`12_refresh/after_edits.json` passed：五类手动改组识别、Qt 查看/确认、确认前再次改组拒绝、保留位置/pin/键盘、继续导航与停止均通过。38项导航 adapter 检查 passed，含当前组移除及原始可见性恢复。`09_initial_harness_error.json` 为测试变量名错误，已修正。下一步⑤，当前无待监督 GUI 进程。
+
+## 2026-11-10 入门向导与插件介绍
+
+状态：实现与本机 Host 验收完成，尚未提交、发布或替换日常安装。修改位于既有 `PymolPlugins-unification` / `codex/review-workflow-next` 工作树；保留上轮未提交改动与原旧工作树。本节是本次 outcome 的唯一状态与证据记录，输出归 `output/20_wizard/`，无待监督测试进程。
+
+新增五步中文向导：认识插件、打开数据、审阅保存、常用工具、开始使用。入口为 `Plugin → PymolPlugins: Getting Started`、`pp_wizard` 和 Structure Annotator 右上角 `?`。支持 `pp_wizard data|review|tools|finish` 定位页面，保留返回前页；命令已纳入 manifest、帮助目录与参数补全。沿用插件共享样式，窗口非模态、按需打开，关闭后可重开，不写新的偏好设置。
+
+向导按钮复用数据、审阅与批处理窗口及已有 SSH 详细帮助；命令示例直接读取现有帮助目录。复制示例不执行，须由用户替换实际对象/链名后运行。安装包中的 INSTALL.md 同步介绍新入口；本轮未生成或替换同版本正式 ZIP。
+
+### 实际证据
+
+- `01_result.json`：passed。Windows PyMOL 3.1.3.1、Qt 5.15.8，从本工作树实际加载。原生菜单、PyMOL 命令解析、五页前进/后退、五类帮助示例及剪贴板复制、数据/审阅/SSH/批处理跳转、`?` 重用同一窗口、完成/关闭/重开、620×530 紧凑布局均通过。
+- `02_desktop.json`：独立隐藏桌面进程 exit 0，输入桌面前后均为 Default。使用独立临时插件设置，没有启动日常安装的自动更新；不操作用户 PyMOL 窗口。
+- `03_render_before.png` / `04_render_after.png`：PyMOL 自带 glycine fragment 经真实 OpenGL 渲染，改色/旋转后画面变化。向导全过程前后对象名、原子坐标与相机一致；剪贴板验证后恢复原格式数据。
+- `05_welcome.png` 至 `09_finish.png` 以及 `10_compact.png`：真实 Qt 截图，已目视核对文字、操作入口和可滚动内容。未以截图替代真人上手研究。
+- `11_checks.log`：59 项通过，包含项目 CI 规定的六组 package/layout/updater/reference/import/command-template 检查，以及 help registry 检查。命令数量更新为 77 canonical + 8 compatibility；新增菜单纳入精确菜单集合断言。
+- `12_initial_host_failure.json` 保留初次测试宿主未启用原生 Qt 插件菜单的失败。修正测试 fixture，使其使用与 `initializePlugins` 相同的 Qt 菜单设置，避免自动加载日常插件；实际菜单注册与点击通过。`13_initial_checks.log` 保留菜单/命令数量旧断言的两项失败，修正精确预期后 59 项通过；没有削弱断言。
+
+复现（工作树根目录，PowerShell `-NoProfile -NonInteractive`）：
+
+```powershell
+& 'D:/Softwares/Pymol3.1/python.exe' -I -u tests/host/19_getting_started.py
+& 'C:/Python313/python.exe' -X utf8 -m unittest tests.architecture.test_plugin_package tests.architecture.test_package_layout tests.host.test_updater tests.annotation.test_automatic_reference tests.annotation.test_review_import tests.annotation.test_command_templates tests.architecture.test_host_help_registry -q
+```
+
+实现使用 Qt 原生 [QWizard](https://doc.qt.io/qt-6/qwizard.html)，API 可用性以本机 Qt 5.15.8 实际运行结果为准。PyMOL 2.x / 其他系统未重新验收。下一步若交付日常安装，需将当前开发分支中的既有增量一并确定发布范围与版本；本轮没有执行发布或安装。
+
+## 2026-11-19 文件夹导入与 Filter
+
+开发分支 `codex/review-workflow-next` 已实现。Open 在后台识别目录中的 `sum_scores.csv` 或唯一带结构路径列的 CSV/TSV，其余目录沿用原结构导入。遇到多张符合条件的表时列出候选文件，使用明确的表路径打开。
+
+Filter 支持命名分组、用括号组合条件、按字段匹配文本、比较及空值判断。Enter 提交当前输入，Tab 或鼠标接受补全。CSV、结构目录和场景组保存各自的命名筛选。
+
+Windows PyMOL 3.1.3.1 / Qt 5.15.8 独立隐藏桌面验收通过。结果见 [文件夹与 Filter 验收结果](../../output/21_folder_filters/01_result.json)，截图及复现脚本在同目录。22 项相关单测通过。验收范围为本机文件和场景组，SSH 路径尚待实机验收。交付为开发工作树源码。
+
+## 2026-11-19 Scores 表头和 Filter 函数补全
+
+Scores 表头在后台计算当前表格行的类别占比、缺失、不同值数量及数值直方图。筛选及抽样使用各自的可见行统计。文本函数补全先选中字段占位符，选择列后选中文本参数。Enter 提交当前表达式。
+
+45 项相关测试通过。Windows PyMOL 3.1.3.1 / Qt 5.15.8 独立隐藏桌面验证了实际绘制、键盘及鼠标补全、筛选后计数更新。[验收结果](../../output/22_score_headers/01_result.json) · [本机安装记录](../../output/22_score_headers/local_install/01_install_result.json)
+
+## 2026-11-19 表头直接筛选和按列值补全
+
+点击 Scores 表头的类别、Other 或 Missing，或者拖选直方图，向当前 Filter 追加条件并应用。组合时保留原表达式优先级、Text search 和排序。数值范围取所选分箱中的实际边界，空分箱不会生成条件。字段比较、匹配函数参数和 Add condition… 的 Value 提供当前数据源的列值补全。
+
+47 项相关测试通过。Windows PyMOL 3.1.3.1 / Qt 5.15.8 在独立隐藏桌面验证真实点击、拖选、已有 OR 与 Text search 保留，以及类别和数值补全。[验收结果](../../output/23_header_filters/01_result.json) · [本机安装记录](../../output/23_header_filters/local_install/01_install_result.json)
+
+## 2026-11-19 表头多选和范围替换
+
+同列类别以 OR 组合，可点击取消；不同列以 AND 组合。数值拖选替换该列的表头范围。生成的 `header_filter(…)` 表达式在保存和重开后仍能由表头编辑。表头计算本列选项时保留其他条件，已选的零计数类别保持可点。
+
+Windows PyMOL 3.1.3.1 / Qt 5.15.8 独立隐藏桌面验收了真实多选、跨列组合、0 行时恢复、重开后取消、Other/Missing 和扩大范围。[验收结果](../../output/24_header_multiselect/01_result.json) · [本机安装记录](../../output/24_header_multiselect/local_install/01_install_result.json)
+
+50 项定向回归通过。另跑核心 Filter 四项，旧 CSV 更换列名后仍引用旧显示列的测试失败。同一失败已在本轮基线 `3d9a80a` 独立复现。
+
+## 2026-11-19 远程导入缓存和横向滚轮
+
+最近 5 个远程来源的评分表、表头、目录清单和审阅配置持久缓存。Open 用 SSH 元数据核对版本。Data → Remote data 提供检查更新并重载及清缓存。自动清退有来源数、单项和总大小边界。旧下载遇到并发清理时仍可完成本次导入，不能把已清缓存重新发布。
+
+50 项定向回归和 WSL Debian 的 26 项 SSH 源测试通过。Windows PyMOL 隐藏桌面复验使用实际 SSH 读取 worker，通过 WSL 管道构造可控对端。验证了热重载复用、更新、清理，以及表内和表头的 Shift＋滚轮。[验收结果](../../output/25_remote_cache/01_result.json) · [本机安装记录](../../output/25_remote_cache/local_install/01_install_result.json)
+
+## 2026-11-19 旧 Filter 整理和 Other 复选框
+
+打开旧表头叠加表达式时按列还原，重复分类去重，重复数值范围保留最后一次。提交、保存和读取 Filter 时清除引号外的落单括号。Other ▸ 展开更多类别，复选框、全选和清空先在弹窗中编辑，Apply 后生效。主表头的分类也显示原生复选框。
+
+Windows PyMOL 3.1.3.1 独立隐藏桌面以用户给出的原表达式重开数据，复验了重复点击取消、范围替换、Other 单项和批量选择、保存组括号修复。[验收结果](../../output/26_filter_checkboxes/01_result.json) · [本机安装记录](../../output/26_filter_checkboxes/local_install/01_install_result.json)

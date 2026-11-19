@@ -1,15 +1,48 @@
 """Focused Qt controls for CSV columns and PyMOL command editing."""
 
+import ast
 import re
 
 from pymol import cmd
 from pymol.Qt import QtCore, QtGui, QtWidgets
+from .filter_values import FilterValueCatalog
+from .filtering import COMPARISON_OPERATORS, TEXT_OPERATORS, column_expression
 from .history_store import fuzzy_matches
 
 
 def qt_enum(group, name):
     value = getattr(QtCore.Qt, name, None)
     return value if value is not None else getattr(getattr(QtCore.Qt, group), name)
+
+
+class ScoresTable(QtWidgets.QTableView):
+    """Keep Shift-wheel horizontal across the table and its header."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+        self._wheel_fraction = 0.0
+
+    def scroll_shift_wheel(self, event):
+        if not event.modifiers() & qt_enum("KeyboardModifier", "ShiftModifier"):
+            return False
+        scroll = self.horizontalScrollBar()
+        pixel = event.pixelDelta()
+        distance = pixel.x() or pixel.y()
+        if not distance:
+            angle = event.angleDelta()
+            step = self.verticalHeader().defaultSectionSize()
+            distance = (angle.x() or angle.y()) * step * QtWidgets.QApplication.wheelScrollLines() / 120
+        self._wheel_fraction += distance
+        movement = int(self._wheel_fraction)
+        self._wheel_fraction -= movement
+        scroll.setValue(scroll.value() - movement)
+        event.accept()
+        return True
+
+    def wheelEvent(self, event):
+        if not self.scroll_shift_wheel(event):
+            super().wheelEvent(event)
 
 
 class ColumnPicker(QtWidgets.QToolButton):
@@ -106,14 +139,79 @@ class ColumnPicker(QtWidgets.QToolButton):
         self.selectionChanged.emit(list(self._selected))
 
 
+_NUMBER_FRAGMENT = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d*)?"
+_FILTER_FRAGMENT = re.compile(rf"{_NUMBER_FRAGMENT}|[\w.]+|[!<>=]=?|[+-]")
+_FILTER_TOKEN = re.compile(
+    r"""("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\x60[^\x60]*\x60)|(["'\x60].*)|("""
+    + _NUMBER_FRAGMENT + r"""|[\w.]+|[!<>=]=?|\S)"""
+)
+_COLUMN_ARGUMENT = "<column>"
+_TEXT_ARGUMENT = "text"
+_TEXT_ARGUMENT_PREFIX = ', "'
+_TEXT_ARGUMENT_TAIL = _TEXT_ARGUMENT_PREFIX + _TEXT_ARGUMENT + '")'
+_TEXT_FUNCTION_OPENINGS = tuple(name + "(" for name in TEXT_OPERATORS)
+_TEXT_FUNCTION_SNIPPETS = {
+    opening + _COLUMN_ARGUMENT + _TEXT_ARGUMENT_TAIL: opening for opening in _TEXT_FUNCTION_OPENINGS
+}
+
+
+def _value_position(tokens, columns):
+    """Identify the column that owns the comparison or text argument."""
+    previous = tokens[-1].group() if tokens else ""
+    comparison = len(tokens) > 1 and previous in COMPARISON_OPERATORS
+    function = (len(tokens) >= 4 and previous == "," and tokens[-3].group() == "("
+                and tokens[-4].group() in TEXT_OPERATORS)
+    name = tokens[-2].group().strip("\x60") if comparison or function else ""
+    return (name, function) if name in columns else ("", False)
+
+
+def _filter_completions(text, columns, catalog):
+    """Return the active token and suggestions for the syntactic position."""
+    tokens = list(_FILTER_TOKEN.finditer(text))
+    last = tokens[-1] if tokens else None
+    start, fragment = len(text), ""
+    if last and last.end() == len(text) and (
+        last.group(2) or _FILTER_FRAGMENT.fullmatch(last.group())
+    ):
+        start, fragment = last.start(), last.group()
+        tokens.pop()
+    field, as_text = _value_position(tokens, columns)
+    if fragment.startswith(("'", '"')):
+        try:
+            query = ast.literal_eval(fragment + fragment[0])
+        except (ValueError, SyntaxError):
+            query = fragment[1:]
+        return start, catalog.suggestions(field, query, text=True) if field else []
+    literals = catalog.suggestions(field, fragment, text=as_text) if field else []
+    previous = tokens[-1].group() if tokens else ""
+    if previous == "is":
+        options, headers = ("None", "not None"), ()
+    elif previous == "not" and len(tokens) > 1 and tokens[-2].group() == "is":
+        options, headers = ("None",), ()
+    elif previous in COMPARISON_OPERATORS or previous == ",":
+        options, headers = ("True", "False", "None"), columns
+    elif previous == "(" and len(tokens) > 1 and tokens[-2].group() in TEXT_OPERATORS:
+        options, headers = (), columns
+    elif previous in ("", "(", "and", "or", "not"):
+        options, headers = ("not", "(") + tuple(_TEXT_FUNCTION_SNIPPETS), columns
+    else:
+        options, headers = ("and", "or", "is None", "is not None") + COMPARISON_OPERATORS, ()
+    choices = [item for item in options if item.casefold().startswith(fragment.casefold())]
+    if not fragment or not fragment[0].isdigit():
+        choices.extend(column_expression(name) for name in fuzzy_matches(headers, fragment.lstrip("`")))
+    return start, list(dict.fromkeys(literals + choices))
+
+
 class ColumnCompletion(QtCore.QObject):
     """Complete exact CSV headers, optionally within a filter expression."""
 
-    def __init__(self, widget, *, expression=False):
+    def __init__(self, widget, *, expression=False, choices=None):
         super().__init__(widget)
         self.widget, self.expression = widget, expression
         self.enabled = True
         self.columns = []
+        self.value_catalog = FilterValueCatalog() if expression else None
+        self.choices = choices
         self.model = QtCore.QStringListModel([], widget)
         self.completer = QtWidgets.QCompleter(self.model, widget)
         self.completer.setCaseSensitivity(qt_enum("CaseSensitivity", "CaseInsensitive"))
@@ -135,24 +233,25 @@ class ColumnCompletion(QtCore.QObject):
         self.columns = list(dict.fromkeys(columns))
         self.model.setStringList(self.columns)
 
-    def _token(self):
-        text = self.widget.text()[:self.widget.cursorPosition()]
-        if text.count('"') % 2 or text.count("'") % 2:
-            return None
-        return re.search(r"`[^`]*$|[\w.]+$", text)
+    def set_value_dataset(self, dataset):
+        if self.value_catalog.dataset is not dataset:
+            self.value_catalog = FilterValueCatalog(dataset)
+
+    def _prefix_end(self):
+        if self.widget.selectedText() in (_COLUMN_ARGUMENT, _TEXT_ARGUMENT):
+            return self.widget.selectionStart()
+        return self.widget.cursorPosition()
 
     def refresh(self, *args):
         if not self.enabled:
             self.completer.popup().hide()
             return
         if self.expression:
-            match = self._token()
-            if match is None:
-                self.completer.popup().hide()
-                return
-            query = match.group().lstrip("`")
-            values = [name if re.fullmatch(r"[^\W\d]\w*(?:\.\w+)*", name) else f"`{name}`"
-                      for name in fuzzy_matches(self.columns, query)]
+            _, values = _filter_completions(
+                self.widget.text()[:self._prefix_end()], self.columns, self.value_catalog
+            )
+        elif self.choices is not None:
+            values = self.choices(self.widget.text())
         else:
             query = self.widget.text()
             values = fuzzy_matches(self.columns, query)
@@ -160,33 +259,113 @@ class ColumnCompletion(QtCore.QObject):
         if values:
             self.completer.setCompletionPrefix("")
             self.completer.complete()
-            self.completer.popup().setCurrentIndex(self.completer.completionModel().index(0, 0))
+            index = QtCore.QModelIndex() if self.expression else self.completer.completionModel().index(0, 0)
+            self.completer.popup().setCurrentIndex(index)
         else:
             self.completer.popup().hide()
 
     def _accept(self, value):
+        self.completer.popup().hide()
         if not self.expression:
             self.widget.setText(value)
             self.widget.setCursorPosition(len(value))
-            self.completer.popup().hide()
             return
-        match = self._token()
-        if match is not None:
-            end = self.widget.cursorPosition()
-            self.widget.setText(self.widget.text()[:match.start()] + value + self.widget.text()[end:])
-            self.widget.setCursorPosition(match.start() + len(value))
-        self.completer.popup().hide()
+        text, end = self.widget.text(), self.widget.cursorPosition()
+        prefix_end = self._prefix_end()
+        start, _ = _filter_completions(text[:prefix_end], self.columns, self.value_catalog)
+        if text[start:prefix_end].startswith(("'", '"')):
+            literal = _FILTER_TOKEN.match(text, start)
+            if literal and literal.group(1):
+                end = literal.end()
+        elif start < prefix_end:
+            remaining = re.match(r"[\w.]*", text[end:])
+            end += len(remaining.group())
+        opening = _TEXT_FUNCTION_SNIPPETS.get(value)
+        if opening:
+            if text[end:].lstrip().startswith("("):
+                name = opening[:-1]
+                self.widget.setText(text[:start] + name + text[end:])
+                self.widget.setCursorPosition(start + len(name) + text[end:].index("(") + 1)
+            else:
+                self.widget.setText(text[:start] + value + text[end:])
+                self.widget.setSelection(start + len(opening), len(_COLUMN_ARGUMENT))
+            self.refresh()
+            return
+        if value in ("and", "or", "not", *COMPARISON_OPERATORS) and not text[end:end + 1].isspace():
+            value += " "
+        self.widget.setText(text[:start] + value + text[end:])
+        position = start + len(value)
+        if text[end:].startswith(_TEXT_ARGUMENT_TAIL) and text[:start].rstrip().endswith(_TEXT_FUNCTION_OPENINGS):
+            self.widget.setSelection(position + len(_TEXT_ARGUMENT_PREFIX), len(_TEXT_ARGUMENT))
+            self.refresh()
+        else:
+            self.widget.setCursorPosition(position)
 
     def eventFilter(self, obj, event):
         if self.enabled and event.type() == QtCore.QEvent.KeyPress and self.completer.popup().isVisible():
-            if event.key() in (qt_enum("Key", "Key_Tab"), qt_enum("Key", "Key_Return"), qt_enum("Key", "Key_Enter")):
+            enter = event.key() in (qt_enum("Key", "Key_Return"), qt_enum("Key", "Key_Enter"))
+            if enter and self.expression:
+                self.completer.popup().hide()
+                self.widget.returnPressed.emit()
+                return True
+            if enter and self.choices is not None:
+                self.completer.popup().hide()
+                return False
+            if enter or event.key() == qt_enum("Key", "Key_Tab"):
                 index = self.completer.popup().currentIndex()
                 if not index.isValid():
                     index = self.model.index(0, 0)
                 self._accept(str(index.data()))
-                self.completer.popup().hide()
                 return True
         return super().eventFilter(obj, event)
+
+
+def filter_condition_dialog(parent, columns, catalog):
+    """Build one filter condition from an exact column, operator and value."""
+    dialog = QtWidgets.QDialog(parent)
+    dialog.setWindowTitle("Add filter condition")
+    form = QtWidgets.QFormLayout(dialog)
+    column = QtWidgets.QComboBox()
+    column.addItems(columns)
+    operation = QtWidgets.QComboBox()
+    for title, expression in (
+        ("Contains text", "contains"), ("Does not contain text", "not contains"),
+        ("Starts with", "startswith"), ("Ends with", "endswith"),
+        ("Is empty", "is None"), ("Is not empty", "is not None"),
+    ):
+        operation.addItem(title, expression)
+    for comparison in COMPARISON_OPERATORS:
+        operation.addItem(comparison, comparison)
+    value = QtWidgets.QLineEdit()
+
+    def value_choices(query):
+        text = operation.currentData() in TEXT_OPERATORS or operation.currentData() == "not contains"
+        return catalog.suggestions(column.currentText(), query, text=text, literal=not text)
+
+    ColumnCompletion(value, choices=value_choices)
+    operation.currentIndexChanged.connect(
+        lambda: value.setEnabled(operation.currentData() not in ("is None", "is not None"))
+    )
+    form.addRow("Column", column)
+    form.addRow("Condition", operation)
+    form.addRow("Value", value)
+    buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+    buttons.accepted.connect(dialog.accept)
+    buttons.rejected.connect(dialog.reject)
+    form.addRow(buttons)
+    if dialog.exec_() != QtWidgets.QDialog.Accepted:
+        return ""
+    name, op, raw = column_expression(column.currentText()), operation.currentData(), value.text()
+    if op in TEXT_OPERATORS or op == "not contains":
+        return f"{op}({name}, {raw!r})"
+    if op in ("is None", "is not None"):
+        return f"{name} {op}"
+    try:
+        parsed = ast.literal_eval(raw)
+    except (ValueError, SyntaxError):
+        parsed = raw
+    literal = parsed if isinstance(parsed, (bool, int, float, str)) else raw
+    return f"{name} {op} {literal!r}"
 
 
 class CommandCompletion(QtCore.QObject):

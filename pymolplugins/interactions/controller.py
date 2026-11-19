@@ -21,6 +21,10 @@ import uuid
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from pymolplugins.core.parameters import extend_command
+from .contact_queries import (
+    H_BOND_ANGLE, find_pairs as _find_pairs,
+    hydrogen_bond_specs as _hbond_specs, salt_bridge_specs as _salt_specs,
+)
 
 try:
     from pymolplugins.interactions.presets import PRESETS, preset_parameters
@@ -69,7 +73,6 @@ except ImportError:  # Normal for WSL schema/fake-cmd tests.
 
 
 LOCAL_BACKEND_VERSION = "1.0"
-H_BOND_ANGLE = 45.0
 _CMD_CONTROLLER_ATTR = "_pymolplugins_interaction_controller_v1"
 _CMD_RUNS_ATTR = "_pymolplugins_interaction_runs_v1"
 _MANIFEST_PROPERTY = "_pymolplugins_interaction_manifest"
@@ -85,15 +88,6 @@ _COMPLETION_LISTENERS: Dict[str, Any] = (
 )
 _OUTPUT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 _OWNER_RUN_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
-_POSITIVE_ATOMS = (
-    "((resn ARG and name NH1+NH2+NE) or (resn LYS and name NZ) "
-    "or (formal_charge > 0))"
-)
-_NEGATIVE_ATOMS = (
-    "((resn ASP and name OD1+OD2) or (resn GLU and name OE1+OE2) "
-    "or (resn SEP+TPO+PTR and name O1P+O2P+O3P+OP1+OP2+OP3) "
-    "or (formal_charge < 0))"
-)
 
 
 def _as_bool(value: Any) -> bool:
@@ -176,43 +170,6 @@ def _get_chains(cmd_api: Any, selection: str, state: int) -> List[str]:
 
 def _atom_key(atom: Any) -> Tuple[str, int]:
     return (str(getattr(atom, "model", "")), int(getattr(atom, "index")))
-
-
-def _pair_key(value: Any) -> Tuple[str, int]:
-    if not isinstance(value, (tuple, list)) or len(value) != 2:
-        raise ValueError("PyMOL find_pairs returned an invalid atom reference: %r" % (value,))
-    return (str(value[0]), int(value[1]))
-
-
-def _find_pairs(
-    cmd_api: Any,
-    selection1: str,
-    selection2: str,
-    cutoff: float,
-    mode: int,
-    state: int,
-) -> Tuple[Tuple[Tuple[str, int], Tuple[str, int]], ...]:
-    base = {"cutoff": cutoff, "mode": mode}
-    state_kwargs = dict(base, state1=state, state2=state)
-    attempts = []
-    if mode == 1:
-        attempts.append(dict(state_kwargs, angle=H_BOND_ANGLE))
-    attempts.append(state_kwargs)
-    if mode == 1:
-        attempts.append(dict(base, angle=H_BOND_ANGLE))
-    attempts.append(base)
-    last_error = None
-    for kwargs in attempts:
-        try:
-            raw = cmd_api.find_pairs(selection1, selection2, **kwargs)
-            break
-        except TypeError as exc:
-            last_error = exc
-    else:  # pragma: no cover - every supported PyMOL accepts the base call.
-        assert last_error is not None
-        raise last_error
-    pairs = {(_pair_key(item[0]), _pair_key(item[1])) for item in raw}
-    return tuple(sorted(pairs))
 
 
 def _coordinates(atom: Any) -> Tuple[float, float, float]:
@@ -378,36 +335,6 @@ def _interactions_from_specs(
     return tuple(interactions[key] for key in sorted(interactions))
 
 
-def _hbond_specs(
-    partner1: str,
-    partner2: str,
-    cutoff: float,
-    subtype: str = "donor_acceptor",
-) -> Tuple[Tuple[str, str, float, int, str, str, str, str], ...]:
-    return (
-        (
-            "(%s) and donor" % partner1,
-            "(%s) and acceptor" % partner2,
-            cutoff,
-            1,
-            "hydrogen_bond",
-            subtype,
-            "donor",
-            "acceptor",
-        ),
-        (
-            "(%s) and donor" % partner2,
-            "(%s) and acceptor" % partner1,
-            cutoff,
-            1,
-            "hydrogen_bond",
-            subtype,
-            "donor",
-            "acceptor",
-        ),
-    )
-
-
 def _polar_clash_specs(
     partner1: str, partner2: str, cutoff: float
 ) -> Tuple[Tuple[str, str, float, int, str, str, str, str], ...]:
@@ -478,33 +405,6 @@ def _polar_interactions(
     )
     values = {value.id: value for value in good + weak + clashes}
     return tuple(values[key] for key in sorted(values))
-
-
-def _salt_specs(
-    partner1: str, partner2: str, cutoff: float
-) -> Tuple[Tuple[str, str, float, int, str, str, str, str], ...]:
-    return (
-        (
-            "(%s) and %s" % (partner1, _POSITIVE_ATOMS),
-            "(%s) and %s" % (partner2, _NEGATIVE_ATOMS),
-            cutoff,
-            0,
-            "salt_bridge",
-            "positive_negative",
-            "positive",
-            "negative",
-        ),
-        (
-            "(%s) and %s" % (partner2, _POSITIVE_ATOMS),
-            "(%s) and %s" % (partner1, _NEGATIVE_ATOMS),
-            cutoff,
-            0,
-            "salt_bridge",
-            "positive_negative",
-            "positive",
-            "negative",
-        ),
-    )
 
 
 def _residue_key(atom: Any) -> Tuple[str, str, str, str, str]:

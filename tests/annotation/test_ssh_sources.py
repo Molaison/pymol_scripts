@@ -19,6 +19,7 @@ import unittest
 from unittest.mock import patch
 
 from pymolplugins.remote import ssh_worker
+from pymolplugins.remote.import_cache import MAX_SOURCES, clear_remote_imports
 from pymolplugins.remote.ssh import (
     SshCancelled, SshClient, SshError, SshLocation, parse_ssh_path,
     close_ssh_sessions, ssh_profiles, ssh_source_root, ssh_progress,
@@ -57,6 +58,81 @@ class SshSourceTests(unittest.TestCase):
             writer = csv.writer(handle, delimiter="\t")
             writer.writerow(["structure_path", "AC.iptm"])
             writer.writerows((path, "0.9") for path in paths)
+
+    def test_recent_imports_revalidate_before_reusing_remote_content(self):
+        self.write_table(["one.pdb"])
+        (self.remote / "one.pdb").write_text("structure")
+        generated = self.remote / "review.json"
+        generated.write_text(json.dumps({"path_column": "structure_path"}))
+        folder = self.location.at(str(self.remote))
+        originals = {name: getattr(SshClient, name) for name in ("read_header", "download", "list_directory", "read_small_files")}
+        with patch.object(SshClient, "read_header", autospec=True, side_effect=originals["read_header"]) as header, \
+                patch.object(SshClient, "download", autospec=True, side_effect=originals["download"]) as download, \
+                patch.object(SshClient, "list_directory", autospec=True, side_effect=originals["list_directory"]) as listing, \
+                patch.object(SshClient, "read_small_files", autospec=True, side_effect=originals["read_small_files"]) as review:
+            for _ in range(2):
+                self.assertEqual(read_csv_header(self.location.uri)["columns"], ("structure_path", "AC.iptm"))
+                self.assertEqual(CsvDatasetSource(self.location.uri, "structure_path").load().entries[0].metadata["AC.iptm"], "0.9")
+                self.assertEqual(read_review_file(self.location.uri).config["path_column"], "structure_path")
+                self.assertEqual([entry.display_name for entry in load_ssh_directory(folder.uri).entries], ["one.pdb"])
+            self.assertEqual((header.call_count, download.call_count, listing.call_count, review.call_count), (1, 1, 1, 1))
+
+            before = self.table.stat()
+            self.table.write_bytes(self.table.read_bytes().replace(b"0.9", b"0.7"))
+            os.utime(self.table, ns=(before.st_atime_ns, before.st_mtime_ns))
+            self.assertEqual(CsvDatasetSource(self.location.uri, "structure_path").load().entries[0].metadata["AC.iptm"], "0.7")
+            generated.write_text(json.dumps({"path_column": "structure_path", "label_column": "AC.iptm"}))
+            self.assertEqual(read_review_file(self.location.uri).config["label_column"], "AC.iptm")
+            (self.remote / "two.pdb").write_text("structure")
+            self.assertEqual([entry.display_name for entry in load_ssh_directory(folder.uri).entries], ["one.pdb", "two.pdb"])
+            self.assertEqual((download.call_count, listing.call_count, review.call_count), (2, 2, 2))
+
+    def test_recent_import_limit_and_clear_do_not_remove_review_state(self):
+        self.write_table(["model.pdb"])
+        paths = []
+        for index in range(MAX_SOURCES + 1):
+            path = self.remote / f"scores-{index}.tsv"
+            path.write_bytes(self.table.read_bytes())
+            paths.append(self.location.at(str(path)).uri)
+        store = RowAnnotationStore(annotation_sidecar_path(paths[0]))
+        store.set_many([{"entry_id": "row", "label": "quality", "value": "Good"}])
+        download = SshClient.download
+        with patch.object(SshClient, "download", autospec=True, side_effect=download) as reads:
+            for path in paths:
+                CsvDatasetSource(path, "structure_path").load()
+            self.assertEqual(reads.call_count, MAX_SOURCES + 1)
+            CsvDatasetSource(paths[-1], "structure_path").load()
+            self.assertEqual(reads.call_count, MAX_SOURCES + 1)
+            CsvDatasetSource(paths[0], "structure_path").load()
+            self.assertEqual(reads.call_count, MAX_SOURCES + 2)
+            self.assertEqual(clear_remote_imports(), MAX_SOURCES)
+            CsvDatasetSource(paths[-1], "structure_path").load()
+            self.assertEqual(reads.call_count, MAX_SOURCES + 3)
+        self.assertEqual(store.annotations_for("row")["quality"], "Good")
+
+    def test_clear_blocks_an_older_download_from_republishing(self):
+        self.write_table(["model.pdb"])
+        downloading, release = threading.Event(), threading.Event()
+        original = SshClient.download
+
+        def delayed(client, destination, **options):
+            downloading.set()
+            if not release.wait(5):
+                raise TimeoutError("fixture did not release the download")
+            return original(client, destination, **options)
+
+        source = CsvDatasetSource(self.location.uri, "structure_path")
+        with patch.object(SshClient, "download", autospec=True, side_effect=delayed) as reads:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(source.load)
+                try:
+                    self.assertTrue(downloading.wait(5))
+                    self.assertEqual(clear_remote_imports(), 0)
+                finally:
+                    release.set()
+                self.assertEqual(future.result(timeout=5).count, 1)
+            self.assertEqual(source.load().count, 1)
+            self.assertEqual(reads.call_count, 2)
 
     def test_uri_roundtrip_home_relative_and_config(self):
         self.assertEqual(parse_ssh_path("ssh://cluster-one/data/scores.csv"), SshLocation("cluster-one", "/data/scores.csv"))

@@ -1,8 +1,42 @@
 """Column expressions for CSV views, interpreted without executing Python."""
 
 import ast
+from itertools import chain
+import keyword
 import math
 import operator
+import re
+
+
+COMPARISON_OPERATORS = ("==", "!=", "<", "<=", ">", ">=")
+TEXT_OPERATORS = {"contains": operator.contains, "startswith": str.startswith, "endswith": str.endswith}
+_PAREN_TOKEN = re.compile(r"""(?:"(?:\\.|[^"\\])*"?|'(?:\\.|[^'\\])*'?|\x60[^\x60]*\x60?)|([()])""")
+
+
+def filter_parentheses(expression):
+    """Return matched pairs and unmatched delimiters outside quoted values."""
+    stack, extra, pairs = [], set(), {}
+    for token in _PAREN_TOKEN.finditer(expression):
+        if token.group(1) == "(":
+            stack.append(token.start())
+        elif token.group(1) == ")":
+            if stack:
+                pairs[stack.pop()] = token.start()
+            else:
+                extra.add(token.start())
+    return pairs, extra.union(stack)
+
+
+def remove_unmatched_parentheses(expression):
+    _, extra = filter_parentheses(expression)
+    return "".join(character for index, character in enumerate(expression) if index not in extra) if extra else expression
+
+
+def column_expression(name):
+    """Spell a column name for insertion into a filter."""
+    if all(part.isidentifier() and not keyword.iskeyword(part) for part in name.split(".")):
+        return name
+    return f"`{name}`"
 
 
 class FilterSyntaxError(ValueError):
@@ -20,7 +54,10 @@ def validate_filter_presets(raw, columns=None):
             raise ValueError("Each filter preset needs name/expression and optional sort_column/sort_descending")
         if any(not isinstance(preset[key], str) or not preset[key].strip() for key in ("name", "expression")):
             raise ValueError("Filter names and expressions must be nonempty strings")
-        name, expression = preset["name"].strip(), preset["expression"].strip()
+        name = preset["name"].strip()
+        expression = remove_unmatched_parentheses(preset["expression"]).strip()
+        if not expression:
+            raise ValueError("Filter expression is empty after removing unmatched parentheses")
         if name in names:
             raise ValueError("Duplicate filter name: " + name)
         names.add(name)
@@ -81,6 +118,15 @@ def _empty(value):
     return value is None or (isinstance(value, str) and not value.strip())
 
 
+def _number(value):
+    if isinstance(value, (int, float)):
+        return value
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return float(value)
+
+
 def _compare(left, right, operation):
     if isinstance(operation, (ast.Is, ast.IsNot)):
         empty = _empty(left)
@@ -98,10 +144,10 @@ def _compare(left, right, operation):
             return False
     elif isinstance(left, (int, float)) or isinstance(right, (int, float)):
         try:
-            left, right = float(left), float(right)
+            left, right = _number(left), _number(right)
         except (TypeError, ValueError):
             return False
-        if not math.isfinite(left) or not math.isfinite(right):
+        if any(isinstance(value, float) and not math.isfinite(value) for value in (left, right)):
             return False
     operations = {
         ast.Eq: operator.eq, ast.NotEq: operator.ne, ast.Lt: operator.lt,
@@ -110,15 +156,30 @@ def _compare(left, right, operation):
     return operations[type(operation)](left, right)
 
 
+def _text_search(text):
+    needle = str(text or "").strip().casefold()
+    return lambda row, extra=(): not needle or any(
+        needle in str(value).casefold() for value in chain(extra, row.values())
+    )
+
+
+def compile_view_filter(query, columns):
+    """Compile a saved view's search or condition against an annotation entry."""
+    text = str(query or "")
+    predicate = compile_filter(text[6:], columns) if text.startswith("where:") else _text_search(text)
+    return lambda entry: bool(predicate(entry.metadata, (entry.display_name, entry.source_path, entry.resolved_path)))
+
+
 def compile_filter(expression, columns):
     """Compile a column condition into a callable accepting raw row metadata.
 
-    Supports comparisons, and/or/not, parentheses, contains(column, text), and
+    Supports comparisons, and/or/not, parentheses, text matching functions, and
     ``is None``. Backticks quote names containing spaces or punctuation.
+    The predicate accepts optional extra searchable text for ``text_search``.
     """
     text = str(expression).strip()
     if not text:
-        return lambda row: True
+        return lambda row, extra=(): True
     text, aliases = _quoted_columns(text)
     try:
         tree = ast.parse(text, mode="eval")
@@ -130,27 +191,27 @@ def compile_filter(expression, columns):
 
 def _compile_node(node, columns, aliases):
     if isinstance(node, ast.Constant) and isinstance(node.value, (str, int, float, bool, type(None))):
-        return lambda row: node.value
+        return lambda row, extra=(): node.value
     if isinstance(node, (ast.Name, ast.Attribute)):
         name = _column_name(node)
         if name in {"true", "false", "null"} and name not in columns:
-            return lambda row: {"true": True, "false": False, "null": None}[name]
+            return lambda row, extra=(): {"true": True, "false": False, "null": None}[name]
         name = aliases.get(name, name)
         if name not in columns:
             raise FilterSyntaxError(f"Unknown CSV column {name!r}; choose a name from the column list")
-        return lambda row: row.get(name)
+        return lambda row, extra=(): row.get(name)
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
         if not isinstance(node.operand, ast.Constant) or not isinstance(node.operand.value, (int, float)):
             raise FilterSyntaxError("A sign must precede a number")
         value = node.operand.value * (-1 if isinstance(node.op, ast.USub) else 1)
-        return lambda row: value
+        return lambda row, extra=(): value
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
         value = _compile_node(node.operand, columns, aliases)
-        return lambda row: not value(row)
+        return lambda row, extra=(): not value(row, extra)
     if isinstance(node, ast.BoolOp):
         values = [_compile_node(value, columns, aliases) for value in node.values]
         combine = all if isinstance(node.op, ast.And) else any
-        return lambda row: combine(value(row) for value in values)
+        return lambda row, extra=(): combine(value(row, extra) for value in values)
     if isinstance(node, ast.Compare):
         allowed = (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.Is, ast.IsNot)
         if not all(isinstance(op, allowed) for op in node.ops):
@@ -159,8 +220,25 @@ def _compile_node(node, columns, aliases):
             if isinstance(op, (ast.Is, ast.IsNot)) and not (isinstance(value, ast.Constant) and value.value is None):
                 raise FilterSyntaxError("Use 'is None' or 'is not None' for empty cells")
         values = [_compile_node(value, columns, aliases) for value in [node.left] + node.comparators]
-        return lambda row: all(_compare(values[i](row), values[i+1](row), op) for i, op in enumerate(node.ops))
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "contains" and len(node.args) == 2 and not node.keywords:
+        return lambda row, extra=(): all(
+            _compare(values[i](row, extra), values[i+1](row, extra), op) for i, op in enumerate(node.ops)
+        )
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "text_search":
+        if len(node.args) == 1 and not node.keywords and isinstance(node.args[0], ast.Constant):
+            if isinstance(node.args[0].value, str):
+                return _text_search(node.args[0].value)
+        raise FilterSyntaxError("Use text_search with one quoted text value")
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "header_filter"
+            and len(node.args) == 1 and not node.keywords):
+        return _compile_node(node.args[0], columns, aliases)
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id in TEXT_OPERATORS and len(node.args) == 2 and not node.keywords):
         value, needle = [_compile_node(arg, columns, aliases) for arg in node.args]
-        return lambda row: str(needle(row)).casefold() in str(value(row) or "").casefold()
+        match = TEXT_OPERATORS[node.func.id]
+
+        def text_match(row, extra=()):
+            cell = value(row, extra)
+            return match(str(cell if cell is not None else "").casefold(), str(needle(row, extra)).casefold())
+
+        return text_match
     raise FilterSyntaxError("Unsupported filter; use column comparisons joined with and/or")

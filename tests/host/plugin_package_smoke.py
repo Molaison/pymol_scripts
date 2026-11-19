@@ -315,7 +315,7 @@ def _check_onboarding(annotation, directory, menu, output):
             "evidence_boundary": "Automated native first-use flow; not a timed study with a new human user."}
 
 
-def _check_install(package, directory, parent, menu, *, onboarding=False, output=None):
+def _check_install(package, directory, parent, menu, *, onboarding=False, bundle=False, output=None):
     from pymol import cmd, plugins
     from pymol.plugins.installation import installPluginFromFile
 
@@ -330,13 +330,19 @@ def _check_install(package, directory, parent, menu, *, onboarding=False, output
     for name, module in list(sys.modules.items()):
         if name == "pymolplugins" or name.startswith("pymolplugins."):
             Path(module.__file__).resolve().relative_to(installed.resolve())
+    annotation = importlib.import_module("pymolplugins.annotation.plugin")
+    assert callable(annotation.show_structure_annotator_panel)
+    assert Path(annotation.__file__).resolve().is_relative_to(installed.resolve())
+    if bundle:
+        from annotator_bundle_package_smoke import check_bundles
+        result = check_bundles(annotation, directory, menu)
+        return {"status": "passed", "plugin_version": info.get_version(),
+                "pymol_version": cmd.get_version()[0], "renderer": cmd.get_renderer(),
+                "installed_entry": info.filename, "bundle": result}
     labels = [action.text() for action in menu.actions()]
     assert len(labels) == 7 and "PymolPlugins: Structure Annotator" in labels, labels
     assert "PymolPlugins: Batch Processing" in labels, labels
     assert "PymolPlugins: Updates" in labels, labels
-    annotation = importlib.import_module("pymolplugins.annotation.plugin")
-    assert callable(annotation.show_structure_annotator_panel)
-    assert Path(annotation.__file__).resolve().is_relative_to(installed.resolve())
     if onboarding:
         result = _check_onboarding(annotation, directory, menu, output)
         return {"status": "passed", "plugin_version": info.get_version(),
@@ -404,9 +410,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("package", type=Path)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--onboarding-only", action="store_true")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--onboarding-only", action="store_true")
+    modes.add_argument("--bundle-only", action="store_true",
+                       help="run the installed Bundle regression on an isolated Windows desktop")
     args = parser.parse_args()
-    package_sha256 = hashlib.sha256(args.package.read_bytes()).hexdigest()
+    if args.bundle_only:
+        from annotator_bundle_package_smoke import desktop_name
+        desktop_name()
+    else:
+        package_sha256 = hashlib.sha256(args.package.read_bytes()).hexdigest()
     assert os.name == "nt", "Run this check with Windows PyMOL's Python"
     assert not os.getcwd().startswith("\\\\"), "Use a Windows-local working directory"
     from pymol import plugins
@@ -416,7 +429,7 @@ def main():
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     app.setQuitOnLastWindowClosed(False)
-    if args.onboarding_only:
+    if args.onboarding_only or args.bundle_only:
         from pymol import invocation, gui as pymol_gui
         from pmg_qt.pymol_qt_gui import PyMOLQtGUI
         invocation.parse_args(["pymol", "-k", "-q"])
@@ -439,7 +452,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="PymolPlugins-install-") as temporary:
         os.environ["PYMOLPLUGINS_ANNOTATOR_MAPPINGS"] = str(Path(temporary) / "mappings.json")
         os.environ["PYMOLPLUGINS_ANNOTATOR_HISTORY"] = str(Path(temporary) / "history.json")
-        if args.onboarding_only:
+        if args.onboarding_only or args.bundle_only:
             os.environ["PYMOLPLUGINS_STRUCTURE_CACHE_DIR"] = str(Path(temporary) / "cache")
         isolate_workspace_settings(temporary, parent, mode=None)
         plugins.set_startup_path([temporary], autosave=False)
@@ -448,20 +461,24 @@ def main():
                 patch.object(legacysupport, "tkMessageBox", messagebox):
             try:
                 result = _check_install(args.package.resolve(), Path(temporary), parent, menu,
-                                        onboarding=args.onboarding_only, output=args.output)
+                                        onboarding=args.onboarding_only, bundle=args.bundle_only,
+                                        output=args.output)
             except Exception:
                 result = {"status": "failed", "traceback": traceback.format_exc()}
-        assert dialogs == [["Success", 'Plugin "pymol_plugins" has been installed.']], dialogs
+        if result["status"] == "passed":
+            assert dialogs == [["Success", 'Plugin "pymol_plugins" has been installed.']], dialogs
         result["dialogs"] = dialogs
-        result["package_sha256"] = package_sha256
+        if not args.bundle_only:
+            result["package_sha256"] = package_sha256
         result["package_path"] = str(args.package)
-    if not args.onboarding_only:
+    if not (args.onboarding_only or args.bundle_only):
         parent.close()
         app.processEvents()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(result, indent=2)
     args.output.write_text(text + "\n", encoding="utf-8")
-    print(text, file=sys.__stdout__, flush=True)
+    if sys.__stdout__ is not None:
+        print(text, file=sys.__stdout__, flush=True)
     from pymol import cmd
     cmd.quit(0 if result["status"] == "passed" else 1)
 

@@ -502,6 +502,15 @@ _COMMAND_ROWS = {
         ("pp_help pp_nav_start", "pp_help surface", "pp_help publication"),
         ("usage", "examples", "search"),
     ),
+    "pp_wizard": (
+        "Open a modeless introduction to loading data, reviewing, saving, and toolkit commands.",
+        "pp_wizard [welcome|data|review|tools|finish]",
+        "pp_wizard",
+        False,
+        None,
+        ("pp_wizard data", "pp_wizard tools", "pp_help"),
+        ("getting started", "introduction", "guide", "wizard", "入门", "向导", "介绍"),
+    ),
     "pp_target_resolve": (
         "Preview exact, glob, contains, regex, or fuzzy object/group matching.",
         "pp_target_resolve TARGETS [, match=auto]",
@@ -595,6 +604,15 @@ _COMMAND_ROWS = {
         "pp_nav_unpin",
         ("pp_nav_next", "pp_nav_clear_pins"),
         ("keep", "visible"),
+    ),
+    "pp_nav_refresh": (
+        "Inspect group membership changes and explicitly accept them while keeping your place.",
+        "pp_nav_refresh [confirm=0|1] [, dialog=0|1]",
+        "pp_nav_refresh dialog=1",
+        True,
+        None,
+        ("pp_nav_next", "pp_nav_status", "pp_nav_stop"),
+        ("refresh", "regroup", "membership"),
     ),
     "pp_nav_stop": (
         "Stop navigation and release its managed scene/key state.",

@@ -105,6 +105,10 @@ def _header(panel, layout):
     menu.addAction("Open data…", panel._show_import)
     menu.addAction("Continue last review", panel._continue_last_review)
     panel.history_action = menu.addAction("Recent configurations…", panel._show_configuration_history)
+    remote_data = menu.addMenu("Remote data")
+    panel.reload_remote_action = remote_data.addAction("Check for updates and reload", panel._reload_remote_data)
+    panel.clear_remote_cache_action = remote_data.addAction("Clear remote import cache", panel._clear_remote_cache)
+    remote_data.aboutToShow.connect(panel._update_remote_actions)
     menu.addSeparator()
     panel.export_action = menu.addAction("Export annotations…", panel._export_csv)
     panel.handoff_action = menu.addAction("Export review handoff…", panel._export_review_handoff)
@@ -117,9 +121,10 @@ def _header(panel, layout):
     panel.quick_start_button = QtWidgets.QToolButton()
     panel.quick_start_button.setText("?")
     panel.quick_start_button.setProperty("role", "icon")
-    panel.quick_start_button.setAccessibleName("Quick start")
-    panel.quick_start_button.setToolTip("Quick start")
-    panel.quick_start_button.clicked.connect(lambda: panel.source_location.show_quick_start())
+    panel.quick_start_button.setAccessibleName("Getting started")
+    panel.quick_start_button.setToolTip("Getting started · 入门向导")
+    from pymolplugins.host.wizard import show_wizard
+    panel.quick_start_button.clicked.connect(lambda: show_wizard("review"))
     header.addWidget(panel.quick_start_button)
     panel.window_mode_button = WindowModeButton(panel)
     header.addWidget(panel.window_mode_button)
@@ -148,10 +153,11 @@ def _source_page(panel):
     panel.source_mode_combo.currentIndexChanged.connect(panel._source_mode_changed)
     panel.source_mode_combo.hide()
     panel.source_path_edit = QtWidgets.QLineEdit()
-    panel.source_path_edit.setPlaceholderText("Folder or CSV / TSV file")
+    panel.source_path_edit.setPlaceholderText("Paste a path or file link")
     panel.source_path_edit.setAccessibleName("Source path")
     panel.source_path_edit.textChanged.connect(panel._source_path_changed)
     panel.source_path_edit.editingFinished.connect(panel._source_path_edited)
+    panel.source_path_edit.returnPressed.connect(panel._load_dataset)
     panel.dir_edit = panel.csv_edit = panel.source_path_edit
     panel.source_browse_button = QtWidgets.QToolButton()
     panel.source_browse_button.setText("Browse…")
@@ -278,13 +284,58 @@ def _csv_fields(panel, form):
     extra_form.addRow(advanced)
     panel.csv_preview_btn = _button("Check file paths", panel._preview_csv)
     mapping_form.addRow(panel.csv_preview_btn)
+    panel.bundle_check_btn = _button("Check review bundle", panel._check_review_bundle)
+    form.addRow(panel.bundle_check_btn)
+
+
+def _quick_views(panel):
+    from .review_view_presets import QUICK_VIEWS
+
+    panel.quick_views = QtWidgets.QWidget(panel)
+    layout = QtWidgets.QHBoxLayout(panel.quick_views)
+    layout.setContentsMargins(0, 0, 0, 0)
+    panel.quick_view_buttons = {}
+    panel.interface_radius_actions = {}
+    for name, title in QUICK_VIEWS.items():
+        button = QtWidgets.QToolButton(panel.quick_views)
+        button.setText(title)
+        button.setCheckable(True)
+        button.setProperty("role", "view")
+        button.clicked.connect(lambda checked, key=name: panel._choose_quick_view(key if checked else ""))
+        button.setToolTip(f"{title} for this review session. Click again to follow saved commands on the next candidate.")
+        layout.addWidget(button)
+        panel.quick_view_buttons[name] = button
+        if name == "interface":
+            menu = QtWidgets.QMenu(button)
+            for radius in ("4", "6"):
+                action = menu.addAction(radius + " Å neighborhood")
+                action.setCheckable(True)
+                action.setChecked(radius == "4")
+                action.triggered.connect(lambda _checked, value=radius: panel._choose_quick_view("interface", value))
+                panel.interface_radius_actions[radius] = action
+            button.setMenu(menu)
+            button.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
+        elif name == "mass":
+            menu = QtWidgets.QMenu(button)
+            menu.aboutToShow.connect(lambda: panel._fill_mass_view_menu(menu))
+            button.setMenu(menu)
+            button.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
+    panel.quick_view_status = ElidedLabel()
+    panel.quick_view_status.setProperty("role", "muted")
+    panel.quick_view_status.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+    layout.addWidget(panel.quick_view_status, 1)
+    panel.quick_views.setEnabled(False)
+    return panel.quick_views
 
 
 def _review_page(panel):
-    from .plugin import _DatasetTableModel
+    from .plugin import _DatasetTableModel, _get_bg_executor
+    from .qt_widgets import ScoresTable
+    from .score_headers import ScoreProfileHeader
     page = QtWidgets.QWidget()
     layout = QtWidgets.QVBoxLayout(page)
     layout.setContentsMargins(0, 0, 0, 0)
+    layout.addWidget(_quick_views(panel))
     panel.review_splitter = QtWidgets.QSplitter(qt_enum("Orientation", "Horizontal"))
     candidates = card("candidateCard")
     candidates_layout = QtWidgets.QVBoxLayout(candidates)
@@ -315,8 +366,12 @@ def _review_page(panel):
     panel.column_picker.selectionChanged.connect(panel._columns_selected)
     panel.export_btn = _button("Export", panel._export_csv)
     panel.export_btn.hide()
-    panel.dataset_table = QtWidgets.QTableView()
+    panel.dataset_table = ScoresTable()
     panel._dataset_model = _DatasetTableModel(panel.dataset_table)
+    header = ScoreProfileHeader(panel.dataset_table, panel._dataset_model, _get_bg_executor)
+    header.filterRequested.connect(panel._change_header_filter)
+    header.choicesRequested.connect(panel._set_header_filter_choices)
+    panel.dataset_table.setHorizontalHeader(header)
     panel.dataset_table.setModel(panel._dataset_model)
     panel.dataset_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
     panel.dataset_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
@@ -325,7 +380,7 @@ def _review_page(panel):
     panel.dataset_table.setWordWrap(False)
     panel.dataset_table.verticalHeader().hide()
     panel.dataset_table.verticalHeader().setDefaultSectionSize(36)
-    panel.dataset_table.horizontalHeader().setDefaultSectionSize(125)
+    panel.dataset_table.horizontalHeader().setDefaultSectionSize(150)
     panel.dataset_table.horizontalHeader().setDefaultAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
     panel.dataset_table.horizontalHeader().setTextElideMode(QtCore.Qt.ElideRight)
     panel.dataset_table.clicked.connect(panel._dataset_index_clicked)
@@ -355,11 +410,11 @@ def _filter_dialog(panel):
     panel.filter_preset_combo = QtWidgets.QComboBox()
     panel.filter_preset_combo.setAccessibleName("Filter group")
     panel.filter_preset_combo.activated.connect(panel._select_filter_preset)
-    panel.filter_save_button = _button("Save…", panel._save_filter_preset)
+    panel.filter_save_button = _button("Save group…", panel._save_filter_preset)
     panel.filter_delete_button = _button("Delete", panel._delete_filter_preset, "quiet")
     panel.filter_delete_button.setEnabled(False)
     panel.filter_group_row = _row(panel.filter_preset_combo, panel.filter_save_button, panel.filter_delete_button)
-    form.addRow("Group", panel.filter_group_row)
+    form.addRow("Filter group", panel.filter_group_row)
     panel.filter_group_label = form.labelForField(panel.filter_group_row)
     panel.filter_mode_combo = QtWidgets.QComboBox()
     panel.filter_mode_combo.addItems(["Text search", "Column conditions"])
@@ -375,6 +430,12 @@ def _filter_dialog(panel):
     panel.sort_desc_cb = QtWidgets.QCheckBox("Descending")
     form.addRow("Find by", panel.filter_mode_combo)
     form.addRow(panel.filter_edit)
+    panel.filter_expression_tools = _row(
+        _button("Add condition…", panel._add_filter_condition),
+        _button("Group conditions", panel._group_filter_conditions),
+    )
+    panel.filter_expression_tools.hide()
+    form.addRow(panel.filter_expression_tools)
     form.addRow("Sort by", panel.sort_column_combo)
     form.addRow(panel.sort_desc_cb)
     panel.filter_error_label = QtWidgets.QLabel()
@@ -469,8 +530,8 @@ def _settings_page(panel):
     layout = QtWidgets.QVBoxLayout(page)
     layout.setContentsMargins(24, 8, 24, 20)
     layout.setSpacing(20)
-    basic = CollapsibleSection("Annotations", expanded=True)
-    form = QtWidgets.QFormLayout(basic.content)
+
+    form = QtWidgets.QFormLayout()
     panel.label_edit = QtWidgets.QLineEdit()
     panel.label_edit.editingFinished.connect(panel._on_label_changed)
     panel.values_edit = QtWidgets.QLineEdit()
@@ -480,10 +541,35 @@ def _settings_page(panel):
     panel.annotation_fields_button = _button("Configure annotation fields…", lambda: panel.review.configure_fields())
     form.addRow(panel.annotation_fields_button)
     _save_options(panel, form)
-    layout.addWidget(basic)
+    layout.addLayout(form)
+    _command_settings(panel)
+    panel.saved_commands_button = _button("Saved commands…", lambda: _show_command_settings(panel, 0))
+    panel.live_commands_button = _button("Run command once…", lambda: _show_command_settings(panel, 1))
+    layout.addWidget(_row(panel.saved_commands_button, panel.live_commands_button))
     _loading_settings(panel, layout)
-    commands = CollapsibleSection("Automation")
-    command_layout = QtWidgets.QVBoxLayout(commands.content)
+    panel.settings_save_btn = _button("Save settings", panel._save_ui_state)
+    panel.settings_save_btn.setParent(panel)
+    panel.settings_save_btn.hide()
+    layout.addStretch()
+    return page
+
+
+def _show_command_settings(panel, index):
+    panel.command_tabs.setCurrentIndex(index)
+    panel.command_settings_dialog.show()
+    panel.command_settings_dialog.raise_()
+
+
+def _command_settings(panel):
+    dialog = panel.command_settings_dialog = QtWidgets.QDialog(panel)
+    dialog.setWindowTitle("Review commands")
+    dialog.resize(580, 490)
+    layout = QtWidgets.QVBoxLayout(dialog)
+    panel.command_tabs = QtWidgets.QTabWidget(dialog)
+    layout.addWidget(panel.command_tabs)
+    saved = QtWidgets.QWidget()
+    panel.command_tabs.addTab(_scroll(saved), "Saved")
+    command_layout = QtWidgets.QVBoxLayout(saved)
     command_layout.addWidget(_button("Review steps…", panel._edit_review_steps))
     command_layout.addWidget(QtWidgets.QLabel("When a structure opens"))
     panel.step_cmd_edit = QtWidgets.QPlainTextEdit()
@@ -494,12 +580,11 @@ def _settings_page(panel):
     panel.step_cmd_edit.textChanged.connect(panel._commands_edited)
     command_layout.addWidget(panel.step_cmd_edit)
     panel.command_history_btn = _button("Recent commands…", panel._show_command_history, "quiet")
-    command_layout.addWidget(panel.command_history_btn)
     from .ai_widgets import show_ai_commands
     panel.ai_commands_button = _button("AI command drafts…", lambda: show_ai_commands(panel))
     panel.ai_commands_button.setToolTip("Generate editable drafts using the selected AI connection")
-    panel.command_presets_button = _button("Viewing presets…", lambda: show_ai_commands(panel, preset=True))
-    command_layout.addWidget(_row(panel.command_presets_button, panel.ai_commands_button))
+    panel.command_presets_button = _button("Preset editor…", lambda: show_ai_commands(panel, preset=True))
+    command_layout.addWidget(_row(panel.command_presets_button, panel.ai_commands_button, panel.command_history_btn))
     panel.values_box = QtWidgets.QGroupBox("After saving a label")
     panel.values_layout = QtWidgets.QVBoxLayout(panel.values_box)
     command_layout.addWidget(panel.values_box)
@@ -507,14 +592,33 @@ def _settings_page(panel):
     panel.command_draft_label.setProperty("role", "muted")
     panel.command_draft_label.setWordWrap(True)
     panel.commands_apply_btn = _button("Apply commands", panel._apply_commands, "primary")
+    panel.commands_view_btn = _button("Apply and view…", panel._apply_commands_and_view)
     command_layout.addWidget(panel.command_draft_label)
-    command_layout.addWidget(panel.commands_apply_btn)
-    layout.addWidget(commands)
-    panel.settings_save_btn = _button("Save settings", panel._save_ui_state)
-    panel.settings_save_btn.setParent(panel)
-    panel.settings_save_btn.hide()
-    layout.addStretch()
-    return page
+    command_layout.addWidget(_row(panel.commands_apply_btn, panel.commands_view_btn))
+    command_layout.addStretch(1)
+
+    live = QtWidgets.QWidget()
+    panel.command_tabs.addTab(live, "Run once")
+    live_layout = QtWidgets.QVBoxLayout(live)
+    panel.live_step_cmd_edit = QtWidgets.QPlainTextEdit()
+    panel.live_step_cmd_edit.setObjectName("liveCommandEditor")
+    panel.live_step_cmd_edit.setAccessibleName("Live session On-open command draft")
+    panel.live_step_cmd_edit.setPlaceholderText("For example: show sticks, {object}")
+    panel.live_step_cmd_edit.setMinimumHeight(90)
+    panel.live_step_cmd_edit.setMaximumHeight(170)
+    panel.live_step_cmd_edit.textChanged.connect(panel._live_commands_edited)
+    live_layout.addWidget(panel.live_step_cmd_edit)
+    panel.live_command_status_label = StatusLabel()
+    panel.live_command_status_label.setProperty("role", "muted")
+    panel.live_command_status_label.setWordWrap(True)
+    live_layout.addWidget(panel.live_command_status_label)
+    panel.live_preview_btn = _button(
+        "Preview on current candidate", panel._preview_live_commands, "primary"
+    )
+    panel.live_reset_btn = _button("Reset draft from saved commands", panel._reset_live_commands_draft, "quiet")
+    live_layout.addWidget(_row(panel.live_reset_btn, panel.live_preview_btn))
+    live_layout.addStretch(1)
+    layout.addWidget(_button("Close", dialog.close))
 
 
 def _loading_settings(panel, layout):

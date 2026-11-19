@@ -23,7 +23,8 @@ INSTALL_TEXT = """# 安装 PymolPlugins（{version}）
 
 1. 在 PyMOL 打开 **Plugin > Plugin Manager > Install New Plugin**。
 2. 选择下载的原始 ZIP；不要解压。安装完成后完全退出并重启 PyMOL。
-3. 打开 **Plugin > PymolPlugins: Structure Annotator**。右上角 **?** 随时可查看帮助。无需输入 PyMOL 命令。
+3. 打开 **Plugin > PymolPlugins: Getting Started** 查看五步入门向导与功能介绍。
+   向导中的按钮可直接打开数据和审阅界面；Structure Annotator 右上角 **?** 也可随时重开向导。
 4. 在 **Open from** 选择 **This computer**，或选择已有的 SSH **Host** 别名。
 5. 在 **Path** 粘贴真实的结构文件夹、CSV 或 TSV 路径；也可以用 **Browse…**。
 6. 点 **Open**。一般不用改 **Import options**。如需 **Structure column**，
@@ -32,11 +33,13 @@ INSTALL_TEXT = """# 安装 PymolPlugins（{version}）
 
 保存后进入下一条。普通点选只修改草稿，不会立即保存。快捷键、Alt+数字和 Ctrl+click 是可选的加速方式，不是开始审阅的前提。相对结构路径默认相对于表格目录；CSV 和结构源文件不会被标注流程改写。
 
-已有 `sum_scores.csv` 和同目录 `review.json` 时，打开 CSV 即可读取配置；`display_columns` 必须使用表中实际存在的字段，`label` 是描述性名称，人工标签另存。修改配置写入 `review.override.json`，不会覆盖生成的 `review.json`。
+直接打开含 `sum_scores.csv` 的文件夹时，插件会使用该表及同目录的 `review.json`。没有这个文件时，插件会打开唯一带结构路径列的表，或按目录导入结构文件。`display_columns` 必须使用表中实际存在的字段，`label` 是描述性名称，人工标签另存。修改配置写入 `review.override.json`。
 
 ## SSH 开始前
 
 没有服务器可选时，点 **Set up SSH… > First SSH connection…**。
+
+最近的远程导入保留本机缓存，打开时先检查远端版本。用 **Data > Remote data** 检查更新并重载，或清理远程导入缓存。在 Scores 表格或表头上按 Shift＋滚轮可横向滚动。
 远端 Path 用 /data/review/scores.tsv 或 ~/review/structures，不是 Windows 盘符。
 
 SSH profile 是 `~/.ssh/config` 中保存的服务器 `Host` 名字，不是密码。PyMOL 在 Windows 运行时，默认读取该电脑的 `%USERPROFILE%/.ssh/config`，不会默认读取 WSL 的 SSH 配置。
@@ -89,11 +92,13 @@ Host my-lab
 
 ## 可配置审阅步骤
 
-review.json 的 steps 列表定义命名对象和命令的执行顺序。固定对象只加载一次，同一路径连续使用保持启用；对齐、配色和显示均由命令决定。Steps 编辑器可添加、编辑及上下移动动作；候选浏览顺序在 Filter 中设置。未配置 steps 的普通数据继续使用原 step_cmd。
+review.json 的 steps 列表定义命名对象和命令的执行顺序。固定对象只加载一次，同一路径连续使用保持启用；对齐、配色和显示均由命令决定。Steps 编辑器可添加、编辑及上下移动动作；候选浏览顺序在 Filter 中设置。未配置 steps 的普通数据继续使用原 step_cmd。旧 Bundle 命令模板由插件内置视图兼容。新版 Bundle 的共用 step_cmd 在每次显示候选时执行一次。切回候选时重新执行一次。
 
 ## 筛选分组
 
-review.json可选filter_presets。Filter旁下拉箭头可一键切组；Filter窗口可改条件和排序，用Save…保存同名或新组，Delete删除。编辑写入review.override.json，不覆盖生成配置、不改人工标签。分组允许重叠。
+用 Filter 旁的下拉箭头切换或新建命名组。在 Column conditions 中用 Add condition… 选择字段与条件，用 Group conditions 加括号。Enter 提交当前输入，Tab 或鼠标接受补全。Save group… 保存当前条件和排序，Delete 删除所选组。CSV 源的分组修改写入 review.override.json。分组允许重叠。
+
+点击 Scores 表头的复选框可选中或取消类别。展开 Other ▸ 可勾选更多类别、全选或清空，再点 Apply。同列选项用 or，不同列用 and。重新拖选直方图会替换这一列的表头范围。提交或保存 Filter 时会移除引号外的落单括号。
 
 ## 其他入口
 
@@ -173,7 +178,11 @@ def _build(output_dir: Path = DIST) -> Path:
 
     required = {
         f"{PLUGIN_NAME}/{name}"
-        for name in ("__init__.py", "pymolplugins/__init__.py", "plugins/pymol_plugins.py")
+        for name in (
+            "__init__.py", "pymolplugins/__init__.py", "plugins/pymol_plugins.py",
+            "pymolplugins/annotation/review_file.py",
+            "pymolplugins/annotation/_bundle_skill/acceptance_recipes.py",
+        )
     }
     with ZipFile(destination) as archive:
         names = set(archive.namelist())
