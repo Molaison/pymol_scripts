@@ -3,6 +3,7 @@
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from math import dist
+from typing import Optional
 from uuid import uuid4
 
 from pymol import util
@@ -29,8 +30,12 @@ class FocusLayer:
     contact_layers: dict
     focus_selection: str
     frame_selection: str
-    pocket_selection: str
+    ligand_selection: str
     surface: str = ""
+    surface_shape: tuple = ()
+    ligand_surface: str = ""
+    void_objects: Optional[dict] = None
+    void_status: str = ""
 
     @property
     def copies(self):
@@ -50,32 +55,72 @@ class FocusLayer:
         elif camera == "frame":
             api.zoom(self.frame_selection, 4, state=self.state, complete=1, animate=0.3)
 
-    def show_surface(self, api, enabled):
+    def pocket_selection(self, radius):
+        return (f"(byres ((%{self.source} and not elem H) within {radius:g} "
+                f"of ({self.focus_selection}))) and %{self.source} and polymer and not elem H")
+
+    def show_ligand_surface(self, api, enabled):
+        if enabled and self.ligand_selection:
+            self._ensure_ligand_surface(api)
+        if self.ligand_surface:
+            (api.enable if enabled else api.disable)(self.ligand_surface)
+
+    def _ensure_ligand_surface(self, api):
+        if not self.ligand_surface:
+            name = api.get_unused_name(f"{self.copies[0]}_ligand_surface")
+            _create_surface(api, name, self.ligand_selection, self.state, "salmon", 0.75)
+            api.disable(name)
+            self.ligand_surface = name
+            self.names.append(name)
+        return self.ligand_surface
+
+    def show_surface(self, api, enabled, radius, transparency, facing):
+        if not enabled:
+            if self.surface:
+                api.disable(self.surface)
+            return
+        selection = self.pocket_selection(radius)
+        if not api.count_atoms(selection, state=self.state):
+            raise ValueError("No nearby polymer residues")
+        anchor = self._ensure_ligand_surface(api) if facing and self.ligand_selection else ""
+        shape = (radius, bool(anchor))
+        if self.surface and self.surface_shape == shape:
+            api.set("transparency", transparency, self.surface)
+            api.enable(self.surface)
+            return
+        carve = (anchor, radius) if anchor else None
+        name = api.get_unused_name(f"{self.copies[0]}_pocket_surface")
+        _create_surface(api, name, selection, self.state, "gray80", transparency, carve)
         if self.surface:
-            (api.enable if enabled else api.disable)(self.surface)
-        elif enabled:
-            self.surface = _create_pocket_surface(api, self)
-            self.names.append(self.surface)
+            api.delete(self.surface)
+            self.names.remove(self.surface)
+        self.surface, self.surface_shape = name, shape
+        self.names.append(name)
 
 
-def _create_pocket_surface(api, layer):
-    """Calculate a molecular surface on only the extracted polymer shell."""
-    if not api.count_atoms(layer.pocket_selection, state=layer.state):
-        raise ValueError("No nearby polymer residues")
-    name = api.get_unused_name(f"{layer.copies[0]}_pocket_surface")
+def _create_surface(api, name, selection, state, color, transparency, carve=None):
+    """Create a masked molecular surface on only the explicitly copied atoms."""
     scope = f"%{name}"
     try:
-        api.create(name, layer.pocket_selection, source_state=layer.state, target_state=1, zoom=0)
+        api.create(name, selection, source_state=state, target_state=1, zoom=0)
         api.hide("everything", scope)
         api.set("surface_solvent", 0, name)
-        api.set("surface_color", "gray80", name)
-        api.set("transparency", 0.55, name)
+        api.set("surface_color", color, name)
+        api.set("transparency", transparency, name)
+        if carve:
+            anchor, radius = carve
+            api.set("surface_proximity", 0, name)
+            api.set("surface_carve_selection", anchor, name)
+            api.set("surface_carve_state", 1, name)
+            api.set("surface_carve_cutoff", radius, name)
+            api.set("surface_carve_normal_cutoff", 0.35, name)
+        else:
+            api.set("surface_carve_cutoff", 0, name)
         api.mask(scope)
         api.show("surface", scope)
     except Exception:
         api.delete(name)
         raise
-    return name
 
 
 def picked_source(api, picked, current):
@@ -150,6 +195,9 @@ def draw_focus(api, prefix, source, index, state, residue):
         raise ValueError("The picked residue has no heavy atoms.")
     neighborhood = f"(byres ((%{source} and not elem H) within {RADIUS:g} of ({focus})))"
     surrounding = f"({neighborhood}) and not (({focus}) or elem H)"
+    ligand = f"({focus}) and organic"
+    if not api.count_atoms(ligand, state=state):
+        ligand = ""
     coords, endpoints, polar, salt, pi = _local_contacts(api, focus, surrounding, state)
     target = f"({focus}) and (not ({_BACKBONE_ENDS}) or resn GLY)"
     sidechains = f"({surrounding}) and not ({_BACKBONE_ENDS})"
@@ -183,5 +231,5 @@ def draw_focus(api, prefix, source, index, state, residue):
     return FocusLayer(
         source, state, residue, label, names, copy_indices, (len(polar), len(salt), len(pi)),
         layers, focus, f"({focus}) or ({surrounding})",
-        f"({neighborhood}) and %{source} and polymer and not elem H",
+        ligand,
     )
