@@ -55,6 +55,22 @@ class ComparisonBar(QtWidgets.QWidget):
         layout.addWidget(self.status)
         self.hide()
 
+    def set_items(self, items, current):
+        selected = self.items.currentData()
+        self.items.blockSignals(True)
+        self.items.clear()
+        icons = {}
+        for entry_id, item in items.items():
+            suffix = " · loading…" if item.future else (" · current" if entry_id == current else "")
+            swatch = QtGui.QPixmap(12, 12)
+            swatch.fill(QtGui.QColor.fromRgbF(*cmd.get_color_tuple(item.color)))
+            icons[entry_id] = QtGui.QIcon(swatch)
+            self.items.addItem(icons[entry_id], item.label + suffix, entry_id)
+        if selected in items:
+            self.items.setCurrentIndex(self.items.findData(selected))
+        self.items.blockSignals(False)
+        return icons
+
 
 def molecular_scope(name):
     if not name or name not in cmd.get_names("objects"):
@@ -281,21 +297,7 @@ class ReviewComparison:
 
     def _refresh(self):
         current = self.owner.STATE.current_entry_id()
-        selected = self.bar.items.currentData()
-        self.bar.items.blockSignals(True)
-        self.bar.items.clear()
-        icons = {}
-        for entry_id, item in self.items.items():
-            suffix = " · loading…" if item.future else (" · current" if entry_id == current else "")
-            swatch = QtGui.QPixmap(12, 12)
-            rgb = cmd.get_color_tuple(item.color)
-            swatch.fill(QtGui.QColor.fromRgbF(*rgb))
-            icons[entry_id] = QtGui.QIcon(swatch)
-            self.bar.items.addItem(icons[entry_id], item.label + suffix, entry_id)
-        if selected in self.items:
-            self.bar.items.setCurrentIndex(self.bar.items.findData(selected))
-        self.bar.items.blockSignals(False)
-        self.panel._dataset_model.set_comparison_icons(icons)
+        self.panel._dataset_model.set_comparison_icons(self.bar.set_items(self.items, current))
         self.panel.compare_toggle.setText(f"Compare ({len(self.items)})" if self.items else "Compare")
         self._actions()
 
