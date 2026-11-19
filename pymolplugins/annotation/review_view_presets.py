@@ -262,7 +262,26 @@ def _dots(api, source, kind, points, color, radius):
     for xyz in points:
         body.extend((SPHERE, *map(float, xyz), radius))
     if len(body) > 6:
-        api.load_cgo(body, api.get_unused_name(f"{source}_{kind}"))
+        name = api.get_unused_name(f"{source}_{kind}")
+        api.load_cgo(body, name)
+        return name
+
+
+def draw_interface_contacts(api, source, coords, polar, salt, pi_pairs, names):
+    """Draw the contact layers shared by Interface and Interactive focus."""
+    for kind, pairs, color, radius, dash in (
+        ("polar_contacts", polar, (0.12, 0.76, 0.69), 0.06, 0.45),
+        ("salt_bridges", salt, (0.91, 0.26, 0.62), 0.13, 1.1),
+    ):
+        name = _cylinders(api, source, kind, ((coords[a], coords[b]) for a, b in sorted(pairs)),
+                          color, radius, dash)
+        if name is not None:
+            names.append(name)
+    name = _dots(api, source, "pi_stacks",
+                 (a + (b - a) * t for a, b in pi_pairs for t in (0, .25, .5, .75, 1)),
+                 (0.46, 0.51, 1.0), 0.19)
+    if name is not None:
+        names.append(name)
 
 
 def _capture_interface(api, source, protein, partners, ligand, radius, scope):
@@ -317,10 +336,7 @@ def _draw_interface(api, source, protein, ligand, scope, state, focus, proximity
         api.show("sticks", ligand)
         api.color("yellow", f"({ligand}) and elem C")
         util.cnc(ligand, _self=api)
-    _cylinders(api, source, "polar_contacts", ((coords[a], coords[b]) for a, b in polar), (0.12, 0.76, 0.69), 0.06, 0.45)
-    _cylinders(api, source, "salt_bridges", ((coords[a], coords[b]) for a, b in salt), (0.91, 0.26, 0.62), 0.13, 1.1)
-    _dots(api, source, "pi_stacks", (a + (b - a) * t for a, b in pi_pairs for t in (0, .25, .5, .75, 1)),
-          (0.46, 0.51, 1.0), 0.19)
+    draw_interface_contacts(api, source, coords, polar, salt, pi_pairs, [])
     api.zoom(focus, 5, state=state)
     print(f"Interface: {len(polar)} polar contacts, {len(salt)} salt bridges, {len(pi_pairs)} π stacks")
 

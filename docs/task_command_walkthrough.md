@@ -8,7 +8,7 @@
 
 在 **Plugin → PymolPlugins → Compare & align…** 或输入 `pp_align` 打开独立的结构比较窗口。勾选至少两个对象，选定参考对象。**Overlay** 直接叠加当前帧，**Align** 按选定方法拟合。Mobiles 和 Reference 可分别选择原子类型、链和残基范围，例如 `40-80+105`。多个移动对象共用 Mobiles 范围。**Clear comparison** 或关闭窗口会移除比较副本并恢复源对象的可见性。
 
-从 **Plugin → PymolPlugins → Interactive focus** 或输入 `pp_view focus` 进入点击聚焦。左键点残基或配体，以重原子距离选出同一对象内 5 Å 的邻域。聚焦残基用较粗的球棍，邻域主要显示侧链。蓝、金、绿虚线分别标出局部氢键候选、盐桥和 π 堆积。再次点同一残基或点空白可清除聚焦，**Done** 退出模式。
+从 **Plugin → PymolPlugins → Interactive focus** 或输入 `pp_view focus` 进入点击聚焦。左键点残基或配体，以重原子距离选出同一对象内 5 Å 的邻域。按 Interface 预设显示侧链棒状和黄色配体碳，青色细虚线表示极性接触候选，洋红粗虚线表示盐桥，紫色点列表示 π 堆积。可以继续点邻域里的侧链或配体。再次点同一残基或点空白可清除聚焦，**Done** 退出模式。
 
 | 任务 | 入口 |
 |---|---|

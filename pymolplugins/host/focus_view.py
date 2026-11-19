@@ -1,23 +1,20 @@
 """Temporary atom and contact layers for interactive residue focus."""
 
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from math import dist
+from uuid import uuid4
 
 from pymol import util
 
 from pymolplugins.annotation.review_view_presets import (
-    _capture_interactions, _compute_interface, _cylinders, _indices,
+    _capture_interactions, _compute_interface, _indices, draw_interface_contacts,
 )
 from pymolplugins.annotation.review_view_geometry import residue_key
 
 
 RADIUS = 5.0
 _BACKBONE_ENDS = "polymer.protein and name N+C+O+OXT"
-_CONTACT_STYLE = (
-    ("hydrogen_bonds", (0.169, 0.514, 0.729), 0.07, 0.53),
-    ("salt_bridges", (0.941, 0.784, 0.078), 0.09, 0.78),
-    ("pi_stacks", (0.549, 0.702, 0.400), 0.08, 0.54),
-)
 
 
 @dataclass
@@ -27,8 +24,12 @@ class FocusLayer:
     residue: tuple
     label: str
     names: list
-    copies: tuple
+    copy_indices: dict
     counts: tuple
+
+    @property
+    def copies(self):
+        return tuple(self.copy_indices)
 
     def delete(self, api):
         for name in self.names:
@@ -41,11 +42,13 @@ def picked_source(api, picked, current):
     if len(atoms) != 1:
         return None
     source, index = atoms[0]
-    if current is not None and source in current.copies:
-        if current.source not in api.get_names("objects"):
-            return None
-        original = api.index(f"%{current.source} in ({_indices(source, [index])})")
-        return original[0] if len(original) == 1 else None
+    if current is not None and source in current.copy_indices:
+        original = current.copy_indices[source].get(index)
+        if original is not None and current.source in api.get_names("objects"):
+            return current.source, original
+        return None
+    if source.startswith("_pp_focus_"):
+        return None
     return source, index
 
 
@@ -58,17 +61,29 @@ def focus_identity(api, source, index):
     return state, (atom.segi, atom.chain, atom.resi, atom.resn)
 
 
-def _copy_residues(api, name, selection, state, carbon, ball_scale, stick_radius):
+def _atom_identity(atom):
+    return (*residue_key(atom), atom.name, atom.alt, atom.id)
+
+
+def _copy_residues(api, name, selection, state, stick_radius):
+    originals = defaultdict(deque)
+    for atom in api.get_model(selection, state).atom:
+        originals[_atom_identity(atom)].append(atom.index)
     scope = f"%{name}"
     api.create(name, selection, source_state=state, target_state=1, zoom=0)
+    copy_indices = {}
+    for atom in api.get_model(scope, 1).atom:
+        matching = originals[_atom_identity(atom)]
+        if not matching:
+            raise ValueError("Focus copy did not preserve source atom identity.")
+        copy_indices[atom.index] = matching.popleft()
     api.hide("everything", scope)
-    api.color(carbon, f"{scope} and elem C")
-    util.cnc(scope, _self=api)
+    api.set("stick_ball", 0, name)
     api.set("stick_radius", stick_radius, name)
-    api.set("sphere_scale", ball_scale, name)
     api.set("valence", 0, name)
     api.show("sticks", scope)
-    api.show("spheres", scope)
+    api.show("nonbonded", f"{scope} and not polymer")
+    return copy_indices
 
 
 def _local_contacts(api, focus, surrounding, state):
@@ -94,36 +109,35 @@ def draw_focus(api, prefix, source, index, state, residue):
     neighborhood = f"(byres ((%{source} and not elem H) within {RADIUS:g} of ({focus})))"
     surrounding = f"({neighborhood}) and not (({focus}) or elem H)"
     coords, endpoints, polar, salt, pi = _local_contacts(api, focus, surrounding, state)
+    target = f"({focus}) and (not ({_BACKBONE_ENDS}) or resn GLY)"
     sidechains = f"({surrounding}) and not ({_BACKBONE_ENDS})"
     if endpoints:
-        sidechains += f" or (({surrounding}) and ({_indices(source, endpoints)}))"
-    names, copies = [], []
+        selected_endpoints = _indices(source, endpoints)
+        target += f" or (({focus}) and ({selected_endpoints}))"
+        sidechains += f" or (({surrounding}) and ({selected_endpoints}))"
+    names, copy_indices = [], {}
+    prefix = f"{prefix}_{uuid4().hex[:8]}"
     try:
-        for label, selection, carbon, scale, radius in (
-            ("target", focus, "0xf0b364", 0.22, 0.17),
-            ("neighbors", sidechains, "0xb9bdc7", 0.15, 0.11),
+        for label, selection, radius in (
+            ("target", target, 0.20),
+            ("neighbors", sidechains, 0.15),
         ):
             if not api.count_atoms(selection, state=state):
                 continue
             name = api.get_unused_name(f"{prefix}_{label}")
             names.append(name)
-            _copy_residues(api, name, selection, state, carbon, scale, radius)
-            copies.append(name)
-        pairs = (
-            ((coords[a], coords[b]) for a, b in sorted(polar)),
-            ((coords[a], coords[b]) for a, b in sorted(salt)),
-            iter(pi),
-        )
-        for (kind, color, width, dash), segments in zip(_CONTACT_STYLE, pairs):
-            name = _cylinders(api, prefix, kind, segments, color, width, dash)
-            if name is not None:
-                names.append(name)
-        api.zoom(" or ".join(f"%{name}" for name in copies), 4, state=1, animate=0)
-        api.center(f"%{copies[0]}", state=1, animate=0)
+            copy_indices[name] = _copy_residues(api, name, selection, state, radius)
+        scope = "(" + " or ".join(f"%{name}" for name in copy_indices) + ")"
+        util.cbc(scope, _self=api)
+        api.color("yellow", f"{scope} and organic and elem C")
+        util.cnc(scope, _self=api)
+        draw_interface_contacts(api, prefix, coords, polar, salt, pi, names)
+        api.zoom(f"({focus}) or ({sidechains})", 4, state=state, animate=0)
+        api.center(focus, state=state, animate=0)
     except Exception:
         for name in names:
             api.delete(name)
         raise
     _, chain, resi, resn = residue
     label = f"{source} / {chain or '–'} / {resn} {resi}"
-    return FocusLayer(source, state, residue, label, names, tuple(copies), (len(polar), len(salt), len(pi)))
+    return FocusLayer(source, state, residue, label, names, copy_indices, (len(polar), len(salt), len(pi)))

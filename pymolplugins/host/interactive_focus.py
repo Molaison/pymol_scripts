@@ -16,6 +16,7 @@ class InteractiveFocus(Wizard):
         self.previous_view = None
         self.error = ""
         self.closed = False
+        self.handling_pick = False
         self.prefix = f"_pp_focus_{uuid4().hex[:8]}"
         self.capture = f"{self.prefix}_pick"
         self.enabled_selections = tuple(api.get_names("selections", enabled_only=1))
@@ -51,23 +52,31 @@ class InteractiveFocus(Wizard):
         hbonds, salts, stacks = self.layer.counts
         return [
             self.layer.label,
-            f"Blue H-bond candidates {hbonds}  |  Gold salt bridges {salts}  |  Green pi stacks {stacks}",
+            f"Teal polar {hbonds}  |  Magenta salt bridges {salts}  |  Violet pi stacks {stacks}",
         ]
 
     def do_select(self, name):
-        if not self.closed and name == self.capture:
-            try:
-                self._focus_pick(f"%{name}")
-            finally:
-                self.cmd.select(self.capture, "none", enable=1, quiet=1)
+        if self.closed or self.handling_pick or name != self.capture:
+            return
+        self.handling_pick = True
+        try:
+            self._focus_pick(f"%{name}")
+            self.cmd.select(self.capture, "none", enable=1, quiet=1)
+        finally:
+            self.handling_pick = False
 
     def do_pick(self, bond_flag):
-        if not self.closed and not bond_flag:
+        if self.closed or self.handling_pick or bond_flag:
+            return
+        self.handling_pick = True
+        try:
             self._focus_pick("?pk1")
             self.cmd.unpick()
+        finally:
+            self.handling_pick = False
 
     def do_dirty(self):
-        if self.closed:
+        if self.closed or self.handling_pick:
             return
         if self.capture not in self.cmd.get_names("selections", enabled_only=1):
             self.clear()
@@ -76,7 +85,7 @@ class InteractiveFocus(Wizard):
             self.clear(restore_view=False)
 
     def do_state(self, _state):
-        if self.layer:
+        if self.layer and not self.handling_pick:
             source = self.layer.source
             if source not in self.cmd.get_names("objects") or self.layer.state != self.cmd.get_object_state(source):
                 self.clear(restore_view=False)
