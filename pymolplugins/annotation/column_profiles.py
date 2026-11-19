@@ -58,31 +58,44 @@ def _categories(present, selected):
     remainder = next((item.value for item in selected if item.kind == "other"), None)
     pinned = [item.value for item in selected if item.kind == "category"]
     if remainder is not None:
-        names = list(dict.fromkeys([*remainder, *pinned]))
+        names = list(dict.fromkeys([*remainder, *pinned]))[:3]
     else:
         top = [value for value, _ in counts.most_common(3)]
-        names = list(dict.fromkeys([*top, *pinned]))
+        absent = [value for value in pinned if value not in counts]
+        names = list(dict.fromkeys([*top, *absent]))
         if len(names) > 3:
-            names = list(dict.fromkeys([*pinned, *top]))[:max(3, len(pinned))]
+            names = list(dict.fromkeys([*absent, *top]))[:3]
     categories = tuple((name, counts[name]) for name in names)
     other = len(present) - sum(count for _, count in categories)
     return len(counts), categories, other
 
 
+def _column_cells(metadata, column, filters, source):
+    if source and filters and column in filters.selections:
+        predicate = compile_view_filter(filters.query(without=column), tuple(source[0].metadata))
+        return [entry.metadata.get(column, "") for entry in source if predicate(entry)]
+    return [row.get(column, "") for row in metadata]
+
+
+def other_category_counts(rows, column, displayed, filters, source):
+    """List the categories represented by Other, including selected zero counts."""
+    cells = _column_cells([row.metadata for row in rows], column, filters, source)
+    counts = Counter(value for value in cells if value.strip() and value not in displayed)
+    for choice in filters.selections.get(column, ()):
+        if choice.kind == "category" and choice.value not in displayed:
+            counts.setdefault(choice.value, 0)
+    return tuple(counts.most_common())
+
+
 def build_column_profiles(rows, columns, kinds, *, preview=False, cancelled=None, filters=None, source=()):
     """Compute exact proportions and histograms over the table's row snapshot."""
     metadata = [row.get("metadata") or {} for row in rows] if preview else [row.metadata for row in rows]
-    schema = tuple(source[0].metadata) if source else ()
     profiles = []
     for column in columns:
         if cancelled is not None and cancelled.is_set():
             break
         selected = filters.selections.get(column, ()) if filters else ()
-        if selected and source and not preview:
-            predicate = compile_view_filter(filters.query(without=column), schema)
-            cells = [entry.metadata.get(column, "") for entry in source if predicate(entry)]
-        else:
-            cells = [row.get(column, "") for row in metadata]
+        cells = _column_cells(metadata, column, filters, source)
         present = [value for value in cells if value.strip()]
         total, missing = len(cells), len(cells) - len(present)
         categorical = any(choice.kind in ("category", "other") for choice in selected)

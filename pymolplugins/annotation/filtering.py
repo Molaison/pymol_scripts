@@ -5,10 +5,31 @@ from itertools import chain
 import keyword
 import math
 import operator
+import re
 
 
 COMPARISON_OPERATORS = ("==", "!=", "<", "<=", ">", ">=")
 TEXT_OPERATORS = {"contains": operator.contains, "startswith": str.startswith, "endswith": str.endswith}
+_PAREN_TOKEN = re.compile(r"""(?:"(?:\\.|[^"\\])*"?|'(?:\\.|[^'\\])*'?|\x60[^\x60]*\x60?)|([()])""")
+
+
+def filter_parentheses(expression):
+    """Return matched pairs and unmatched delimiters outside quoted values."""
+    stack, extra, pairs = [], set(), {}
+    for token in _PAREN_TOKEN.finditer(expression):
+        if token.group(1) == "(":
+            stack.append(token.start())
+        elif token.group(1) == ")":
+            if stack:
+                pairs[stack.pop()] = token.start()
+            else:
+                extra.add(token.start())
+    return pairs, extra.union(stack)
+
+
+def remove_unmatched_parentheses(expression):
+    _, extra = filter_parentheses(expression)
+    return "".join(character for index, character in enumerate(expression) if index not in extra) if extra else expression
 
 
 def column_expression(name):
@@ -33,7 +54,10 @@ def validate_filter_presets(raw, columns=None):
             raise ValueError("Each filter preset needs name/expression and optional sort_column/sort_descending")
         if any(not isinstance(preset[key], str) or not preset[key].strip() for key in ("name", "expression")):
             raise ValueError("Filter names and expressions must be nonempty strings")
-        name, expression = preset["name"].strip(), preset["expression"].strip()
+        name = preset["name"].strip()
+        expression = remove_unmatched_parentheses(preset["expression"]).strip()
+        if not expression:
+            raise ValueError("Filter expression is empty after removing unmatched parentheses")
         if name in names:
             raise ValueError("Duplicate filter name: " + name)
         names.add(name)
