@@ -18,6 +18,7 @@ import threading
 import uuid
 import weakref
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, replace
 from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 import traceback
@@ -2112,15 +2113,51 @@ def _evict_decompressed_except(keep_indices: set) -> None:
         _bg_decompress_futures.pop(idx, None)
 
 
-def _run_pymol_commands(template: str, context: Dict[str, str], *, owner=None) -> None:
+def _separate_view_recipes(template):
+    from .ai_commands import COMMANDS as display_commands
+    from .review_view_presets import REVIEW_VIEW_COMMANDS
+
+    native, views = [], []
+    following_view = False
+    for number, raw in enumerate(str(template or "").splitlines(), 1):
+        parts = raw.split(None, 1)
+        name = parts[0] if parts else ""
+        if name in REVIEW_VIEW_COMMANDS or (following_view and name in display_commands):
+            views.append((number, raw))
+            native.append("")
+            following_view = True
+        else:
+            native.append(raw)
+            if name and not name.startswith("#"):
+                following_view = False
+    return "\n".join(native), views
+
+
+def _run_pymol_commands(template: str, context: Dict[str, str], *, owner=None, view_run=None) -> None:
     if not str(template).strip():
         return
     owner = owner or context.get("candidate") or context.get("object")
-    if owner in STATE.managed_objects:
-        _candidate_bundles.check_command_references(owner, format_commands(template, context))
+    warnings = None
+    if view_run is not None:
+        recipes, warnings = view_run
+        template, views = _separate_view_recipes(template)
+        for number, line in views:
+            try:
+                recipes.append((owner, format_commands(line, context)[0][1]))
+            except ValueError as exc:
+                warnings.append(f"Saved view skipped · line {number} · {str(exc).splitlines()[0]}")
+    lines = format_commands(template, context)
+    if warnings is None and owner in STATE.managed_objects:
+        _candidate_bundles.check_command_references(owner, lines)
+    with _capture_command_products(owner):
+        _execute_pymol_commands(lines, owner, warnings)
+
+
+@contextmanager
+def _capture_command_products(owner):
     before = set(cmd.get_names("objects"))
     try:
-        _execute_pymol_commands(template, context)
+        yield
     finally:
         after = set(cmd.get_names("objects"))
         created, removed = after - before, before - after
@@ -2144,16 +2181,24 @@ def _run_pymol_commands(template: str, context: Dict[str, str], *, owner=None) -
                 cmd.group(owner, name)
 
 
-def _execute_pymol_commands(template, context):
+def _execute_pymol_commands(lines, owner, warnings):
+    from .ai_commands import COMMANDS as display_commands
     from .review_view_presets import REVIEW_VIEW_COMMANDS, execute_review_command
 
-    for number, formatted in format_commands(template, context):
+    for number, formatted in lines:
+        name = formatted.split(None, 1)[0]
         try:
-            if formatted.split(None, 1)[0] in REVIEW_VIEW_COMMANDS:
+            if warnings is not None and owner in STATE.managed_objects:
+                _candidate_bundles.check_command_references(owner, [(number, formatted)])
+            if name in REVIEW_VIEW_COMMANDS:
                 execute_review_command(formatted, cmd)
             else:
                 _execute_checked(cmd, formatted)
         except Exception as exc:
+            if warnings is not None and name in display_commands:
+                warnings.append(f"Saved view skipped · line {number} · {name}")
+                print(f"Structure Annotator: {warnings[-1]} ({exc})")
+                continue
             raise RuntimeError("Command line %d failed: %s\n%s" % (number, formatted, exc)) from exc
 
 
@@ -2433,9 +2478,9 @@ def _has_review_steps():
     return bool(STATE.steps or STATE.reference_column)
 
 
-def _ensure_loaded(index, focus, allow_gz_fallback=True, *, trust_materialized=False):
+def _ensure_loaded(index, focus, allow_gz_fallback=True, *, trust_materialized=False, view_run=None):
     if STATE.source_mode == "groups":
-        return _show_scene_group(index) if focus else STATE.files[index]
+        return _show_scene_group(index, view_run) if focus else STATE.files[index]
     if not focus:
         return _ensure_candidate_loaded(index, False, allow_gz_fallback,
                                         trust_materialized=trust_materialized)
@@ -2454,19 +2499,19 @@ def _ensure_loaded(index, focus, allow_gz_fallback=True, *, trust_materialized=F
         candidate = None
         for item in steps:
             if item["type"] == "commands":
-                _run_pymol_commands(item.get("commands", STATE.step_cmd), context)
+                _run_pymol_commands(item.get("commands", STATE.step_cmd), context, view_run=view_run)
             elif item["name"] == "candidate":
                 loaded = _object_name_for_index(STATE.files[index], index) not in existing
                 candidate = _ensure_candidate_loaded(index, True, allow_gz_fallback,
                     trust_materialized=trust_materialized, run_commands=False, existing=existing)
                 context["object"] = context["candidate"] = candidate
                 if loaded:
-                    _run_pymol_commands(item.get("on_load_cmd", ""), context)
+                    _run_pymol_commands(item.get("on_load_cmd", ""), context, view_run=view_run)
             elif item["name"] in assets:
                 name, loaded = _review_objects.load(cmd, item, assets[item["name"]])
                 context[item["name"]] = name
                 if loaded:
-                    _run_pymol_commands(item.get("on_load_cmd", ""), context, owner=name)
+                    _run_pymol_commands(item.get("on_load_cmd", ""), context, owner=name, view_run=view_run)
         _review_objects.finish(cmd)
         STATE.step_context = context
         return candidate
@@ -2600,20 +2645,39 @@ def _process_preload_tick() -> None:
 def _load_current_structure(*, trust_materialized: bool = False) -> str:
     if not STATE.current_file():
         raise RuntimeError("Structure Annotator: no dataset loaded")
+    views = ([], [])
     loaded = _ensure_loaded(
         STATE.index,
         focus=True,
         allow_gz_fallback=True,
         trust_materialized=trust_materialized,
+        view_run=views,
     )
     if not loaded:
         raise RuntimeError(f"failed to load structure at index {STATE.index}")
     if _panel is not None and not _panel._closed:
+        try:
+            _panel._start_candidate_views(*views)
+        except Exception:
+            print("Structure Annotator: could not start the optional view.")
+            traceback.print_exc()
         _panel._queue_preload_maintenance()
     else:
+        _finish_console_views(*views)
         _evict_unneeded_objects()
         _kick_preload()
     return loaded
+
+
+def _finish_console_views(recipes, warnings):
+    for owner, line in recipes:
+        try:
+            with _capture_command_products(owner):
+                _execute_pymol_commands([(1, line)], owner, warnings)
+        except Exception as exc:
+            warnings.append(f"Saved view skipped · {exc}")
+    for warning in warnings:
+        print(f"Structure Annotator: {warning}")
 
 
 def _navigate_annotation(method: str, *args) -> str:
@@ -4116,7 +4180,7 @@ def _release_scene_groups():
     _scene_visibility = {}
 
 
-def _show_scene_group(index):
+def _show_scene_group(index, view_run=None):
     target = STATE.files[index]
     if cmd.get_type(target) != "object:group":
         raise ValueError("Scene group is unavailable; load its PyMOL session first: " + target)
@@ -4130,7 +4194,7 @@ def _show_scene_group(index):
         context = {"object": target, "candidate": target, "file": target,
                    "index": str(index), "count": str(len(STATE.files)),
                    "entry_id": STATE.entries[index].id, "row_number": ""}
-        _run_pymol_commands(STATE.step_cmd, context)
+        _run_pymol_commands(STATE.step_cmd, context, view_run=view_run)
         STATE.current_object = target
         STATE.step_context = context
         return target
@@ -5019,10 +5083,10 @@ def _prepare_step_assets(dataset, entry, steps, step_cmd, mapping, context, cach
     for item in steps:
         _check_csv_preparation_cancelled(cancel_event)
         if item["type"] == "commands":
-            format_commands(item.get("commands", step_cmd), values)
+            format_commands(_separate_view_recipes(item.get("commands", step_cmd))[0], values)
         elif item["name"] == "candidate":
             values["object"] = values["candidate"] = "sa_candidate"
-            format_commands(item.get("on_load_cmd", ""), values)
+            format_commands(_separate_view_recipes(item.get("on_load_cmd", ""))[0], values)
         else:
             path = str(entry.metadata.get(item["path_column"], "") or "").strip()
             if not path:
@@ -5035,7 +5099,7 @@ def _prepare_step_assets(dataset, entry, steps, step_cmd, mapping, context, cach
                 cached[key] = materialized
             assets[item["name"]] = materialized
             values[item["name"]] = "sa_" + item["name"]
-            format_commands(item.get("on_load_cmd", ""), values)
+            format_commands(_separate_view_recipes(item.get("on_load_cmd", ""))[0], values)
     return assets, cached
 
 
@@ -5761,6 +5825,9 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._qt_shortcuts = None
         self._history_restore = None
         self._syncing_widgets = True
+        self._quick_view = ""
+        self._interface_radius = "4"
+        self._mass_chain = None
         self.review = None
         self._state_save_timer = QtCore.QTimer(self)
         self._state_save_timer.setSingleShot(True)
@@ -5771,6 +5838,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._error_poll_timer = QtCore.QTimer(self)
         self._error_poll_timer.timeout.connect(self._poll_background_errors)
         self._build_ui()
+        from .view_jobs import ViewJobs
+        self._view_jobs = ViewJobs(self, self._view_is_current, self._prepare_candidate_view, self._draw_candidate_view)
         from .review_controller import ReviewController
         self.review = ReviewController(self, sys.modules[__name__])
         self._install_history_completers()
@@ -5793,6 +5862,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             event.ignore()
             return
         self._closed = True
+        self._view_jobs.close()
         _review_objects.clear(cmd)
         _delete_managed_objects(False)
         _release_scene_groups()
@@ -7413,6 +7483,68 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         })
         return context
 
+    def _view_identity(self):
+        return id(STATE), STATE.index, STATE.current_object
+
+    def _view_is_current(self, identity):
+        return (not self._closed and identity == self._view_identity()
+                and STATE.current_object in cmd.get_names("objects"))
+
+    def _prepare_candidate_view(self, owner, line):
+        from .review_view_presets import REVIEW_VIEW_COMMANDS, prepare_review_command
+
+        if owner in STATE.managed_objects:
+            _candidate_bundles.check_command_references(owner, [(1, line)])
+        if line.split(None, 1)[0] in REVIEW_VIEW_COMMANDS:
+            return prepare_review_command(line, cmd)
+        return owner, None, None, lambda _: _execute_checked(cmd, line)
+
+    def _draw_candidate_view(self, owner, source, action, draw, data, exclusive):
+        from .review_view_presets import draw_review_view
+
+        with _capture_command_products(owner):
+            if action is None:
+                draw(data)
+            else:
+                draw_review_view(cmd, source, action, draw, data, exclusive=exclusive)
+
+    def _start_candidate_views(self, recipes=(), warnings=()):
+        from .review_view_presets import QUICK_VIEWS, quick_view_command
+
+        if not hasattr(self, "_view_jobs"):
+            return
+        if self._quick_view:
+            owner = STATE.current_object
+            recipes = [(owner, quick_view_command(self._quick_view, owner, self._interface_radius, self._mass_chain))]
+        self._view_jobs.start(self._view_identity(), recipes, title=QUICK_VIEWS.get(self._quick_view, ""),
+                              warnings=warnings, exclusive=bool(self._quick_view))
+
+    def _choose_quick_view(self, name, radius=None):
+        self._quick_view = name
+        if radius is not None:
+            self._interface_radius = radius
+            for value, action in self.interface_radius_actions.items():
+                action.setChecked(value == radius)
+        for value, button in self.quick_view_buttons.items():
+            button.setChecked(value == name)
+        if STATE.current_object:
+            self._start_candidate_views()
+
+    def _fill_mass_view_menu(self, menu):
+        menu.clear()
+        choices = [None]
+        if STATE.current_object:
+            choices.extend(cmd.get_chains(f"%{STATE.current_object} and polymer.protein"))
+        for chain in choices:
+            action = menu.addAction("All chains" if chain is None else f"Only chain {chain or '(blank)'}")
+            action.setCheckable(True)
+            action.setChecked(chain == self._mass_chain)
+            action.triggered.connect(lambda _checked, value=chain: self._choose_mass_chain(value))
+
+    def _choose_mass_chain(self, chain):
+        self._mass_chain = chain
+        self._choose_quick_view("mass")
+
     def _refresh_live_actions(self):
         if not hasattr(self, "live_preview_btn"):
             return
@@ -7428,7 +7560,6 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.live_reset_btn.setEnabled(
             self.live_step_cmd_edit.toPlainText() != (STATE.step_cmd or "")
         )
-        self.live_details_btn.setEnabled(bool(STATE.files))
 
     def _live_commands_edited(self, *args):
         if not hasattr(self, "live_command_status_label"):
@@ -7941,6 +8072,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._page_changed()
         busy = self._csv_task_kind in {"annotations", "annotation_undo"}
         ready = bool(STATE.files) and not self._filter_empty and self._table_mode != "preview" and not busy
+        self.quick_views.setEnabled(ready and bool(STATE.current_object))
         self._refresh_live_actions()
         for widget in (self.next_btn, self.prev_btn, self.next_unann_btn, self.goto_btn, self.apply_btn, *self._value_buttons):
             widget.setEnabled(ready)

@@ -3,6 +3,7 @@
 import csv
 from io import StringIO
 from itertools import combinations
+from functools import partial
 from string import ascii_letters, digits
 from subprocess import SubprocessError
 from weakref import WeakKeyDictionary
@@ -11,7 +12,8 @@ from xml.etree.ElementTree import ParseError
 from .command_templates import LIPID_SELECTION, _chain_selection
 
 
-REVIEW_VIEW_COMMANDS = frozenset({"sa_view_interface", "sa_view_membrane", "sa_view_mass"})
+REVIEW_VIEW_COMMANDS = frozenset({"sa_view_cartoon", "sa_view_interface", "sa_view_membrane", "sa_view_mass"})
+QUICK_VIEWS = {"cartoon": "Cartoon", "interface": "Interface", "membrane": "Membrane", "mass": "MASS"}
 _BACKBONE = "name N+C+O+OXT"
 _OVERLAYS = WeakKeyDictionary()
 
@@ -20,6 +22,12 @@ def encode_review_command(name, *values):
     buffer = StringIO()
     csv.writer(buffer, lineterminator="\n").writerow(values)
     return name + " " + buffer.getvalue().rstrip("\n")
+
+
+def quick_view_command(view, source, radius="4", mass_chain=None):
+    chain = "auto" if mass_chain is None else "chain:" + mass_chain
+    args = {"interface": ("auto", radius, "nearby", "auto", "auto"), "mass": (chain, "auto")}
+    return encode_review_command("sa_view_" + view, source, *args.get(view, ()))
 
 
 def _chain_arg(source, value, api):
@@ -48,6 +56,13 @@ def parse_review_command(line, api):
     """Resolve and validate a local recipe against the active candidate."""
     name, raw = line.split(None, 1)
     source, *args = next(csv.reader([raw], strict=True, skipinitialspace=True))
+    if name == "sa_view_cartoon" and not args and source in api.get_names("objects"):
+        try:
+            source = _source_object(api, source)
+        except ValueError:
+            if api.get_type(source) != "object:group":
+                raise
+        return _show_cartoon, source, ()
     source = _source_object(api, source)
     protein = f"%{source} and polymer.protein"
     if not api.count_atoms(protein):
@@ -57,7 +72,10 @@ def parse_review_command(line, api):
     if name == "sa_view_mass" and len(args) == 2:
         binder = _chain_arg(source, args[0], api)
         target = _chain_arg(source, args[1], api)
-        if binder is None and (target is not None or len(api.get_chains(protein)) != 1):
+        if binder is None and target is None:
+            chains = tuple(_chain_arg(source, "chain:" + chain, api) for chain in api.get_chains(protein))
+            return _show_mass, source, (chains or (protein,),)
+        if binder is None:
             raise ValueError("Choose the binder chain")
         if binder is not None and binder == target:
             raise ValueError("Binder and target must be different chains")
@@ -86,22 +104,40 @@ def parse_review_command(line, api):
             else:
                 partners = list(combinations((_chain_arg(source, "chain:" + value, api) for value in chains), 2))
             ligand = None
-        return _show_interface, source, (protein, partners, ligand, float(radius), scope)
+        return _draw_interface, source, (protein, partners, ligand, float(radius), scope)
     raise ValueError("Invalid arguments for " + name)
 
 
 def execute_review_command(line, api):
+    source, action, compute, draw = prepare_review_command(line, api)
+    draw_review_view(api, source, action, draw, compute() if compute else None)
+
+
+def prepare_review_command(line, api):
+    """Capture PyMOL data on the UI thread and return separate compute and draw calls."""
     action, source, args = parse_review_command(line, api)
+    if action is _draw_interface:
+        inputs, scene = _capture_interface(api, source, *args)
+        return source, action, partial(_compute_interface, *inputs), partial(_draw_interface, api, source, *scene)
+    if action is _show_membrane:
+        state, calpha, phosphorus, pdb = _capture_membrane(api, source, *args)
+        return source, action, partial(_estimate_membrane, calpha, phosphorus, pdb), partial(action, api, source, *args, state, calpha)
+    return source, action, None, lambda _: action(api, source, *args)
+
+
+def draw_review_view(api, source, action, draw, data, *, exclusive=False):
     existing = set(api.get_names("objects"))
     overlays = _OVERLAYS.setdefault(api, {})
     key = source, action
     try:
-        action(api, source, *args)
+        draw(data)
     except Exception:
         for name in set(api.get_names("objects")) - existing:
             api.delete(name)
         raise
-    for name in overlays.get(key, set()) & existing:
+    old_overlays = set().union(*(names for (obj, recipe), names in overlays.items()
+                                 if obj == source and (exclusive or recipe is action)))
+    for name in old_overlays & existing:
         api.delete(name)
     current = set(api.get_names("objects"))
     for old in list(overlays):
@@ -115,19 +151,17 @@ def _indices(source, ids):
     return f"%{source} and index " + "+".join(str(i) for i in sorted(set(ids)))
 
 
-def _interactions(api, first, second, state, coords):
+def _capture_interactions(api, first, second, state):
     from pymolplugins.interactions.contact_queries import find_pairs, hydrogen_bond_specs, salt_bridge_specs
-    from .review_view_geometry import aromatic_rings, stacking_pairs
 
     models = [api.get_model(selection, state) for selection in (first, second)]
-    coords.update({atom.index: atom.coord for model in models for atom in model.atom})
     typed = {}
     for kind, specs in (("salt_bridges", salt_bridge_specs(first, second, 4.0)),
                         ("polar_contacts", hydrogen_bond_specs(first, second, 3.6))):
         typed[kind] = {tuple(sorted((a[1], b[1]))) for sel1, sel2, cutoff, mode, *_ in specs
                        for a, b in find_pairs(api, sel1, sel2, cutoff, mode, state)}
     typed["polar_contacts"].difference_update(typed["salt_bridges"])
-    return typed, list(stacking_pairs(*(aromatic_rings(model) for model in models)))
+    return typed, models
 
 
 def _cylinders(api, source, kind, pairs, color, radius, dash):
@@ -157,34 +191,47 @@ def _dots(api, source, kind, points, color, radius):
         api.load_cgo(body, api.get_unused_name(f"{source}_{kind}"))
 
 
-def _show_interface(api, source, protein, partners, ligand, radius, scope):
-    import numpy as np
-    from pymol import util
-    from .review_view_geometry import interface_voids
-
+def _capture_interface(api, source, protein, partners, ligand, radius, scope):
     state = api.get_object_state(source)
-    obstacles = np.asarray(api.get_coords(f"%{source} and not elem H", state))
-    coords, contacts, proximity, void_points = {}, set(), [], []
-    polar, salt, pi_pairs = set(), set(), []
+    obstacles = api.get_coords(f"%{source} and not elem H", state)
+    proximity, snapshots = [], []
     for first, second in partners:
         left = f"(({first}) and not elem H) within {radius:g} of (({second}) and not elem H)"
         right = f"(({second}) and not elem H) within {radius:g} of (({first}) and not elem H)"
         if not api.count_atoms(left, state=state):
             continue
         proximity.extend((left, right))
-        typed, stacking = _interactions(api, f"byres ({left})", f"byres ({right})", state, coords)
-        polar.update(typed["polar_contacts"])
-        salt.update(typed["salt_bridges"])
-        for start, end, ids1, ids2 in stacking:
-            pi_pairs.append((start, end))
-            contacts.update(ids1 + ids2)
-        void_points.extend(interface_voids(np.asarray(api.get_coords(left, state)),
-                                          np.asarray(api.get_coords(right, state)), obstacles))
+        typed, models = _capture_interactions(api, f"byres ({left})", f"byres ({right})", state)
+        snapshots.append((typed, models, api.get_coords(left, state), api.get_coords(right, state)))
     if not proximity:
         raise ValueError(f"No interface atoms found within {radius:g} Å")
+    focus = "byres (" + " or ".join(f"({part})" for part in proximity) + ")"
+    return (snapshots, obstacles), (protein, ligand, scope, state, focus)
+
+
+def _compute_interface(snapshots, obstacles):
+    import numpy as np
+    from .review_view_geometry import aromatic_rings, interface_voids, stacking_pairs
+
+    coords, contacts, void_points = {}, set(), []
+    polar, salt, pi_pairs = set(), set(), []
+    for typed, models, left, right in snapshots:
+        coords.update({atom.index: atom.coord for model in models for atom in model.atom})
+        polar.update(typed["polar_contacts"])
+        salt.update(typed["salt_bridges"])
+        for start, end, ids1, ids2 in stacking_pairs(*(aromatic_rings(model) for model in models)):
+            pi_pairs.append((start, end))
+            contacts.update(ids1 + ids2)
+        void_points.extend(interface_voids(np.asarray(left), np.asarray(right), np.asarray(obstacles)))
     for a, b in polar | salt:
         contacts.update((a, b))
-    focus = "byres (" + " or ".join(f"({part})" for part in proximity) + ")"
+    return coords, contacts, polar, salt, pi_pairs, void_points
+
+
+def _draw_interface(api, source, protein, ligand, scope, state, focus, data):
+    from pymol import util
+
+    coords, contacts, polar, salt, pi_pairs, void_points = data
     residues = focus if scope == "nearby" else ("byres (" + _indices(source, contacts) + ")" if contacts else "none")
     sidechains = f"(({residues}) and polymer.protein) and not ({_BACKBONE})"
     api.show("cartoon", protein)
@@ -224,7 +271,18 @@ def _tmdet_pdb(api, source, protein, state):
     return "\n".join(rows + ["END", ""])
 
 
-def _estimate_membrane(api, source, protein, state, calpha, phosphorus):
+def _capture_membrane(api, source, protein):
+    state = api.get_object_state(source)
+    calpha = api.get_model(f"({protein}) and name CA", state).atom
+    phosphorus = [atom.coord for atom in api.get_model(f"%{source} and ({LIPID_SELECTION}) and elem P", state).atom]
+    try:
+        pdb = _tmdet_pdb(api, source, protein, state)
+    except ValueError:
+        pdb = ""
+    return state, calpha, phosphorus, pdb
+
+
+def _estimate_membrane(calpha, phosphorus, pdb):
     import numpy as np
     from .review_membrane_tmdet import tmdet_slab
     from .review_view_geometry import _lipid_slab, membrane_slab
@@ -233,22 +291,18 @@ def _estimate_membrane(api, source, protein, state, calpha, phosphorus):
     if leaflet is not None:
         return (*leaflet, "lipid phosphorus leaflets")
     try:
-        return tmdet_slab(_tmdet_pdb(api, source, protein, state))
+        return tmdet_slab(pdb) if pdb else membrane_slab(calpha, ())
     except (OSError, RuntimeError, ValueError, ParseError, SubprocessError) as exc:
         print(f"Membrane: local TmDet could not place this structure ({exc}). Trying helix geometry.")
         return membrane_slab(calpha, ())
 
 
-def _show_membrane(api, source, protein):
+def _show_membrane(api, source, protein, state, calpha, slab):
     import numpy as np
     from pymol import util
     from pymolplugins.geometry.commands import membrane_corners
     from .review_view_geometry import HYDROPHOBIC
 
-    state = api.get_object_state(source)
-    calpha = api.get_model(f"({protein}) and name CA", state).atom
-    phosphorus = [atom.coord for atom in api.get_model(f"%{source} and ({LIPID_SELECTION}) and elem P", state).atom]
-    slab = _estimate_membrane(api, source, protein, state, calpha, phosphorus)
     surface = api.get_unused_name(f"{source}_membrane_surface")
     api.create(surface, protein, source_state=state, target_state=1, zoom=0)
     api.hide("everything", f"%{surface}")
@@ -293,3 +347,14 @@ def _show_mass(api, source, chains):
     for chain in chains:
         api.show("cartoon", chain)
         api.spectrum("resi", " ".join(palette), selection=chain)
+
+
+def _show_cartoon(api, source):
+    from pymol import util
+
+    target = f"%{source}"
+    api.hide("everything", target)
+    api.show("cartoon", target + " and polymer")
+    api.show("sticks", target + " and not polymer and not solvent")
+    util.cbc(target, _self=api)
+    api.zoom(target, 3)
