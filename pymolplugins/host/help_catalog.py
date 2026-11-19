@@ -161,7 +161,7 @@ _TASKS = (
         "pp_align [MOBILE, REFERENCE]",
         "pp_align",
         True,
-        "pp_undo",
+        "Clear comparison in the window, or pp_undo for scripted alignment",
         (
             "pp_align mobile, target, motif=GGH, preview=1",
             "pp_align apply, ALIGNMENT_ID",
@@ -249,7 +249,7 @@ _TASKS = (
         "task",
         "interactions",
         "Show ligand or chain contacts, with kind=polar for hydrogen-bond lines.",
-        "pp_contacts SOURCE [, focus=SELECTION] [, partner=SELECTION] [, kind=TYPE]",
+        "pp_contacts SOURCE",
         "pp_contacts complex, focus=organic, kind=polar",
         True,
         "pp_undo [OPERATION_ID] after any local or async result completes",
@@ -428,7 +428,7 @@ _COMMAND_ROWS = {
         "pp_align [MOBILE, REFERENCE]",
         "pp_align",
         True,
-        "pp_undo",
+        "Clear comparison in the window, or pp_undo for scripted alignment",
         (
             "pp_align mobile, reference, preview=1",
             "pp_align apply, ALIGNMENT_ID",
@@ -446,7 +446,7 @@ _COMMAND_ROWS = {
     ),
     "pp_contacts": (
         "Show ligand or chain contacts, optionally limited to one interaction kind.",
-        "pp_contacts SOURCE [, focus=SELECTION] [, partner=SELECTION] [, kind=TYPE]",
+        "pp_contacts SOURCE",
         "pp_contacts complex, focus=organic, kind=polar",
         True,
         "pp_undo [OPERATION_ID] after any local or async result completes",
