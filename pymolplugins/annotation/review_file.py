@@ -17,6 +17,22 @@ from pymolplugins.remote.ssh import SshClient, is_ssh_path, parse_ssh_path, ssh_
 
 REVIEW_KEYS = ("path_column", "id_column", "display_columns", "label_column", "reference_column", "step_cmd", "bucket_cmds", "filter_presets", "steps", "filter_text", "sort_column", "sort_descending")
 _BUNDLE_TABLE_FIELDS = ("path_column", "display_columns", "label_column", "id_column")
+_LEGACY_BUNDLE_STEPS = {
+    (
+        "/from pathlib import Path",
+        "/from runpy import run_path",
+        '/bundle_step_path = Path(r"{file}").parent.parent / "pymol" / "acceptance_collection.py"',
+        '/run_path(str(bundle_step_path))["acc_bundle_step"]("{object}", r"{file}")',
+    ),
+    (
+        "/from pathlib import Path",
+        "/from runpy import run_path",
+        '/bundle_source = Path(r"{file}")',
+        '/bundle_script = bundle_source.parent.parent / "pymol" / "acceptance_collection.py"',
+        '/bundle_renderer = run_path(str(bundle_script))["acc_bundle_step"]',
+        '/bundle_renderer("{object}", bundle_source)',
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -38,14 +54,23 @@ def bundle_table_name(raw):
 
 def review_table_layer(path, raw, table_path):
     """Read the table options of a PyMOL skill bundle alongside its declared table."""
-    if not isinstance(raw, dict) or raw.get("mode") != "bundle" or ntpath.basename(path) != "review.json":
+    if not isinstance(raw, dict) or ntpath.basename(path) != "review.json":
         return raw
-    if not _bundle_matches_table(raw, table_path):
+    if raw.get("mode") != "bundle":
+        return {**raw, "step_cmd": ""} if _has_legacy_bundle_step(raw) else raw
+    if not bundle_matches_table(raw, table_path):
         return {}
     return {name: raw[name] for name in _BUNDLE_TABLE_FIELDS if name in raw}
 
 
-def _bundle_matches_table(raw, table_path):
+def _has_legacy_bundle_step(raw):
+    step_cmd = raw.get("step_cmd") if isinstance(raw, dict) else None
+    if not isinstance(step_cmd, str):
+        return False
+    return tuple(line.strip() for line in step_cmd.splitlines() if line.strip()) in _LEGACY_BUNDLE_STEPS
+
+
+def bundle_matches_table(raw, table_path):
     source = parse_ssh_path(table_path).path if is_ssh_path(table_path) else table_path
     compare = ntpath.normcase if os.name == "nt" and not is_ssh_path(table_path) else str
     return compare(ntpath.basename(source)) == compare(bundle_table_name(raw))
@@ -54,8 +79,12 @@ def _bundle_matches_table(raw, table_path):
 def bundle_view_config(review, table_path):
     """Return the generated Bundle manifest for its own score table."""
     for path, raw in review.layers:
-        if ntpath.basename(path) == "review.json" and bundle_table_name(raw) and _bundle_matches_table(raw, table_path):
+        if ntpath.basename(path) != "review.json":
+            continue
+        if bundle_table_name(raw) and bundle_matches_table(raw, table_path):
             return raw
+        if _has_legacy_bundle_step(raw):
+            return {"view_sidecar": "bundle_view.json", "path_column": raw.get("path_column", "structure_path")}
     return None
 
 

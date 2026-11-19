@@ -90,7 +90,9 @@
 
 插件从 Bundle 清单读取结构路径列、显示列、标签列和可选的行 ID。结构载入后，插件按 `review.json` 自动应用 PyMOL skill 的视图，包括已声明的配体口袋、共价连接和校准膜。切换候选时会重新应用视图。视图失败时，**Review** 显示原因，结构、评分和候选切换仍可用。配置修改写入 `review.override.json`，人工标注另存。[CSV、SSH 与审阅步骤](structure_annotator_csv_walkthrough.md)
 
-插件安装包自带 Bundle 渲染器。更新 PyMOL skill 的 Bundle 渲染时，同步更新插件 `pymolplugins/annotation/_bundle_skill/` 内的四个脚本和 skill 的 `references/BUNDLE_MODE.md`，再运行 `python scripts/package_plugin.py`。
+配体口袋先显示，空腔随后在后台计算。青点表示水大小的探针可从外部进入、较大探针进不去的凹槽。紫点表示水大小的探针能放进去、但无法沿当前构象通到外部的封闭空间。**Review** 显示两类区域的探针中心体积。输入结构或算法变更时重新计算。缺少 NumPy 或 SciPy 时，插件从 PyPI 自动准备本地计算依赖。任何依赖或计算错误只影响空腔层。
+
+插件安装包自带 Bundle 渲染器。更新 PyMOL skill 的 Bundle 渲染时，同步更新插件 `pymolplugins/annotation/_bundle_skill/` 的脚本和 skill 的 `references/BUNDLE_MODE.md`，再运行 `python scripts/package_plugin.py`。
 
 ## 用 Step commands 预设调整显示
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import inspect
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -19,7 +20,7 @@ from typing import Callable, Dict, List, Mapping, Optional
 from pymol import CmdException, cmd
 
 
-_SCRIPT_DIR = Path(inspect.currentframe().f_code.co_filename).resolve().parent
+_SCRIPT_DIR = Path(inspect.currentframe().f_code.co_filename).absolute().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
@@ -78,6 +79,15 @@ def _resolve_input(raw_path: str) -> Path:
     return _relative_file(_root, raw_path)
 
 
+def _resolved(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except OSError as error:
+        if getattr(error, "winerror", None) != 1005:
+            raise
+        return Path(os.path.abspath(path))
+
+
 def _relative_file(root: Path, raw_path: str) -> Path:
     text = str(raw_path or "").strip()
     if not text:
@@ -85,14 +95,14 @@ def _relative_file(root: Path, raw_path: str) -> Path:
     path = Path(text)
     if path.is_absolute():
         raise CmdException(f"collection paths must be relative to the declared root: {path}")
-    resolved = (root / path).resolve()
+    source = root / path
     try:
-        resolved.relative_to(root)
+        _resolved(source).relative_to(_resolved(root))
     except ValueError as exc:
         raise CmdException(f"collection path escapes the declared root: {path}") from exc
-    if not resolved.is_file():
-        raise CmdException(f"collection structure is missing: {resolved}")
-    return resolved
+    if not source.is_file():
+        raise CmdException(f"collection file is missing: {source}")
+    return source
 
 
 def _cartoon_view(identity: str, objects: Mapping[str, str], row: Mapping[str, str]) -> None:
@@ -196,10 +206,10 @@ def acc_collection_open(
     """Open a collection and load its first requested identity bundle."""
 
     global _rows, _root, _id_column, _role_columns, _view_name, _summary_columns
-    manifest_path = Path(str(manifest)).expanduser().resolve()
+    manifest_path = _resolved(Path(str(manifest)).expanduser())
     if not manifest_path.is_file():
         raise CmdException(f"collection manifest is missing: {manifest_path}")
-    declared_root = Path(str(root)).expanduser().resolve() if str(root).strip() else manifest_path.parent
+    declared_root = _resolved(Path(str(root)).expanduser()) if str(root).strip() else manifest_path.parent
     if not declared_root.is_dir():
         raise CmdException(f"collection root is missing: {declared_root}")
 
@@ -229,7 +239,7 @@ def acc_collection_open(
     return _load_index(int(initial) - 1)
 
 
-def _ligand_view(config, root, path_column, *, step_scene=""):
+def _ligand_view(config, root, path_column, *, store_scene=True, step_scene="", calculate_cavity=True):
     from acceptance_bundle import asset_name
     from acceptance_recipes import ligand_pocket_review
 
@@ -261,10 +271,13 @@ def _ligand_view(config, root, path_column, *, step_scene=""):
             if not annotation or not annotation.get("surface_residues"):
                 raise CmdException(f"Membrane surface annotation is missing for {identity}.")
             reference = cmd.get_unused_name("_acc_bundle_reference")
-            cmd.load(str(ref_path), reference)
             model_ca = f"({protein}) and name CA"
             ref_ca = f"{reference} and ({ref_suffix}) and name CA"
             try:
+                if ref_path.suffix.lower() == ".pdb":
+                    cmd.read_pdbstr(ref_path.read_bytes(), reference, zoom=0)
+                else:
+                    cmd.load(str(ref_path), reference, zoom=0)
                 model_ids = [(atom.chain, atom.resi) for atom in cmd.get_model(model_ca).atom]
                 ref_ids = [(atom.chain, atom.resi) for atom in cmd.get_model(ref_ca).atom]
                 if len(model_ids) < 3 or model_ids != ref_ids or len(set(model_ids)) != len(model_ids):
@@ -281,12 +294,15 @@ def _ligand_view(config, root, path_column, *, step_scene=""):
                 "side_labels": membrane.get("side_labels", ()),
             }
             cavity_centers = annotation.get("cavity_centers")
+        if cavity_centers is None and not calculate_cavity:
+            cavity_centers = []
         ligand_pocket_review(
             identity=identity, protein_selection=protein, ligand_selection=ligand,
             anchor_residues=config.get("anchor_residues", ""), covalent_link=link,
             membrane=membrane_options, show_cavity=config.get("show_cavity", True),
             cavity_centers=cavity_centers, overview_scene="",
-            focus_scene=step_scene or asset_name(identity, "live_focus"), bind_keys=False,
+            focus_scene=(step_scene or asset_name(identity, "live_focus")) if store_scene else "",
+            bind_keys=False,
         )
         return True
 
@@ -295,7 +311,7 @@ def _ligand_view(config, root, path_column, *, step_scene=""):
 
 def acc_bundle_step(model: str, structure_path: str) -> None:
     """Style the current Structure Annotator object using its bundle sidecars."""
-    source = Path(structure_path).resolve()
+    source = Path(structure_path).absolute()
     root = source.parent.parent
     config = json.loads((root / "bundle_view.json").read_text(encoding="utf-8"))
     view = config.get("view")
@@ -308,7 +324,7 @@ def acc_bundle_step(model: str, structure_path: str) -> None:
         raise CmdException(f"Unsupported bundle step view: {view!r}.")
     path_column = config.get("path_column", "structure_path")
     row = {path_column: source.relative_to(root).as_posix()}
-    draw = _ligand_view(config, root, path_column, step_scene="acc_annotator_bundle_focus")
+    draw = _ligand_view(config, root, path_column, store_scene=False)
     selections = set(cmd.get_names("selections"))
     try:
         draw(model, {"model": model}, row)
@@ -320,7 +336,7 @@ def acc_bundle_step(model: str, structure_path: str) -> None:
 def acc_bundle_open(review_json: str, initial=1) -> str:
     """Open a scored bundle with a registered view and one live structure."""
     global _summary_columns
-    config_path = Path(str(review_json)).expanduser().resolve()
+    config_path = _resolved(Path(str(review_json)).expanduser())
     config = json.loads(config_path.read_text(encoding="utf-8"))
     if config.get("mode") != "bundle":
         raise CmdException("The view manifest must declare mode='bundle'.")
