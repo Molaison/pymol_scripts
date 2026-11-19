@@ -108,7 +108,8 @@ def read_review_file(table_path, *, cancel_event=None, validate=True):
     paths = review_paths(table_path)
     if is_ssh_path(table_path):
         remote, remote_paths = _remote_review_paths(table_path)
-        values = SshClient(remote).read_small_files(remote_paths, cancel_event=cancel_event)
+        from pymolplugins.remote.import_cache import recent_review_files
+        values = recent_review_files(remote, remote_paths, cancel_event=cancel_event)
         for path, value in zip(remote_paths, values):
             signatures.append(_remote_signature(value))
             if value["status"] != "missing":

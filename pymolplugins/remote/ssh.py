@@ -135,12 +135,16 @@ def normalize_source_path(path):
     return parse_ssh_path(path).uri if is_ssh_path(path) else os.path.abspath(os.path.expanduser(str(path)))
 
 
+def ssh_state_root():
+    root = os.environ.get("PYMOLPLUGINS_SSH_STATE_ROOT", "").strip()
+    root = root or os.path.join(os.path.expanduser("~"), ".pymolplugins", "ssh_sources")
+    return os.path.abspath(os.path.expanduser(root))
+
+
 def ssh_source_root(path):
     """Return local metadata storage for exactly one remote source, without I/O."""
     identity = hashlib.sha256(parse_ssh_path(path).uri.encode("utf-8")).hexdigest()
-    root = os.environ.get("PYMOLPLUGINS_SSH_STATE_ROOT", "").strip()
-    root = root or os.path.join(os.path.expanduser("~"), ".pymolplugins", "ssh_sources")
-    return os.path.join(os.path.abspath(os.path.expanduser(root)), identity)
+    return os.path.join(ssh_state_root(), identity)
 
 
 def ssh_profiles(config=""):

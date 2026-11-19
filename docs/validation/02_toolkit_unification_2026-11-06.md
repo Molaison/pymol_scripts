@@ -325,3 +325,9 @@ Scores 表头在后台计算当前表格行的类别占比、缺失、不同值�
 Windows PyMOL 3.1.3.1 / Qt 5.15.8 独立隐藏桌面验收了真实多选、跨列组合、0 行时恢复、重开后取消、Other/Missing 和扩大范围。[验收结果](../../output/24_header_multiselect/01_result.json) · [本机安装记录](../../output/24_header_multiselect/local_install/01_install_result.json)
 
 50 项定向回归通过。另跑核心 Filter 四项，旧 CSV 更换列名后仍引用旧显示列的测试失败。同一失败已在本轮基线 `3d9a80a` 独立复现。
+
+## 2026-11-19 远程导入缓存和横向滚轮
+
+最近 5 个远程来源的评分表、表头、目录清单和审阅配置持久缓存。Open 用 SSH 元数据核对版本。Data → Remote data 提供检查更新并重载及清缓存。自动清退有来源数、单项和总大小边界。旧下载遇到并发清理时仍可完成本次导入，不能把已清缓存重新发布。
+
+50 项定向回归和 WSL Debian 的 26 项 SSH 源测试通过。Windows PyMOL 隐藏桌面复验使用实际 SSH 读取 worker，通过 WSL 管道构造可控对端。验证了热重载复用、更新、清理，以及表内和表头的 Shift＋滚轮。[验收结果](../../output/25_remote_cache/01_result.json) · [本机安装记录](../../output/25_remote_cache/local_install/01_install_result.json)

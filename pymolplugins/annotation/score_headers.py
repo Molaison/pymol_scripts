@@ -15,6 +15,7 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
 
     def __init__(self, table, model, get_executor):
         super().__init__(QtCore.Qt.Horizontal, table)
+        self._table = table
         self.profiles = {}
         self.selections = {}
         self._legend_rows = 4
@@ -175,6 +176,8 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
         self._paint_pair(painter, scale, _edge_label(minimum), _edge_label(maximum) if minimum != maximum else "")
 
     def viewportEvent(self, event):
+        if event.type() == QtCore.QEvent.Wheel and self._table.scroll_shift_wheel(event):
+            return True
         if event.type() == QtCore.QEvent.ToolTip:
             index = self.logicalIndexAt(event.pos())
             profile = self.profiles.get(index)

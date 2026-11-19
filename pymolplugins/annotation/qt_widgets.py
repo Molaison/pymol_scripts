@@ -15,6 +15,36 @@ def qt_enum(group, name):
     return value if value is not None else getattr(getattr(QtCore.Qt, group), name)
 
 
+class ScoresTable(QtWidgets.QTableView):
+    """Keep Shift-wheel horizontal across the table and its header."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+        self._wheel_fraction = 0.0
+
+    def scroll_shift_wheel(self, event):
+        if not event.modifiers() & qt_enum("KeyboardModifier", "ShiftModifier"):
+            return False
+        scroll = self.horizontalScrollBar()
+        pixel = event.pixelDelta()
+        distance = pixel.x() or pixel.y()
+        if not distance:
+            angle = event.angleDelta()
+            step = self.verticalHeader().defaultSectionSize()
+            distance = (angle.x() or angle.y()) * step * QtWidgets.QApplication.wheelScrollLines() / 120
+        self._wheel_fraction += distance
+        movement = int(self._wheel_fraction)
+        self._wheel_fraction -= movement
+        scroll.setValue(scroll.value() - movement)
+        event.accept()
+        return True
+
+    def wheelEvent(self, event):
+        if not self.scroll_shift_wheel(event):
+            super().wheelEvent(event)
+
+
 class ColumnPicker(QtWidgets.QToolButton):
     """Search and stage column choices before applying one view change."""
 

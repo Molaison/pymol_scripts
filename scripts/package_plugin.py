@@ -38,6 +38,8 @@ INSTALL_TEXT = """# 安装 PymolPlugins（{version}）
 ## SSH 开始前
 
 没有服务器可选时，点 **Set up SSH… > First SSH connection…**。
+
+最近的远程导入保留本机缓存，打开时先检查远端版本。用 **Data > Remote data** 检查更新并重载，或清理远程导入缓存。在 Scores 表格或表头上按 Shift＋滚轮可横向滚动。
 远端 Path 用 /data/review/scores.tsv 或 ~/review/structures，不是 Windows 盘符。
 
 SSH profile 是 `~/.ssh/config` 中保存的服务器 `Host` 名字，不是密码。PyMOL 在 Windows 运行时，默认读取该电脑的 `%USERPROFILE%/.ssh/config`，不会默认读取 WSL 的 SSH 配置。

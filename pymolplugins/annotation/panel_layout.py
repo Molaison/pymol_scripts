@@ -105,6 +105,10 @@ def _header(panel, layout):
     menu.addAction("Open data…", panel._show_import)
     menu.addAction("Continue last review", panel._continue_last_review)
     panel.history_action = menu.addAction("Recent configurations…", panel._show_configuration_history)
+    remote_data = menu.addMenu("Remote data")
+    panel.reload_remote_action = remote_data.addAction("Check for updates and reload", panel._reload_remote_data)
+    panel.clear_remote_cache_action = remote_data.addAction("Clear remote import cache", panel._clear_remote_cache)
+    remote_data.aboutToShow.connect(panel._update_remote_actions)
     menu.addSeparator()
     panel.export_action = menu.addAction("Export annotations…", panel._export_csv)
     panel.handoff_action = menu.addAction("Export review handoff…", panel._export_review_handoff)
@@ -285,6 +289,7 @@ def _csv_fields(panel, form):
 
 def _review_page(panel):
     from .plugin import _DatasetTableModel, _get_bg_executor
+    from .qt_widgets import ScoresTable
     from .score_headers import ScoreProfileHeader
     page = QtWidgets.QWidget()
     layout = QtWidgets.QVBoxLayout(page)
@@ -319,7 +324,7 @@ def _review_page(panel):
     panel.column_picker.selectionChanged.connect(panel._columns_selected)
     panel.export_btn = _button("Export", panel._export_csv)
     panel.export_btn.hide()
-    panel.dataset_table = QtWidgets.QTableView()
+    panel.dataset_table = ScoresTable()
     panel._dataset_model = _DatasetTableModel(panel.dataset_table)
     header = ScoreProfileHeader(panel.dataset_table, panel._dataset_model, _get_bg_executor)
     header.filterRequested.connect(panel._change_header_filter)
