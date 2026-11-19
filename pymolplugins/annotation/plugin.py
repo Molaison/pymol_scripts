@@ -2122,24 +2122,37 @@ def _run_pymol_commands(template: str, context: Dict[str, str], *, owner=None) -
     try:
         _execute_pymol_commands(template, context)
     finally:
-        created = set(cmd.get_names("objects")) - before
+        after = set(cmd.get_names("objects"))
+        created, removed = after - before, before - after
         if owner in _review_objects.owned:
-            _review_objects.products.setdefault(owner, set()).update(created)
+            products = _review_objects.products.setdefault(owner, set())
+            _review_objects.owned.difference_update(products & removed)
+            products.difference_update(removed)
+            products.update(created)
             _review_objects.owned.update(created)
         elif owner in STATE.managed_objects:
-            _candidate_bundles.products.setdefault(owner, set()).update(created)
+            products = _candidate_bundles.products.setdefault(owner, set())
+            products.difference_update(removed)
+            products.update(created)
             if STATE.group_candidates:
                 _candidate_bundles.attach(cmd, owner, created)
         elif STATE.source_mode == "groups":
+            for name in removed:
+                _scene_products.pop(name, None)
             _scene_products.update({name: owner for name in created})
             for name in created:
                 cmd.group(owner, name)
 
 
 def _execute_pymol_commands(template, context):
+    from .review_view_presets import REVIEW_VIEW_COMMANDS, execute_review_command
+
     for number, formatted in format_commands(template, context):
         try:
-            _execute_checked(cmd, formatted)
+            if formatted.split(None, 1)[0] in REVIEW_VIEW_COMMANDS:
+                execute_review_command(formatted, cmd)
+            else:
+                _execute_checked(cmd, formatted)
         except Exception as exc:
             raise RuntimeError("Command line %d failed: %s\n%s" % (number, formatted, exc)) from exc
 
@@ -6414,6 +6427,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         }
         self._column_bindings["filter"].enabled = False
         self._command_completion = CommandCompletion(self.step_cmd_edit, multiline=True)
+        self._live_command_completion = CommandCompletion(self.live_step_cmd_edit, multiline=True)
 
     def _show_error(self, message):
         text = str(message)
@@ -7375,6 +7389,95 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._reload()
         return True
 
+    def _current_command_context(self):
+        entry = STATE.current_entry()
+        object_name = STATE.current_object or ""
+        file_name = STATE.current_file() or ""
+        context = {
+            str(key): str(value)
+            for key, value in STATE.step_context.items()
+        }
+        context.update({
+            "object": object_name,
+            "candidate": object_name,
+            "selection": object_name,
+            "file": file_name,
+            "index": str(STATE.index),
+            "count": str(len(STATE.files)),
+            "entry_id": entry.id if entry is not None else "",
+            "row_number": str(
+                entry.row_number
+                if entry is not None and entry.row_number is not None
+                else ""
+            ),
+        })
+        return context
+
+    def _refresh_live_actions(self):
+        if not hasattr(self, "live_preview_btn"):
+            return
+        available = (
+            bool(STATE.files)
+            and bool(STATE.current_object)
+            and not self._csv_task_id
+            and self._pending_navigation is None
+            and not self._filter_empty
+            and self._table_mode != "preview"
+        )
+        self.live_preview_btn.setEnabled(available)
+        self.live_reset_btn.setEnabled(
+            self.live_step_cmd_edit.toPlainText() != (STATE.step_cmd or "")
+        )
+        self.live_details_btn.setEnabled(bool(STATE.files))
+
+    def _live_commands_edited(self, *args):
+        if not hasattr(self, "live_command_status_label"):
+            return
+        changed = self.live_step_cmd_edit.toPlainText() != (STATE.step_cmd or "")
+        self.live_command_status_label.setText(
+            "Live draft ready to preview."
+            if changed
+            else "Live draft starts from the saved On-open commands."
+        )
+        self._refresh_live_actions()
+
+    def _reset_live_commands_draft(self):
+        self.live_step_cmd_edit.blockSignals(True)
+        try:
+            self.live_step_cmd_edit.setPlainText(STATE.step_cmd or "")
+        finally:
+            self.live_step_cmd_edit.blockSignals(False)
+        self.live_command_status_label.setText(
+            "Live draft reset from the saved On-open commands."
+        )
+        self._refresh_live_actions()
+
+    def _preview_live_commands(self):
+        from .command_templates import format_commands
+
+        if self._csv_task_id or self._pending_navigation is not None:
+            self._show_error("Wait for the current candidate to finish loading before previewing commands.")
+            return False
+        if not STATE.files or not STATE.current_object:
+            self._show_error("Open a current candidate before previewing Live session commands.")
+            return False
+        context = self._current_command_context()
+        template = self.live_step_cmd_edit.toPlainText()
+        try:
+            if context["object"] not in set(cmd.get_names("objects")):
+                raise ValueError("The current candidate is not available in PyMOL; reload it and retry.")
+            if not format_commands(template, context):
+                raise ValueError("The Live session On-open command draft has no commands.")
+            _run_pymol_commands(template, context)
+        except Exception as exc:
+            traceback.print_exc()
+            self.live_command_status_label.setText("Preview stopped at the reported error.")
+            self._show_error(f"Live command preview failed: {exc}")
+            return False
+        self.error_label.hide()
+        self.live_command_status_label.setText("Preview applied to the current candidate.")
+        return True
+
     def _sync_to_state(
         self, update_directory: bool = True, persist: bool = True,
         update_source: bool = False,
@@ -7474,6 +7577,16 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.bg_decompress_cb.setChecked(bool(STATE.background_decompress_gz))
         self.cache_enabled_cb.setChecked(bool(STATE.cache_enabled))
         self.step_cmd_edit.setPlainText(STATE.step_cmd or "")
+        if hasattr(self, "live_step_cmd_edit"):
+            self.live_step_cmd_edit.blockSignals(True)
+            try:
+                self.live_step_cmd_edit.setPlainText(STATE.step_cmd or "")
+            finally:
+                self.live_step_cmd_edit.blockSignals(False)
+            self.live_command_status_label.setText(
+                "Live draft starts from the saved On-open commands."
+            )
+            self._refresh_live_actions()
         if STATE.dataset is not None:
             self._set_column_catalog(STATE.dataset.columns, STATE.display_columns)
             self._header_csv_path = STATE.csv_path
@@ -7828,6 +7941,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._page_changed()
         busy = self._csv_task_kind in {"annotations", "annotation_undo"}
         ready = bool(STATE.files) and not self._filter_empty and self._table_mode != "preview" and not busy
+        self._refresh_live_actions()
         for widget in (self.next_btn, self.prev_btn, self.next_unann_btn, self.goto_btn, self.apply_btn, *self._value_buttons):
             widget.setEnabled(ready)
         self.next_unann_action.setEnabled(ready)

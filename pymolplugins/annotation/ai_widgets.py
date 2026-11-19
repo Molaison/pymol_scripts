@@ -280,10 +280,27 @@ class AICommandDialog(QtWidgets.QDialog):
         self.target_chain_combo = QtWidgets.QComboBox()
         self.binder_chain_combo = QtWidgets.QComboBox()
         self.reference_chain_combo = QtWidgets.QComboBox()
+        self.chain_layout = chain_layout
         chain_layout.addRow("Target chain", self.target_chain_combo)
         chain_layout.addRow("Binder chain", self.binder_chain_combo)
         chain_layout.addRow("Reference chain", self.reference_chain_combo)
         layout.addWidget(self.chain_row)
+        self.interface_row = QtWidgets.QWidget()
+        interface_layout = QtWidgets.QFormLayout(self.interface_row)
+        interface_layout.setContentsMargins(0, 0, 0, 0)
+        self.interface_mode = QtWidgets.QComboBox()
+        for label, key in (("Auto", "auto"), ("Protein–protein", "protein"), ("Protein–ligand", "ligand")):
+            self.interface_mode.addItem(label, key)
+        self.contact_radius = QtWidgets.QComboBox()
+        for radius in ("4", "6"):
+            self.contact_radius.addItem(radius + " Å", radius)
+        self.sidechain_scope = QtWidgets.QComboBox()
+        self.sidechain_scope.addItem("All nearby residues", "nearby")
+        self.sidechain_scope.addItem("Residues with detected interactions", "interacting")
+        interface_layout.addRow("Interface partners", self.interface_mode)
+        interface_layout.addRow("Neighborhood", self.contact_radius)
+        interface_layout.addRow("Sidechains", self.sidechain_scope)
+        layout.addWidget(self.interface_row)
         self._fill_chains(self.target_chain_combo, current_context(self.panel)["object"])
         self._fill_chains(self.binder_chain_combo, current_context(self.panel)["object"])
         self.reference_combo.currentIndexChanged.connect(self._reference_chains)
@@ -370,8 +387,10 @@ class AICommandDialog(QtWidgets.QDialog):
         name = str(self.preset_combo.currentData())
         self.reference_row.setVisible(name.startswith("reference_"))
         explicit = name == "reference_target_align"
-        self.chain_row.setVisible(explicit or name in {"ppi", "ppi_surface"})
-        self.reference_chain_combo.setEnabled(explicit)
+        self.chain_row.setVisible(explicit or name in {"ppi", "ppi_surface", "interface_detail", "mass_residue_colors"})
+        self.reference_chain_combo.setVisible(explicit)
+        self.chain_layout.labelForField(self.reference_chain_combo).setVisible(explicit)
+        self.interface_row.setVisible(name == "interface_detail")
 
     def configure_connection(self):
         self.connection_dialog = AIConnectionDialog(self)
@@ -385,13 +404,14 @@ class AICommandDialog(QtWidgets.QDialog):
                 for i in range(self.triggers.count())
                 if self.triggers.item(i).checkState() == QtCore.Qt.Checked}
 
-    def show_drafts(self, drafts):
+    def show_drafts(self, drafts, *, local_presets=False):
         self.previews.clear()
         for edit in self.preview_editors.values():
             edit.deleteLater()
         self.preview_editors = {}
         self.draft_context = dict(self.context)
         self.draft_steps = dict(self.request_steps)
+        self.draft_local_presets = local_presets
         for key, text in drafts.items():
             edit = QtWidgets.QPlainTextEdit(text)
             edit.setObjectName("commandEditor")
@@ -415,7 +435,7 @@ class AICommandDialog(QtWidgets.QDialog):
                     raise ValueError("Saved preset has no commands for: " + ", ".join(sorted(missing)))
                 drafts = self._parse_texts({key: saved[key] for key in self.request_steps},
                                           self.request_steps, self.context)
-                self.show_drafts(drafts)
+                self.show_drafts(drafts, local_presets=True)
                 self.feedback("Saved preset ready")
                 return
             reference = self.reference_combo.currentData()
@@ -423,13 +443,16 @@ class AICommandDialog(QtWidgets.QDialog):
                 self.preset_combo.currentData(), self.context["object"], cmd,
                 reference_name=reference,
                 reference_object=self.context["review_objects"].get(reference, ""),
+                interface_mode=self.interface_mode.currentData(),
+                contact_radius=self.contact_radius.currentData(),
+                sidechain_scope=self.sidechain_scope.currentData(),
                 **({key + "_chain": getattr(self, key + "_chain_combo").currentData()
                     for key in ("target", "binder", "reference")}
                    if self.chain_row.isVisible() else {}))
             document = {"schema": SCHEMA, "steps": [
                 {"step_id": key, "commands": commands} for key in self.request_steps]}
-            drafts = parse_draft(json.dumps(document), self.request_steps, self.context, cmd)
-            self.show_drafts(drafts)
+            drafts = parse_draft(json.dumps(document), self.request_steps, self.context, cmd, local_presets=True)
+            self.show_drafts(drafts, local_presets=True)
             self.feedback(note or "Preset ready")
         except Exception as exc:
             self.feedback(str(exc), True)
@@ -444,7 +467,7 @@ class AICommandDialog(QtWidgets.QDialog):
             {"step_id": key, "commands": [line for line in text.splitlines()
                                         if line.strip() and not line.lstrip().startswith("#")]}
             for key, text in texts.items()]}
-        return parse_draft(json.dumps(document), steps, context, cmd)
+        return parse_draft(json.dumps(document), steps, context, cmd, local_presets=True)
 
     def save_preset(self):
         try:
@@ -580,7 +603,8 @@ class AICommandDialog(QtWidgets.QDialog):
                 {"step_id": key, "commands": [line for line in edit.toPlainText().splitlines()
                                               if line.strip() and not line.lstrip().startswith("#")]}
                 for key, edit in self.preview_editors.items()]}
-            drafts = parse_draft(json.dumps(document), self.draft_steps, self.draft_context, cmd)
+            drafts = parse_draft(json.dumps(document), self.draft_steps, self.draft_context, cmd,
+                                 local_presets=self.draft_local_presets)
         except Exception as exc:
             self.feedback("Not inserted — " + str(exc), True)
             return

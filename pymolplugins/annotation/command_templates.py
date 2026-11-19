@@ -9,6 +9,7 @@ BUCKET_FIELDS = STEP_FIELDS | {"label", "value"}
 VIEW_PRESETS = {
     "cartoon": "Cartoon overview",
     "review_fixed_view": "Review · keep camera",
+    "interface_detail": "Interface · contacts and voids",
     "ppi": "PPI · protein interface",
     "ppi_surface": "PPI · interface surface",
     "reference_overlay": "Reference · overlay, keep coordinates",
@@ -16,7 +17,9 @@ VIEW_PRESETS = {
     "reference_target_align": "Reference · align target, compare binder",
     "pli": "PLI · ligand pocket",
     "oligomer": "Oligomer · subunits",
+    "membrane_layer": "Membrane · hydrophobic surface and planes",
     "membrane": "Membrane · protein & lipids",
+    "mass_residue_colors": "MASS paper · residue-number gradient",
     "nucleic": "DNA / RNA complex",
     "surface": "Molecular surface",
 }
@@ -24,12 +27,16 @@ LIPID_SELECTION = "resn POPC+POPE+POPG+POPS+DPPC+DPPE+DOPC+DOPE+DOPS+DLPC+DMPC+C
 
 
 def viewing_preset(name, object_name, api, *, reference_name="", reference_object="",
-                   target_chain=None, binder_chain=None, reference_chain=None):
+                   target_chain=None, binder_chain=None, reference_chain=None,
+                   interface_mode="auto", contact_radius="4", sidechain_scope="nearby"):
     """Build an editable, candidate-scoped recipe from the loaded structure."""
     if name not in VIEW_PRESETS:
         raise ValueError("Choose a viewing preset")
     if not object_name or api.count_atoms(object_name) < 1:
         raise ValueError("Open a candidate structure first")
+    if name in {"interface_detail", "membrane_layer", "mass_residue_colors"}:
+        return _review_viewing_preset(name, target_chain, binder_chain,
+                                      interface_mode, contact_radius, sidechain_scope)
     target = "({object})"
     protein = target + " and polymer.protein"
     def count(selection):
@@ -104,6 +111,23 @@ def viewing_preset(name, object_name, api, *, reference_name="", reference_objec
                          "set transparency, %s, %s" % ("0.65" if name == "oligomer" else "0.25", target)]
         commands += ["orient " + target, "zoom " + target + ", 3"]
     return commands, note
+
+
+def _review_viewing_preset(name, target_chain, binder_chain, mode, radius, scope):
+    from .review_view_presets import encode_review_command
+
+    binder = "auto" if binder_chain is None else "chain:" + binder_chain
+    target = "auto" if target_chain is None else "chain:" + target_chain
+    if name == "interface_detail":
+        command = encode_review_command("sa_view_interface", "{object}", mode, radius, scope, target, binder)
+        note = "Teal dashes: polar contacts. Pink thick dashes: salt bridges. Violet beads: π stacking. Blue dots: estimated voids."
+    elif name == "membrane_layer":
+        command = "sa_view_membrane {object}"
+        note = "Translucent hydrophobic surface. Bilayer bounds use modeled leaflets or local TmDet, with a helix-geometry fallback."
+    else:
+        command = encode_review_command("sa_view_mass", "{object}", binder, target)
+        note = "MASS paper palette by residue number. Select a target to color both chains, each over its own range."
+    return [command], note
 
 
 def _chain_selection(placeholder, object_name, chain, api):
