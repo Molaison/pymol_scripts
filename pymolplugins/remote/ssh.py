@@ -23,6 +23,8 @@ import time
 import zlib
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 
+from pymolplugins.core.source_paths import clean_pasted_path, file_url_path
+
 from .otp import (DEFAULT_OTP_PROMPT, OtpBroker, get_otp_settings,
                   otp_fingerprint, validate_otp_secret, _prompt_pattern)
 
@@ -132,7 +134,8 @@ def parse_ssh_path(path):
 
 
 def normalize_source_path(path):
-    return parse_ssh_path(path).uri if is_ssh_path(path) else os.path.abspath(os.path.expanduser(str(path)))
+    path = clean_pasted_path(path)
+    return parse_ssh_path(path).uri if is_ssh_path(path) else os.path.abspath(os.path.expanduser(file_url_path(path)))
 
 
 def ssh_state_root():

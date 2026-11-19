@@ -34,7 +34,7 @@
 }
 ```
 - display_columns 优先选人工最需要的 4–6 项，按重要性排序；真实指标不足四项时如实列出，不补造字段。
-- review.json 不接受 id_column；id 保存在 CSV，需要以它作为标注身份时在 Import options 中选择 Row ID column。
+- 可在 review.json 里用 id_column 指定 CSV 的唯一标注身份列，也可在 Import options 中选择 Row ID column。
 - step_cmd 是整批共用模板。保留字面量 {object}/{selection}/{candidate}，它们都指当前候选；不写死 sa_* 临时对象名，不逐候选生成命令。
 - 保持共同坐标系审阅时，去掉 orient/zoom/center 和 align/super，只设置显示、颜色及对象级透明度。相机保持不动需要候选本来就在可比坐标系中；不要因此偷偷对齐。
 - 界面查看先确认真实链名；把命令限制在当前候选的蛋白链和指定参考。5 Å 邻域可用于显示接触区域，不能当成结合或成功的评分结论。不要创建无必要的命名 selection。
@@ -84,11 +84,11 @@
 ## 导入并标注
 
 1. 将 `sum_scores.csv` 和生成的 `review.json` 放在同一目录，保留表中相对路径所指向的结构文件。
-2. 打开 **Plugin → PymolPlugins: Structure Annotator**，在 **Open from** 选择本机或已有 SSH 主机，选择 bundle 文件夹或 `sum_scores.csv`，点击 **Open**。插件会使用 `structure_path`；需要 ID 身份时将导入选项的 **Row ID column** 设为 `id`。
+2. 打开 **Plugin → PymolPlugins: Structure Annotator**，在 **Open data** 粘贴文件夹、`sum_scores.csv` 或相邻的 `review.json` 路径，按 Enter 或点 **Open**。也接受 `file:///` 链接。文件夹和 `review.json` 会优先打开 Bundle 声明的 `scores_file`。
 3. 在 **Review** 查看结构、选定的评分列和代表性 `label`。选择人工标签，点击 **Save and next**；稍后可用 **Data → Continue last review** 继续。
 4. 如需交接，使用 **Data → Export review handoff…** 导出进度与标签摘要；它不包含结构文件。导出带标注的表格时选择新的输出路径。
 
-插件不会把源表中的 `label` 当成人工质量结论；配置修改写入 `review.override.json`，人工标注另存，不覆盖生成的配置、评分表或结构文件。打开失败时检查路径、列名及 JSON 是否与实际表格一致。详见 [CSV、SSH 与审阅步骤](structure_annotator_csv_walkthrough.md)。
+插件从 Bundle 清单读取结构路径列、显示列、标签列和可选的行 ID。配置修改写入 `review.override.json`，人工标注另存。完整的 ligand pocket、共价键及校准膜视图由 PyMOL skill 的 `acc_bundle_open` 渲染。详见 [CSV、SSH 与审阅步骤](structure_annotator_csv_walkthrough.md)。
 
 ## 用 Step commands 预设调整显示
 

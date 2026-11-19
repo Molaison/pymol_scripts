@@ -8,7 +8,7 @@ from .filtering import compile_view_filter, validate_filter_presets
 from .header_filters import normalize_filter_query
 from .review_file import (
     read_review_file, check_review_unchanged, validate_review_config,
-    validate_review_columns,
+    validate_review_columns, review_table_layer,
 )
 from .review_steps import effective_steps, validate_steps
 from .sources.csv_source import CsvDatasetSource, read_csv_header, CsvReadCancelled
@@ -27,9 +27,10 @@ def _attempt(issues, location, action):
         return None
 
 
-def _check_layers(review, issues):
+def _check_layers(review, table, issues):
     inherited = {}
     for path, raw in review.layers:
+        raw = review_table_layer(path, raw, table)
         if not isinstance(raw, dict):
             _attempt(issues, path, lambda: validate_review_config(raw))
             continue
@@ -78,7 +79,7 @@ def check_bundle(csv_path, *, resolve_dataset, path_column=None, id_column="",
     review = None
     try:
         review = read_review_file(csv_path, cancel_event=cancel_event, validate=False)
-        _check_layers(review, issues)
+        _check_layers(review, csv_path, issues)
         config = review.config
     except (OSError, UnicodeError, ValueError) as exc:
         issues.append({"severity": "error", "location": "review files", "message": str(exc)})
@@ -87,6 +88,7 @@ def check_bundle(csv_path, *, resolve_dataset, path_column=None, id_column="",
                              cancel_event=cancel_event)
     columns = header["columns"]
     _attempt(issues, "configuration/columns", lambda: validate_review_columns(config, columns))
+    id_column = id_column or config.get("id_column", "")
     selected_path = path_column or config.get("path_column", "structure_path")
     if selected_path not in columns:
         issues.append({"severity": "error", "location": "path_column",

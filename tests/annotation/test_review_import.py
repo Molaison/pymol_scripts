@@ -11,6 +11,7 @@ from pymolplugins.annotation.review_file import read_review_file, write_review_o
 from pymolplugins.annotation.sources.csv_source import CsvDatasetSource, CsvSourceError, read_csv_header
 from pymolplugins.annotation.path_resolver import PathMappingRule, PathResolver
 from pymolplugins.annotation.mapping_store import validate_mapping_profile
+from pymolplugins.core.source_paths import clean_pasted_path, file_url_path
 from tests.annotation import test_structure_annotator_core as core
 
 
@@ -53,6 +54,35 @@ class ReviewImportTests(unittest.TestCase):
             self.assertFalse((Path(root) / "review.override.json").exists())
             for path, before in originals.items():
                 self.assertEqual(path.read_bytes(), before)
+
+    def test_pasted_file_link_loads_skill_bundle_table_and_keeps_manifest(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = Path(root) / "Review + #1"
+            folder.mkdir()
+            table, _ = self.fixture(folder)
+            view = {"mode": "bundle", "scores_file": table.name, "view": "ligand_pocket",
+                    "path_column": "structure_path", "display_columns": ["score2"],
+                    "label_column": "label", "id_column": "absolute_path",
+                    "protein_selection": "chain A", "ligand_selection": "resn LIG",
+                    "membrane": {"reference_path": "reference.pdb"}}
+            manifest = folder / "review.json"
+            manifest.write_text(json.dumps(view), encoding="utf-8")
+            before = manifest.read_bytes()
+            loaded = self.module.sa_load_csv(f'  "{table.as_uri()}"  ')
+            self.assertEqual(loaded["status"], "loaded")
+            self.assertEqual(self.module.STATE.display_columns, ["score2"])
+            self.assertEqual(self.module.STATE.id_column, "absolute_path")
+            self.assertEqual(len(self.module.STATE.entries), 2)
+            self.assertEqual(manifest.read_bytes(), before)
+            self.assertFalse((folder / "review.override.json").exists())
+
+    def test_file_url_uses_the_actual_path_and_decodes_once(self):
+        self.assertEqual(file_url_path(clean_pasted_path(' <file:///K:/A%20B/%2523+%23.csv> ')),
+                         "K:/A B/%23+#.csv")
+        self.assertEqual(file_url_path("file://localhost/K:/folder/"), "K:/folder/")
+        self.assertEqual(file_url_path("file://server/share/scores.csv"), "//server/share/scores.csv")
+        self.assertEqual(file_url_path("file://K:/scores.csv"), "K:/scores.csv")
+        self.assertEqual(file_url_path("/data/%23.csv"), "/data/%23.csv")
 
     def test_user_edits_save_separate_override_and_reopen(self):
         with tempfile.TemporaryDirectory() as root:
