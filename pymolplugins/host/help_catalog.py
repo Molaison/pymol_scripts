@@ -61,7 +61,7 @@ _TASKS = (
     _help_entry(
         "task",
         "view",
-        "Open display presets or turn on click-to-focus for loaded structures.",
+        "Open Structure views or turn on click-to-focus for loaded structures.",
         "pp_view [PRESET, OBJECT]",
         "pp_view",
         True,
@@ -369,7 +369,7 @@ _CATEGORY_PURPOSE = {
 # purpose, minimal usage, example, mutates, undo, next, keywords.
 _COMMAND_ROWS = {
     "pp_view": (
-        "Open Show presets, toggle Interactive focus, or apply a preset to a loaded object.",
+        "Open Structure views, toggle Interactive focus, or apply overview, interface, membrane or mass to a loaded object.",
         "pp_view [PRESET, OBJECT [, mode=auto|protein|ligand] [, radius=4|6] "
         "[, scope=nearby|interacting] [, target_chain=ID] [, binder_chain=ID]]",
         "pp_view interface, model, radius=6, target_chain=A, binder_chain=B",
@@ -1007,6 +1007,14 @@ _FALLBACK_USAGE_EXAMPLES = {
 
 _PRESET_ROWS = (
     (
+        "overview",
+        ("structure overview", "cartoon", "molecular surface", "dna/rna"),
+        "Chain-colored overview with ligand sticks, optional surface and DNA/RNA sticks.",
+        "pp_view overview, model, surface=1, transparency=0.6",
+        None,
+        ("view", "display"),
+    ),
+    (
         "publication_light",
         ("publication", "pbs"),
         "Clean shadow-free publication lighting.",
@@ -1056,7 +1064,7 @@ _PRESET_ROWS = (
     ),
     (
         "high_contrast_outline",
-        ("cartoon", "high_contrast"),
+        ("high_contrast",),
         "Flat high-contrast cartoon lighting.",
         "pp_style_apply high_contrast_outline, selection=all",
         "pp_style_revert",
@@ -1191,13 +1199,15 @@ def category_help(category):
         commands = AUTOLOADED_COMPAT_COMMANDS.get(name)
     if commands is None:
         return None
+    if name == "interactions":
+        commands = ("pp_contacts",)
     return {
         "kind": "category",
         "tier": "compat" if name.endswith("_compat") else "canonical",
         "name": name,
         "purpose": _CATEGORY_PURPOSE[name],
         "minimal_usage": "pp_help %s" % name,
-        "example": "pp_help %s" % name,
+        "example": "pp_contacts complex, focus=\"resn LIG\"" if name == "interactions" else "pp_help %s" % name,
         "mutates": False,
         "undo": None,
         "next": ["pp_help %s" % command for command in commands[:3]],
@@ -1255,7 +1265,8 @@ def _preset_entries():
                  "pp_style_revert", (item.category, "figure", "style"))
                 for item in PRESETS if item.name not in curated)
     for name, aliases, purpose, example, undo, keywords in rows:
-        command = "pp_style_apply" if example.startswith("pp_style") else "pp_contacts"
+        command = example.split(None, 1)[0]
+        category = {"pp_style_apply": "styles", "pp_contacts": "interactions", "pp_view": "toolkit"}[command]
         values.append(
             _help_entry(
                 "preset",
@@ -1267,7 +1278,7 @@ def _preset_entries():
                 undo,
                 ("pp_help %s" % command,),
                 keywords,
-                "styles" if command == "pp_style_apply" else "interactions",
+                category,
                 aliases,
             )
         )
@@ -1401,7 +1412,7 @@ def search_help(query, limit=5):
     entries.extend(
         value
         for category in CANONICAL_COMMANDS.values()
-        for value in (command_help(name) for name in category)
+        for value in (command_help(name) for name in category if name != "pp_interact_run")
         if value is not None
     )
     entries.extend(

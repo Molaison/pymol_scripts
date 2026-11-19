@@ -7,6 +7,8 @@ import sys
 from functools import lru_cache
 from xml.etree import ElementTree
 
+from .review_membrane import MembranePlacement
+
 
 # This runs on the same computer as PyMOL. It never stages inputs on a server.
 _RUN_TMDET = """
@@ -68,7 +70,16 @@ def _parse_placement(xml):
             or not np.allclose(transform @ transform.T, np.eye(3), atol=0.002)):
         raise ValueError("TmDet returned an invalid planar membrane transform")
     # TmDet 4.1.9 applies the XML translation before the rotation.
-    return (-translation, transform.T @ axis / half_width, half_width, "TmDet 4.1.9")
+    segments = tuple(
+        (chain.get("CHAINID", ""), start, end)
+        for chain in root.findall("{*}CHAIN")
+        for region in chain.findall("{*}REGION")
+        if region.get("type") in {"H", "B"}
+        if (start := region.get("pdb_beg")) and (end := region.get("pdb_end"))
+    )
+    helical = root.findtext("{*}RAWRES/{*}TMTYPE", "").strip() == "Tm_Alpha"
+    return MembranePlacement(-translation, transform.T @ axis / half_width, float(half_width),
+                             "TmDet 4.1.9", segments, helical)
 
 
 @lru_cache(maxsize=8)

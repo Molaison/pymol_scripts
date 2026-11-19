@@ -798,8 +798,11 @@ def _contact_plan(
     source_value = interactions._resolve_public_source(controller, source, state)
     canonical = str(preset).strip().lower() or "auto"
     partner1, partner2 = "", ""
+    if canonical == "auto" and kind in {"pi", "hydrophobic"}:
+        raise ValueError(f"kind={kind} requires preset=plip_overview and a PLIP worker")
     if canonical == "auto" and focus and partner:
-        canonical, partner1, partner2 = "interchain_basic", focus, partner
+        canonical = "polar_qc" if kind == "clash" else "interchain_basic"
+        partner1, partner2 = focus, partner
     elif canonical == "auto" and focus:
         canonical, partner2 = ligand_preset_for_kind(kind), focus
     elif canonical == "auto" and partner:

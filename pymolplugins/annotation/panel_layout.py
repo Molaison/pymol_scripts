@@ -292,13 +292,16 @@ def _quick_views(panel):
     from .review_view_presets import QUICK_VIEWS
 
     panel.quick_views = QtWidgets.QWidget(panel)
-    layout = QtWidgets.QHBoxLayout(panel.quick_views)
-    layout.setContentsMargins(0, 0, 0, 0)
+    outer = QtWidgets.QVBoxLayout(panel.quick_views)
+    outer.setContentsMargins(0, 0, 0, 0)
+    outer.setSpacing(3)
+    layout = QtWidgets.QHBoxLayout()
+    outer.addLayout(layout)
     panel.quick_view_buttons = {}
     panel.interface_radius_actions = {}
     for name, title in QUICK_VIEWS.items():
         button = QtWidgets.QToolButton(panel.quick_views)
-        button.setText(title)
+        button.setText("Overview" if name == "overview" else title)
         button.setCheckable(True)
         button.setProperty("role", "view")
         button.clicked.connect(lambda checked, key=name: panel._choose_quick_view(key if checked else ""))
@@ -326,10 +329,12 @@ def _quick_views(panel):
     panel.compare_toggle.setProperty("role", "view")
     panel.compare_toggle.setToolTip("Ctrl+click a candidate to add or remove its comparison overlay.")
     layout.addWidget(panel.compare_toggle)
-    panel.quick_view_status = ElidedLabel()
+    layout.addStretch(1)
+    panel.quick_view_status = QtWidgets.QLabel()
     panel.quick_view_status.setProperty("role", "muted")
-    panel.quick_view_status.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
-    layout.addWidget(panel.quick_view_status, 1)
+    panel.quick_view_status.setWordWrap(True)
+    panel.quick_view_status.setTextFormat(QtCore.Qt.PlainText)
+    outer.addWidget(panel.quick_view_status)
     panel.quick_views.setEnabled(False)
     return panel.quick_views
 
@@ -603,7 +608,7 @@ def _command_settings(panel):
     from .ai_widgets import show_ai_commands
     panel.ai_commands_button = _button("AI command drafts…", lambda: show_ai_commands(panel))
     panel.ai_commands_button.setToolTip("Generate editable drafts using the selected AI connection")
-    panel.command_presets_button = _button("Preset editor…", lambda: show_ai_commands(panel, preset=True))
+    panel.command_presets_button = _button("View recipes…", lambda: show_ai_commands(panel, preset=True))
     command_layout.addWidget(_row(panel.command_presets_button, panel.ai_commands_button, panel.command_history_btn))
     panel.values_box = QtWidgets.QGroupBox("After saving a label")
     panel.values_layout = QtWidgets.QVBoxLayout(panel.values_box)

@@ -7592,6 +7592,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
 
     def _draw_candidate_view(self, owner, source, action, draw, data, exclusive):
         from .bundle_view import CandidateCavity, _draw_bundle, draw_candidate_cavity, prepare_candidate_cavity
+        from .review_membrane import MembraneNotice
         from .review_view_presets import draw_review_view
 
         with _capture_command_products(owner):
@@ -7599,6 +7600,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                 draw(data)
                 return
             followup = draw_review_view(cmd, source, action, draw, data, exclusive=exclusive or action is _draw_bundle)
+        if isinstance(followup, MembraneNotice):
+            return followup
         if not isinstance(followup, CandidateCavity):
             return
         self.interface_cavity_controls.reset(followup.interface)
