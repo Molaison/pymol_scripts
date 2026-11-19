@@ -5614,6 +5614,7 @@ class _DatasetTableModel(QtCore.QAbstractTableModel):
         self._source_mode = "directory"
         self._annotation_values: Dict[str, str] = {}
         self._entry_id_to_row: Dict[str, int] = {}
+        self._comparison_icons = {}
 
     def rowCount(self, parent=None) -> int:
         if parent is not None and parent.isValid():
@@ -5645,6 +5646,16 @@ class _DatasetTableModel(QtCore.QAbstractTableModel):
 
     def row_for_entry(self, entry_id: str) -> int:
         return self._entry_id_to_row.get(str(entry_id), -1)
+
+    def set_comparison_icons(self, icons):
+        changed = self._comparison_icons.keys() | icons.keys()
+        self._comparison_icons = icons
+        role = _qt_enum("ItemDataRole", "DecorationRole")
+        for entry_id in changed:
+            row = self.row_for_entry(entry_id)
+            if row >= 0:
+                index = self.index(row, 2)
+                self.dataChanged.emit(index, index, [role])
 
     def _active_value(self, entry: AnnotationEntry, column: int) -> object:
         if column == 0:
@@ -5691,6 +5702,8 @@ class _DatasetTableModel(QtCore.QAbstractTableModel):
         user_role = _qt_enum("ItemDataRole", "UserRole")
         if role == user_role:
             return self._entry_id(index.row())
+        if self._mode == "active" and index.column() == 2 and role == _qt_enum("ItemDataRole", "DecorationRole"):
+            return self._comparison_icons.get(self._entry_id(index.row()))
         if self._mode == "active" and role == _qt_enum("ItemDataRole", "ForegroundRole"):
             from pymol.Qt import QtGui
             entry = self._rows[index.row()]
@@ -5887,6 +5900,11 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._error_poll_timer = QtCore.QTimer(self)
         self._error_poll_timer.timeout.connect(self._poll_background_errors)
         self._build_ui()
+        from .comparison import ReviewComparison
+        self.comparison = ReviewComparison(self, sys.modules[__name__])
+        self.dataset_table.compareRequested.connect(
+            lambda index: self.comparison.toggle(self._dataset_model.entry_id_at(index.row()))
+        )
         from .view_jobs import ViewJobs
         self._view_jobs = ViewJobs(self, self._view_is_current, self._prepare_candidate_view, self._draw_candidate_view)
         from .review_controller import ReviewController
@@ -5912,6 +5930,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             return
         self._closed = True
         self._view_jobs.close()
+        self.comparison.clear()
         _review_objects.clear(cmd)
         _delete_managed_objects(False)
         _release_scene_groups()
@@ -7625,6 +7644,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
 
         if not hasattr(self, "_view_jobs"):
             return
+        self.comparison.sync()
         clear_bundle_legend(cmd)
         if STATE.bundle_view is not self._last_bundle_view:
             self._last_bundle_view = STATE.bundle_view
@@ -8205,6 +8225,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         busy = self._csv_task_kind in {"annotations", "annotation_undo"}
         ready = bool(STATE.files) and not self._filter_empty and self._table_mode != "preview" and not busy
         self.quick_views.setEnabled(ready and bool(STATE.current_object))
+        self.compare_bar.setEnabled(ready and bool(STATE.current_object))
+        self.dataset_table.compare_enabled = ready and bool(STATE.current_object)
         self._refresh_live_actions()
         for widget in (self.next_btn, self.prev_btn, self.next_unann_btn, self.goto_btn, self.apply_btn, *self._value_buttons):
             widget.setEnabled(ready)
