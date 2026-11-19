@@ -12,6 +12,7 @@ import json
 import os
 import posixpath
 import sys
+from typing import Callable
 
 from pymolplugins.core.windows_paths import windows_long_path
 from pymolplugins.remote.ssh import SshClient, is_ssh_path, parse_ssh_path
@@ -30,6 +31,13 @@ class BundleViewRequest:
     config: dict
     row_path: str
     label: str
+
+
+@dataclass(frozen=True)
+class CandidateCavity:
+    title: str
+    identity: str
+    capture: Callable
 
 
 @contextmanager
@@ -194,32 +202,30 @@ def _draw_bundle(api, owner, prepared):
                 api.scene(name, "delete")
     enabled = modules["acceptance_recipes"]._truthy(request.config.get("show_cavity", True), True)
     if view == "ligand_pocket" and enabled:
-        return request, identity
+        protein = f"%{owner} and ({request.config['protein_selection']})"
+        ligand = f"%{owner} and ({request.config['ligand_selection']})"
+        return CandidateCavity("Pocket cavity", identity, lambda renderer: renderer.capture_cavity(api, protein, ligand))
 
 
 def prepare_bundle_view(api, owner, request):
     return owner, _draw_bundle, partial(_prepare_bundle_assets, request), partial(_draw_bundle, api, owner)
 
 
-def prepare_bundle_cavity(api, owner, request, identity):
+def prepare_candidate_cavity(api, view):
     modules = _load_skill()
-    cavity = modules["acceptance_pocket_void"]
-    snapshot = cavity.capture_cavity(
-        api, f"%{owner} and ({request.config['protein_selection']})",
-        f"%{owner} and ({request.config['ligand_selection']})",
-    )
+    snapshot = view.capture(modules["acceptance_pocket_void"])
     return partial(modules["acceptance_cavity_runtime"].calculate_cavity, snapshot), partial(
-        draw_bundle_cavity, api, identity
+        draw_candidate_cavity, api, view
     )
 
 
-def draw_bundle_cavity(api, identity, payload):
+def draw_candidate_cavity(api, view, payload):
     result, cached = payload
     cavity = _load_skill()["acceptance_pocket_void"]
-    cavity.draw_cavity(identity, result, api=api)
+    cavity.draw_cavity(view.identity, result, api=api)
     recess = sum(region["volume"] for region in result["recesses"])
     enclosed = sum(region["volume"] for region in result["enclosed"])
-    status = f"Pocket cavity · {recess:.1f} Å³ recess · {enclosed:.1f} Å³ enclosed"
+    status = f"{view.title} · {recess:.1f} Å³ recess · {enclosed:.1f} Å³ enclosed"
     tooltip = (
         f"{status}\nCyan: reached by a 1.4 Å probe from bulk, shielded from the 4.0 Å probe.\n"
         "Violet: the water-sized probe fits, with no path to bulk in this model.\n"

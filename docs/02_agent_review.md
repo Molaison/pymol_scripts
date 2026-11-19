@@ -105,7 +105,7 @@
 | 预设 | 适用场景 | 相机/坐标 |
 | --- | --- | --- |
 | Review · keep camera | 同坐标系连续查看蛋白候选 | 都保持 |
-| Interface · contacts and voids | 蛋白界面或配体口袋。可选 4 或 6 Å 邻域，以及显示全部邻域侧链或仅显示参与已检出相互作用的侧链 | 缩放到界面，坐标保持 |
+| Interface · contacts and voids | 蛋白界面或配体口袋。可选 4 或 6 Å 邻域，以及显示全部邻域侧链或仅显示参与已检出相互作用的侧链。空腔与 Bundle 共用双探针算法和缓存 | 缩放到界面，后台空腔不会再移动视角 |
 | PPI · interface surface | 显示蛋白链间 5 Å 邻域的表面和侧链 | 缩放到界面，坐标保持 |
 | Membrane · hydrophobic surface and planes | 叠加半透明疏水性表面。用脂质头基或本地 TmDet 估算膜边界，并显示边界附近的 Tyr、Trp、Arg、Lys 侧链 | 都保持 |
 | MASS paper · residue-number gradient | 只选 Binder chain 就为 binder 上色。也选 Target chain 时，两条链分别按自己的残基编号范围使用同一色板 | 都保持 |
