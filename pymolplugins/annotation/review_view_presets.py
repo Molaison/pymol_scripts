@@ -1,0 +1,295 @@
+"""Candidate-local viewing recipes used by Structure Annotator Step commands."""
+
+import csv
+from io import StringIO
+from itertools import combinations
+from string import ascii_letters, digits
+from subprocess import SubprocessError
+from weakref import WeakKeyDictionary
+from xml.etree.ElementTree import ParseError
+
+from .command_templates import LIPID_SELECTION, _chain_selection
+
+
+REVIEW_VIEW_COMMANDS = frozenset({"sa_view_interface", "sa_view_membrane", "sa_view_mass"})
+_BACKBONE = "name N+C+O+OXT"
+_OVERLAYS = WeakKeyDictionary()
+
+
+def encode_review_command(name, *values):
+    buffer = StringIO()
+    csv.writer(buffer, lineterminator="\n").writerow(values)
+    return name + " " + buffer.getvalue().rstrip("\n")
+
+
+def _chain_arg(source, value, api):
+    if value == "auto":
+        return None
+    if not value.startswith("chain:"):
+        raise ValueError("Chain arguments use chain:<ID> or auto")
+    return _chain_selection("object", source, value[6:], api).replace("{object}", source)
+
+
+def _source_object(api, source):
+    if source not in api.get_names("objects") or any(char in source for char in '"\\\r\n;{}'):
+        raise ValueError("Choose a loaded candidate before using this preset")
+    if api.get_type(source) == "object:group":
+        overlays = set().union(*_OVERLAYS.get(api, {}).values())
+        molecules = [name for name in api.get_object_list(f"%{source}")
+                     if name not in overlays and api.get_type(name) == "object:molecule"]
+        if len(molecules) == 1:
+            source = molecules[0]
+    if api.get_type(source) != "object:molecule":
+        raise ValueError("This preset needs one molecular object within the candidate")
+    return source
+
+
+def parse_review_command(line, api):
+    """Resolve and validate a local recipe against the active candidate."""
+    name, raw = line.split(None, 1)
+    source, *args = next(csv.reader([raw], strict=True, skipinitialspace=True))
+    source = _source_object(api, source)
+    protein = f"%{source} and polymer.protein"
+    if not api.count_atoms(protein):
+        raise ValueError("This preset requires protein atoms")
+    if name == "sa_view_membrane" and not args:
+        return _show_membrane, source, (protein,)
+    if name == "sa_view_mass" and len(args) == 2:
+        binder = _chain_arg(source, args[0], api)
+        target = _chain_arg(source, args[1], api)
+        if binder is None and (target is not None or len(api.get_chains(protein)) != 1):
+            raise ValueError("Choose the binder chain")
+        if binder is not None and binder == target:
+            raise ValueError("Binder and target must be different chains")
+        return _show_mass, source, (tuple(filter(None, (binder or protein, target))),)
+    if name == "sa_view_interface" and len(args) == 5:
+        mode, radius, scope, target_id, binder_id = args
+        if mode not in {"auto", "protein", "ligand"} or radius not in {"4", "6"} or scope not in {"nearby", "interacting"}:
+            raise ValueError("Choose protein or ligand, 4 or 6 Å, and nearby or interacting sidechains")
+        target = _chain_arg(source, target_id, api)
+        binder = _chain_arg(source, binder_id, api)
+        ligand = f"%{source} and organic and not ({LIPID_SELECTION})"
+        has_ligand = api.count_atoms(ligand)
+        if mode == "ligand" or (mode == "auto" and has_ligand and binder is None):
+            if not has_ligand:
+                raise ValueError("No organic ligand found in this structure")
+            partners = [(target or protein, ligand)]
+        else:
+            chains = api.get_chains(protein)
+            if len(chains) < 2 or (target is not None and target == binder):
+                raise ValueError("Choose two different protein chains")
+            if target is not None and binder is not None:
+                partners = [(target, binder)]
+            elif target or binder:
+                chain = target or binder
+                partners = [(chain, f"({protein}) and not ({chain})")]
+            else:
+                partners = list(combinations((_chain_arg(source, "chain:" + value, api) for value in chains), 2))
+            ligand = None
+        return _show_interface, source, (protein, partners, ligand, float(radius), scope)
+    raise ValueError("Invalid arguments for " + name)
+
+
+def execute_review_command(line, api):
+    action, source, args = parse_review_command(line, api)
+    existing = set(api.get_names("objects"))
+    overlays = _OVERLAYS.setdefault(api, {})
+    key = source, action
+    try:
+        action(api, source, *args)
+    except Exception:
+        for name in set(api.get_names("objects")) - existing:
+            api.delete(name)
+        raise
+    for name in overlays.get(key, set()) & existing:
+        api.delete(name)
+    current = set(api.get_names("objects"))
+    for old in list(overlays):
+        if old[0] not in current or not (overlays[old] & current):
+            del overlays[old]
+    if current - existing:
+        overlays[key] = current - existing
+
+
+def _indices(source, ids):
+    return f"%{source} and index " + "+".join(str(i) for i in sorted(set(ids)))
+
+
+def _interactions(api, first, second, state, coords):
+    from pymolplugins.interactions.contact_queries import find_pairs, hydrogen_bond_specs, salt_bridge_specs
+    from .review_view_geometry import aromatic_rings, stacking_pairs
+
+    models = [api.get_model(selection, state) for selection in (first, second)]
+    coords.update({atom.index: atom.coord for model in models for atom in model.atom})
+    typed = {}
+    for kind, specs in (("salt_bridges", salt_bridge_specs(first, second, 4.0)),
+                        ("polar_contacts", hydrogen_bond_specs(first, second, 3.6))):
+        typed[kind] = {tuple(sorted((a[1], b[1]))) for sel1, sel2, cutoff, mode, *_ in specs
+                       for a, b in find_pairs(api, sel1, sel2, cutoff, mode, state)}
+    typed["polar_contacts"].difference_update(typed["salt_bridges"])
+    return typed, list(stacking_pairs(*(aromatic_rings(model) for model in models)))
+
+
+def _cylinders(api, source, kind, pairs, color, radius, dash):
+    import numpy as np
+    from pymol.cgo import CYLINDER
+
+    body = []
+    for start, end in pairs:
+        start, end = np.asarray(start), np.asarray(end)
+        delta = end - start
+        count = max(1, round(np.linalg.norm(delta) / dash)) if dash else 1
+        for i in range(count):
+            a = start + delta * (i / count)
+            b = start + delta * ((i + (0.53 if dash else 1)) / count)
+            body.extend((CYLINDER, *a, *b, radius, *color, *color))
+    if body:
+        api.load_cgo([float(value) for value in body], api.get_unused_name(f"{source}_{kind}"))
+
+
+def _dots(api, source, kind, points, color, radius):
+    from pymol.cgo import ALPHA, COLOR, SPHERE
+
+    body = [ALPHA, 0.78, COLOR, *color]
+    for xyz in points:
+        body.extend((SPHERE, *map(float, xyz), radius))
+    if len(body) > 6:
+        api.load_cgo(body, api.get_unused_name(f"{source}_{kind}"))
+
+
+def _show_interface(api, source, protein, partners, ligand, radius, scope):
+    import numpy as np
+    from pymol import util
+    from .review_view_geometry import interface_voids
+
+    state = api.get_object_state(source)
+    obstacles = np.asarray(api.get_coords(f"%{source} and not elem H", state))
+    coords, contacts, proximity, void_points = {}, set(), [], []
+    polar, salt, pi_pairs = set(), set(), []
+    for first, second in partners:
+        left = f"(({first}) and not elem H) within {radius:g} of (({second}) and not elem H)"
+        right = f"(({second}) and not elem H) within {radius:g} of (({first}) and not elem H)"
+        if not api.count_atoms(left, state=state):
+            continue
+        proximity.extend((left, right))
+        typed, stacking = _interactions(api, f"byres ({left})", f"byres ({right})", state, coords)
+        polar.update(typed["polar_contacts"])
+        salt.update(typed["salt_bridges"])
+        for start, end, ids1, ids2 in stacking:
+            pi_pairs.append((start, end))
+            contacts.update(ids1 + ids2)
+        void_points.extend(interface_voids(np.asarray(api.get_coords(left, state)),
+                                          np.asarray(api.get_coords(right, state)), obstacles))
+    if not proximity:
+        raise ValueError(f"No interface atoms found within {radius:g} Å")
+    for a, b in polar | salt:
+        contacts.update((a, b))
+    focus = "byres (" + " or ".join(f"({part})" for part in proximity) + ")"
+    residues = focus if scope == "nearby" else ("byres (" + _indices(source, contacts) + ")" if contacts else "none")
+    sidechains = f"(({residues}) and polymer.protein) and not ({_BACKBONE})"
+    api.show("cartoon", protein)
+    if ligand is None:
+        util.cbc(protein, _self=api)
+    api.hide("sticks", protein)
+    api.show("sticks", sidechains)
+    util.cnc(sidechains, _self=api)
+    if ligand:
+        api.show("sticks", ligand)
+        api.color("yellow", f"({ligand}) and elem C")
+        util.cnc(ligand, _self=api)
+    _cylinders(api, source, "polar_contacts", ((coords[a], coords[b]) for a, b in polar), (0.12, 0.76, 0.69), 0.06, 0.45)
+    _cylinders(api, source, "salt_bridges", ((coords[a], coords[b]) for a, b in salt), (0.91, 0.26, 0.62), 0.13, 1.1)
+    _dots(api, source, "pi_stacks", (a + (b - a) * t for a, b in pi_pairs for t in (0, .25, .5, .75, 1)),
+          (0.46, 0.51, 1.0), 0.19)
+    _dots(api, source, "interface_voids", void_points, (0.1, 0.59, 0.82), 0.22)
+    api.zoom(focus, 5, state=state)
+    print(f"Interface: {len(polar)} polar contacts, {len(salt)} salt bridges, {len(pi_pairs)} π stacks, "
+          f"{len(void_points)} void points")
+
+
+def _tmdet_pdb(api, source, protein, state):
+    chains = api.get_chains(protein)
+    if all(len(chain) <= 1 for chain in chains):
+        return api.get_pdbstr(protein, state=state)
+    # Use unique one-character chain IDs in the staged input only.
+    symbols = ascii_letters + digits
+    if len(chains) > len(symbols):
+        raise ValueError("Too many chains for local TmDet PDB staging")
+    rows = []
+    for chain, symbol in zip(chains, symbols):
+        selection = _chain_arg(source, "chain:" + chain, api)
+        rows.extend(line[:21] + symbol + line[22:] for line in api.get_pdbstr(selection, state=state).splitlines()
+                    if line.startswith(("ATOM  ", "HETATM")))
+        rows.append("TER")
+    return "\n".join(rows + ["END", ""])
+
+
+def _estimate_membrane(api, source, protein, state, calpha, phosphorus):
+    import numpy as np
+    from .review_membrane_tmdet import tmdet_slab
+    from .review_view_geometry import _lipid_slab, membrane_slab
+
+    leaflet = _lipid_slab(np.asarray(phosphorus))
+    if leaflet is not None:
+        return (*leaflet, "lipid phosphorus leaflets")
+    try:
+        return tmdet_slab(_tmdet_pdb(api, source, protein, state))
+    except (OSError, RuntimeError, ValueError, ParseError, SubprocessError) as exc:
+        print(f"Membrane: local TmDet could not place this structure ({exc}). Trying helix geometry.")
+        return membrane_slab(calpha, ())
+
+
+def _show_membrane(api, source, protein):
+    import numpy as np
+    from pymol import util
+    from pymolplugins.geometry.commands import membrane_corners
+    from .review_view_geometry import HYDROPHOBIC
+
+    state = api.get_object_state(source)
+    calpha = api.get_model(f"({protein}) and name CA", state).atom
+    phosphorus = [atom.coord for atom in api.get_model(f"%{source} and ({LIPID_SELECTION}) and elem P", state).atom]
+    slab = _estimate_membrane(api, source, protein, state, calpha, phosphorus)
+    surface = api.get_unused_name(f"{source}_membrane_surface")
+    api.create(surface, protein, source_state=state, target_state=1, zoom=0)
+    api.hide("everything", f"%{surface}")
+    api.color("palegreen", f"%{surface}")
+    api.color("wheat", f"%{surface} and resn " + "+".join(sorted(HYDROPHOBIC)))
+    api.set("transparency", 0.68, surface)
+    api.show("surface", f"%{surface}")
+    api.show("cartoon", protein)
+    if slab is None:
+        print("Membrane: hydrophobic surface shown. No supported bilayer orientation found.")
+        return
+    center, normal, half_width, method = slab
+    depths = np.array([(atom.coord - center) @ normal for atom in calpha])
+    boundary = [atom.index for atom, depth in zip(calpha, depths)
+                if atom.resn in {"TYR", "TRP", "ARG", "LYS"} and abs(abs(depth) - half_width) <= 4.0]
+    if boundary:
+        sidechains = f"byres ({_indices(source, boundary)}) and not ({_BACKBONE})"
+        api.show("sticks", sidechains)
+        util.cnc(sidechains, _self=api)
+    inside = np.asarray([atom.coord for atom, depth in zip(calpha, depths) if abs(depth) <= half_width])
+    if len(inside):
+        planar = (inside - center) - ((inside - center) @ normal)[:, None] * normal
+        size = max(26.0, 2 * np.linalg.norm(planar, axis=1).max() + 8.0)
+    else:
+        size = 28.0
+    edges = []
+    for sign in (-1, 1):
+        corners = membrane_corners(tuple(center + sign * half_width * normal), tuple(normal), size, size)
+        edges.extend(zip(corners, corners[1:] + corners[:1]))
+    _cylinders(api, source, "membrane_planes", edges, (0.26, 0.65, 0.72), 0.14, 2.2)
+    print(f"Membrane: {2 * half_width:.1f} Å slab estimated from {method}. "
+          f"{int(np.count_nonzero(np.abs(depths) <= half_width))} core Cα atoms, {len(boundary)} boundary residues.")
+
+
+def _show_mass(api, source, chains):
+    from pymolplugins.styles.presets import PRESETS
+
+    preset = next(preset for preset in PRESETS if preset.name == "rfd2_paper_palette")
+    palette = preset.color_operations[0]["palette"]
+    for name in palette:
+        api.set_color(name, preset.colors[name])
+    for chain in chains:
+        api.show("cartoon", chain)
+        api.spectrum("resi", " ".join(palette), selection=chain)

@@ -92,13 +92,20 @@
 
 ## 用 Step commands 预设调整显示
 
-打开 **Viewing presets…**，选择预设和触发时机，点 **Use preset** 检查草稿，再 **Insert draft… → 确认 → Apply commands**。生成和插入都不执行命令；应用后在下次打开/重载候选或保存对应标签时执行。
+在 **Settings → Saved settings → Automation** 中打开 **Viewing presets…**，选择预设和触发时机，点 **Use preset** 检查草稿，再 **Insert draft… → 确认 → Apply commands**。应用后，命令会在下次打开或重载候选、或保存对应标签时执行。在 **Settings → Live session** 中可用 **Preview on current candidate** 试跑当前编辑器里的命令。面板的窗口菜单提供 **Fit to screen**，打开和切换窗口模式时也会校正尺寸。
 
 | 预设 | 适用场景 | 相机/坐标 |
 | --- | --- | --- |
 | Review · keep camera | 同坐标系连续查看蛋白候选 | 都保持 |
+| Interface · contacts and voids | 蛋白界面或配体口袋。可选 4 或 6 Å 邻域，以及显示全部邻域侧链或仅显示参与已检出相互作用的侧链 | 缩放到界面，坐标保持 |
 | PPI · interface surface | 显示蛋白链间 5 Å 邻域的表面和侧链 | 缩放到界面，坐标保持 |
+| Membrane · hydrophobic surface and planes | 叠加半透明疏水性表面。用脂质头基或本地 TmDet 估算膜边界，并显示边界附近的 Tyr、Trp、Arg、Lys 侧链 | 都保持 |
+| MASS paper · residue-number gradient | 只选 Binder chain 就为 binder 上色。也选 Target chain 时，两条链分别按自己的残基编号范围使用同一色板 | 都保持 |
 | Reference · overlay, keep coordinates | 青色候选与灰色半透明固定参考叠合 | 都保持 |
 | Reference · align candidate Cα | 按全部蛋白 Cα 对齐候选到固定参考 | 移动候选并缩放，参考不动 |
 
 两个 Reference 预设需在 **Fixed reference** 选择已加载的固定 Review steps 对象。复合物可能需要将草稿改为特定链；全蛋白 Cα 预设不推断链对应。原生 `align` 会创建或更新 `_align1`、`_align2` 选择，草稿提示中也会说明。预设根据当前结构生成，异构候选应检查链选择是否适用。
+
+Interface 中，青绿色细虚线表示极性接触，粉色粗虚线表示盐桥，紫色珠线表示 π–π 堆叠，蓝色散点表示局部空隙估计。配体相互作用取决于载入结构里的原子类型、电荷和键级。
+
+Membrane 优先使用结构中两层可识别的磷脂头基。其余结构由本地 TmDet 4.1.9 推断。TmDet 不可用或运行失败时，改用疏水 α 螺旋几何估算。PyMOL 控制台会报告本次使用的方法。Windows 本机预览使用 Debian WSL 中用户级安装的 TmDet 和 wwPDB CCD。膜定位在本机执行。

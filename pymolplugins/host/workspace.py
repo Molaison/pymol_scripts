@@ -7,6 +7,11 @@ from pymol.Qt import QtCore, QtGui, QtWidgets
 
 
 _MODES = {"docked": "Embedded in PyMOL", "floating": "Floating window"}
+_FIT_MARGIN = 24
+_DEFAULT_DOCK_WIDTH = 760
+_MINIMUM_DOCK_WIDTH = 640
+_MINIMUM_VIEWPORT_WIDTH = 320
+_DEFAULT_FLOATING_SIZE = (960, 720)
 
 
 def window_settings():
@@ -71,6 +76,13 @@ class WindowModeButton(QtWidgets.QToolButton):
             self.mode_group.addAction(action)
             action.triggered.connect(lambda _checked=False, value=mode: self.host.set_mode(value))
             self.actions_by_mode[mode] = action
+        menu.addSeparator()
+        self.fit_action = menu.addAction("Fit to screen")
+        self.fit_action.setToolTip("Restore a usable panel size and keep it on screen")
+        self.fit_action.triggered.connect(
+            lambda _checked=False: self.host is not None and self.host.fit_to_view()
+        )
+        self.fit_action.setEnabled(False)
         self.setMenu(menu)
         self.setEnabled(False)
 
@@ -78,6 +90,7 @@ class WindowModeButton(QtWidgets.QToolButton):
         self.host = host
         host.topLevelChanged.connect(self.refresh)
         self.setEnabled(True)
+        self.fit_action.setEnabled(True)
         self.refresh()
 
     def refresh(self, *args):
@@ -89,6 +102,7 @@ class WindowModeButton(QtWidgets.QToolButton):
         self.host.topLevelChanged.disconnect(self.refresh)
         self.host = None
         self.setEnabled(False)
+        self.fit_action.setEnabled(False)
 
 
 class PanelWindow(QtWidgets.QDockWidget):
@@ -142,9 +156,89 @@ class PanelWindow(QtWidgets.QDockWidget):
                 break
 
     def _minimum_size(self):
-        size = self._floating_minimum if self.isFloating() else QtCore.QSize(640, 440)
+        if self.isFloating():
+            size = self._floating_minimum
+        else:
+            dock_limit = max(1, self.main_window.width() - _MINIMUM_VIEWPORT_WIDTH)
+            size = QtCore.QSize(min(_MINIMUM_DOCK_WIDTH, dock_limit), 440)
         self.content.setMinimumSize(size)
         _reserve_viewport(self.main_window)
+
+    def _available_geometry(self):
+        handle = self.windowHandle()
+        screen = handle.screen() if handle is not None else None
+        screen = screen or QtWidgets.QApplication.screenAt(
+            self.frameGeometry().center()
+        )
+        main_handle = self.main_window.windowHandle()
+        screen = screen or (main_handle.screen() if main_handle is not None else None)
+        screen = screen or QtWidgets.QApplication.primaryScreen()
+        return screen.availableGeometry()
+
+    def _maximum_client_size(self):
+        available = self._available_geometry()
+        frame = self.frameGeometry()
+        frame_width = max(0, frame.width() - self.width())
+        frame_height = max(0, frame.height() - self.height())
+        return QtCore.QSize(
+            max(1, available.width() - frame_width - _FIT_MARGIN),
+            max(1, available.height() - frame_height - _FIT_MARGIN),
+        )
+
+    @staticmethod
+    def _bounded_size(size, minimum, maximum):
+        minimum = QtCore.QSize(
+            min(minimum.width(), maximum.width()),
+            min(minimum.height(), maximum.height()),
+        )
+        return size.expandedTo(minimum).boundedTo(maximum)
+
+    def _dock_width_limit(self):
+        return max(1, self.main_window.width() - _MINIMUM_VIEWPORT_WIDTH)
+
+    def _fit_dock(self, force=False):
+        limit = self._dock_width_limit()
+        minimum = min(_MINIMUM_DOCK_WIDTH, limit)
+        preferred = min(max(self._floating_minimum.width(), _DEFAULT_DOCK_WIDTH), limit)
+        current = self.width() if self.isVisible() and self.width() > 0 else self._dock_width
+        if not force and minimum <= current <= limit:
+            return False
+        target = preferred if force else min(max(current, minimum), limit)
+        self._dock_width = target
+        self.main_window.resizeDocks([self], [target], QtCore.Qt.Horizontal)
+        return True
+
+    def _move_within(self, available):
+        frame = self.frameGeometry()
+        x = max(available.left(), min(frame.x(), available.right() - frame.width() + 1))
+        y = max(available.top(), min(frame.y(), available.bottom() - frame.height() + 1))
+        if (x, y) != (frame.x(), frame.y()):
+            self.move(x, y)
+
+    def _fit_floating(self, force=False):
+        available = self._available_geometry()
+        maximum = self._maximum_client_size()
+        minimum = self._floating_minimum
+        current = self.size()
+        target = self._bounded_size(current, minimum, maximum)
+        if force:
+            target = self._bounded_size(
+                current.expandedTo(self._floating_size).expandedTo(
+                    QtCore.QSize(*_DEFAULT_FLOATING_SIZE)
+                ),
+                minimum,
+                maximum,
+            )
+        elif target == current and available.contains(self.frameGeometry()):
+            return False
+        self.resize(target)
+        self._move_within(available)
+        return True
+
+    def _fit_view(self, force=False):
+        if self.isFloating():
+            return self._fit_floating(force)
+        return self._fit_dock(force)
 
     def _apply_mode(self, mode):
         self.setFloating(mode == "floating")
@@ -189,15 +283,30 @@ class PanelWindow(QtWidgets.QDockWidget):
         self.present()
         self._persist(capture=False)
 
+    def fit_to_view(self):
+        """Restore a usable size without replacing a valid manual geometry."""
+        self._restoring = True
+        try:
+            changed = self._fit_view(force=True)
+        finally:
+            self._restoring = False
+        if changed:
+            if self.isFloating():
+                self._capture_geometry()
+            self._persist(capture=False)
+        return changed
+
     def present(self):
         self.content.show()
         self.show()
+        self._fit_view(force=False)
         self.raise_()
         (self if self.isFloating() else self.main_window).activateWindow()
 
     def _native_mode_changed(self, floating):
         if not self._restoring and not self._closed:
             self._minimum_size()
+            self._fit_view(force=False)
             self._save_timer.start(250)
 
     def _dock_location_changed(self, area):
