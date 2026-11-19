@@ -5,7 +5,7 @@ to register the ``pp_style_*`` commands.  Applying a style never changes the
 view or starts a render unless the caller explicitly opts in.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from difflib import get_close_matches
 from functools import wraps
 import os
@@ -23,7 +23,7 @@ from pymolplugins.core.pymol_groups import (
 try:
     if not globals().get("__package__"):
         raise ImportError("PyMOL run namespace has no package context")
-    from .presets import PRESETS, VALID_REPRESENTATIONS, validate_presets
+    from .presets import MACARON_VARIANTS, PRESETS, VALID_REPRESENTATIONS, validate_presets
 except (ImportError, ValueError):
     # PyMOL's ``run`` executes files outside package context.  The file's own
     # directory is a reliable fallback even when PyMOL was launched elsewhere.
@@ -33,7 +33,7 @@ except (ImportError, ValueError):
     if _REMOVE_STYLE_DIR:
         sys.path.insert(0, _STYLE_DIR)
     try:
-        from presets import PRESETS, VALID_REPRESENTATIONS, validate_presets
+        from presets import MACARON_VARIANTS, PRESETS, VALID_REPRESENTATIONS, validate_presets
     finally:
         if _REMOVE_STYLE_DIR:
             sys.path.remove(_STYLE_DIR)
@@ -679,13 +679,15 @@ class StyleRegistry:
 
     def register_colors(self, expression, legacy_aliases=False):
         """Register preset colors without changing atoms or scene settings."""
-        presets = self.resolve(expression)
-        for preset in presets:
-            for name, rgb in preset.colors.items():
-                self.cmd.set_color(name, list(rgb))
-                alias = LEGACY_COLOR_ALIASES.get(name) if legacy_aliases else None
-                if alias:
-                    self.cmd.set_color(alias, list(rgb))
+        for preset in self.resolve(expression):
+            self._register_colors(preset, legacy_aliases)
+
+    def _register_colors(self, preset, legacy_aliases=False):
+        for name, rgb in preset.colors.items():
+            self.cmd.set_color(name, list(rgb))
+            alias = LEGACY_COLOR_ALIASES.get(name) if legacy_aliases else None
+            if alias:
+                self.cmd.set_color(alias, list(rgb))
 
     def _new_snapshot(self, presets, target, consume_id=True):
         representations = _changed_representations(presets)
@@ -775,13 +777,19 @@ class StyleRegistry:
                 if operation["action"] == "color":
                     self.cmd.color(operation["color"], target)
                 else:
-                    self.cmd.spectrum(
-                        expression=operation.get("expression", "count"),
-                        palette=" ".join(operation["palette"]),
-                        selection=target,
-                        byres=int(operation.get("byres", 0)),
-                        quiet=1,
-                    )
+                    scopes = (target,)
+                    if operation.get("per_chain"):
+                        scopes = [f"({target}) and {_model_selection(model)} and chain {_selector_literal(chain)}"
+                                  for model in self.cmd.get_object_list(target)
+                                  for chain in self.cmd.get_chains(f"({target}) and {_model_selection(model)}")]
+                    for scope in scopes:
+                        self.cmd.spectrum(
+                            expression=operation.get("expression", "count"),
+                            palette=" ".join(operation["palette"]),
+                            selection=scope,
+                            byres=int(operation.get("byres", 0)),
+                            quiet=1,
+                        )
             for operation in preset.representation_operations:
                 function = getattr(self.cmd, operation["action"])
                 function(operation["representation"], _selection(operation, selection))
@@ -870,7 +878,7 @@ class StyleRegistry:
             if rgb is not None:
                 self.cmd.set_color(name, list(rgb))
 
-    def apply(self, expression, selection="all", snapshot=True, render=False):
+    def apply(self, expression, selection="all", snapshot=True, render=False, variant=""):
         """Apply atomically and optionally return a report-bearing snapshot ID.
 
         The default return value is an ``int`` subclass for compatibility with
@@ -881,16 +889,28 @@ class StyleRegistry:
         """
         self.last_application = None
         presets = self.resolve(expression)
+        variant = str(variant).strip().lower()
+        if variant:
+            if variant not in MACARON_VARIANTS or not any(preset.name == "macaron_palette" for preset in presets):
+                raise ValueError("variant=default, warm or cool applies to macaron_palette")
+            colors = MACARON_VARIANTS[variant]
+            presets = tuple(replace(preset, colors=colors, color_operations=(
+                {**preset.color_operations[0], "palette": tuple(colors)},
+            )) if preset.name == "macaron_palette" else preset for preset in presets)
         target = _resolve_style_target(
             self.cmd, selection, _needs_stable_atom_identity(presets)
         )
+        if any(operation.get("per_chain") and not self.cmd.count_atoms(_selection(operation, target.selection))
+               for preset in presets for operation in preset.color_operations):
+            raise ValueError("MASS requires protein residues in the selected target")
         snapshot_enabled = _as_bool(snapshot)
         render_requested = _as_bool(render)
         # A transient snapshot is always captured so a failed apply is atomic,
         # even when the caller opts out of retaining a successful snapshot.
         record = self._new_snapshot(presets, target, consume_id=False)
         try:
-            self.register_colors(tuple(preset.name for preset in presets))
+            for preset in presets:
+                self._register_colors(preset)
             self._apply_settings(presets, target.selection)
             self._apply_operations(presets, target.selection)
             if render_requested:
@@ -1018,10 +1038,10 @@ def pp_style_describe(preset):
     return description
 
 
-def pp_style_apply(preset, selection="all", snapshot=1, render=0):
+def pp_style_apply(preset, selection="all", snapshot=1, render=0, variant=""):
     """Apply without rendering by default; return a report-bearing snapshot ID."""
     pp_style_apply.last_report = None
-    snapshot_id = _REGISTRY.apply(preset, selection, snapshot, render)
+    snapshot_id = _REGISTRY.apply(preset, selection, snapshot, render, variant=variant)
     report = _REGISTRY.last_application
     target = report["target"]
     message = "Applied style %s to %s" % (preset, target["requested"])
@@ -1189,16 +1209,12 @@ def legacy_publication_style(selection="all", snapshot=1, render=0):
 
 def legacy_macaron_style(selection="polymer", ray=0, color_scheme="default"):
     scheme = str(color_scheme or "default").strip().lower()
-    presets = {
-        "default": "macaron_default",
-        "warm": "macaron_warm",
-        "cool": "macaron_cool",
-    }
-    if scheme not in presets:
+    if scheme not in MACARON_VARIANTS:
         raise ValueError("color_scheme must be default, warm, or cool")
-    snapshot_id = pp_style_apply(presets[scheme], selection, 1, 0)
+    preset = f"macaron_{scheme}"
+    snapshot_id = pp_style_apply(preset, selection, 1, 0)
     if _as_bool(ray):
-        defaults = _REGISTRY.presets[presets[scheme]].render_defaults
+        defaults = _REGISTRY.presets[preset].render_defaults
         pp_style_render(defaults["width"], defaults["height"])
     return snapshot_id
 

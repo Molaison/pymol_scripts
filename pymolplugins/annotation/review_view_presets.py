@@ -406,15 +406,13 @@ def _capture_membrane(api, source, protein):
 
 
 def _show_mass(api, source, chains):
-    from pymolplugins.styles.presets import PRESETS
+    from pymolplugins.styles.registry import StyleRegistry, _REGISTRY
 
-    preset = next(preset for preset in PRESETS if preset.name == "rfd2_paper_palette")
-    palette = preset.color_operations[0]["palette"]
-    for name in palette:
-        api.set_color(name, preset.colors[name])
+    registry = _REGISTRY if api is _REGISTRY.cmd else StyleRegistry(api)
+    selection = " or ".join(f"({chain})" for chain in chains)
+    registry.apply("mass", selection, snapshot=False)
     for chain in chains:
         api.show("cartoon", chain)
-        api.spectrum("resi", " ".join(palette), selection=chain)
 
 
 def _surface_overlay(api, source, selection, state, transparency, label):
