@@ -5,6 +5,7 @@ import re
 
 from pymol import cmd
 from pymol.Qt import QtCore, QtGui, QtWidgets
+from .filter_values import FilterValueCatalog
 from .filtering import COMPARISON_OPERATORS, TEXT_OPERATORS, column_expression
 from .history_store import fuzzy_matches
 
@@ -108,7 +109,12 @@ class ColumnPicker(QtWidgets.QToolButton):
         self.selectionChanged.emit(list(self._selected))
 
 
-_FILTER_TOKEN = re.compile(r"""("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\x60[^\x60]*\x60)|(["'\x60].*)|([\w.]+|[!<>=]=?|\S)""")
+_NUMBER_FRAGMENT = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d*)?"
+_FILTER_FRAGMENT = re.compile(rf"{_NUMBER_FRAGMENT}|[\w.]+|[!<>=]=?|[+-]")
+_FILTER_TOKEN = re.compile(
+    r"""("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\x60[^\x60]*\x60)|(["'\x60].*)|("""
+    + _NUMBER_FRAGMENT + r"""|[\w.]+|[!<>=]=?|\S)"""
+)
 _COLUMN_ARGUMENT = "<column>"
 _TEXT_ARGUMENT = "text"
 _TEXT_ARGUMENT_PREFIX = ', "'
@@ -119,18 +125,34 @@ _TEXT_FUNCTION_SNIPPETS = {
 }
 
 
-def _filter_completions(text, columns):
+def _value_position(tokens, columns):
+    """Identify the column that owns the comparison or text argument."""
+    previous = tokens[-1].group() if tokens else ""
+    comparison = len(tokens) > 1 and previous in COMPARISON_OPERATORS
+    function = (len(tokens) >= 4 and previous == "," and tokens[-3].group() == "("
+                and tokens[-4].group() in TEXT_OPERATORS)
+    name = tokens[-2].group().strip("\x60") if comparison or function else ""
+    return (name, function) if name in columns else ("", False)
+
+
+def _filter_completions(text, columns, catalog):
     """Return the active token and suggestions for the syntactic position."""
     tokens = list(_FILTER_TOKEN.finditer(text))
     last = tokens[-1] if tokens else None
-    if last and last.group(2) and last.group()[0] != "`":
-        return len(text), []
     start, fragment = len(text), ""
     if last and last.end() == len(text) and (
-        last.group(2) or re.fullmatch(r"[\w.]+|[!<>=]=?", last.group())
+        last.group(2) or _FILTER_FRAGMENT.fullmatch(last.group())
     ):
         start, fragment = last.start(), last.group()
         tokens.pop()
+    field, as_text = _value_position(tokens, columns)
+    if fragment.startswith(("'", '"')):
+        try:
+            query = ast.literal_eval(fragment + fragment[0])
+        except (ValueError, SyntaxError):
+            query = fragment[1:]
+        return start, catalog.suggestions(field, query, text=True) if field else []
+    literals = catalog.suggestions(field, fragment, text=as_text) if field else []
     previous = tokens[-1].group() if tokens else ""
     if previous == "is":
         options, headers = ("None", "not None"), ()
@@ -147,17 +169,19 @@ def _filter_completions(text, columns):
     choices = [item for item in options if item.casefold().startswith(fragment.casefold())]
     if not fragment or not fragment[0].isdigit():
         choices.extend(column_expression(name) for name in fuzzy_matches(headers, fragment.lstrip("`")))
-    return start, list(dict.fromkeys(choices))
+    return start, list(dict.fromkeys(literals + choices))
 
 
 class ColumnCompletion(QtCore.QObject):
     """Complete exact CSV headers, optionally within a filter expression."""
 
-    def __init__(self, widget, *, expression=False):
+    def __init__(self, widget, *, expression=False, choices=None):
         super().__init__(widget)
         self.widget, self.expression = widget, expression
         self.enabled = True
         self.columns = []
+        self.value_catalog = FilterValueCatalog() if expression else None
+        self.choices = choices
         self.model = QtCore.QStringListModel([], widget)
         self.completer = QtWidgets.QCompleter(self.model, widget)
         self.completer.setCaseSensitivity(qt_enum("CaseSensitivity", "CaseInsensitive"))
@@ -179,8 +203,12 @@ class ColumnCompletion(QtCore.QObject):
         self.columns = list(dict.fromkeys(columns))
         self.model.setStringList(self.columns)
 
+    def set_value_dataset(self, dataset):
+        if self.value_catalog.dataset is not dataset:
+            self.value_catalog = FilterValueCatalog(dataset)
+
     def _prefix_end(self):
-        if self.widget.selectedText() == _COLUMN_ARGUMENT:
+        if self.widget.selectedText() in (_COLUMN_ARGUMENT, _TEXT_ARGUMENT):
             return self.widget.selectionStart()
         return self.widget.cursorPosition()
 
@@ -189,7 +217,11 @@ class ColumnCompletion(QtCore.QObject):
             self.completer.popup().hide()
             return
         if self.expression:
-            _, values = _filter_completions(self.widget.text()[:self._prefix_end()], self.columns)
+            _, values = _filter_completions(
+                self.widget.text()[:self._prefix_end()], self.columns, self.value_catalog
+            )
+        elif self.choices is not None:
+            values = self.choices(self.widget.text())
         else:
             query = self.widget.text()
             values = fuzzy_matches(self.columns, query)
@@ -210,8 +242,12 @@ class ColumnCompletion(QtCore.QObject):
             return
         text, end = self.widget.text(), self.widget.cursorPosition()
         prefix_end = self._prefix_end()
-        start, _ = _filter_completions(text[:prefix_end], self.columns)
-        if start < prefix_end:
+        start, _ = _filter_completions(text[:prefix_end], self.columns, self.value_catalog)
+        if text[start:prefix_end].startswith(("'", '"')):
+            literal = _FILTER_TOKEN.match(text, start)
+            if literal and literal.group(1):
+                end = literal.end()
+        elif start < prefix_end:
             remaining = re.match(r"[\w.]*", text[end:])
             end += len(remaining.group())
         opening = _TEXT_FUNCTION_SNIPPETS.get(value)
@@ -231,6 +267,7 @@ class ColumnCompletion(QtCore.QObject):
         position = start + len(value)
         if text[end:].startswith(_TEXT_ARGUMENT_TAIL) and text[:start].rstrip().endswith(_TEXT_FUNCTION_OPENINGS):
             self.widget.setSelection(position + len(_TEXT_ARGUMENT_PREFIX), len(_TEXT_ARGUMENT))
+            self.refresh()
         else:
             self.widget.setCursorPosition(position)
 
@@ -241,6 +278,9 @@ class ColumnCompletion(QtCore.QObject):
                 self.completer.popup().hide()
                 self.widget.returnPressed.emit()
                 return True
+            if enter and self.choices is not None:
+                self.completer.popup().hide()
+                return False
             if enter or event.key() == qt_enum("Key", "Key_Tab"):
                 index = self.completer.popup().currentIndex()
                 if not index.isValid():
@@ -250,7 +290,7 @@ class ColumnCompletion(QtCore.QObject):
         return super().eventFilter(obj, event)
 
 
-def filter_condition_dialog(parent, columns):
+def filter_condition_dialog(parent, columns, catalog):
     """Build one filter condition from an exact column, operator and value."""
     dialog = QtWidgets.QDialog(parent)
     dialog.setWindowTitle("Add filter condition")
@@ -267,6 +307,12 @@ def filter_condition_dialog(parent, columns):
     for comparison in COMPARISON_OPERATORS:
         operation.addItem(comparison, comparison)
     value = QtWidgets.QLineEdit()
+
+    def value_choices(query):
+        text = operation.currentData() in TEXT_OPERATORS or operation.currentData() == "not contains"
+        return catalog.suggestions(column.currentText(), query, text=text, literal=not text)
+
+    ColumnCompletion(value, choices=value_choices)
     operation.currentIndexChanged.connect(
         lambda: value.setEnabled(operation.currentData() not in ("is None", "is not None"))
     )

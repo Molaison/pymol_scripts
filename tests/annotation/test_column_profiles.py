@@ -19,6 +19,10 @@ class ColumnProfileTests(unittest.TestCase):
         full, = build_column_profiles(rows, ["score"], {})
         self.assertEqual((full.minimum, full.maximum, full.distinct), (-1e308, 1e308, 3))
         self.assertEqual((full.bins[0], full.bins[6], full.bins[-1], sum(full.bins)), (1, 1, 1, 3))
+        self.assertEqual((full.bin_ranges[0], full.bin_ranges[5], full.bin_ranges[6]),
+                         ((-1e308, -1e308), None, (0, 0)))
+        self.assertEqual(full.selected_range(0, 6), (-1e308, 0))
+        self.assertIsNone(full.selected_range(4, 5))
         selected, = build_column_profiles(rows[1:2], ["score"], {"score": "number"})
         self.assertEqual((selected.minimum, selected.maximum, selected.bins), (0, 0, (1,)))
         self.assertEqual(selected.categories, ())

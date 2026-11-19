@@ -1,6 +1,7 @@
 import unittest
+from types import SimpleNamespace
 
-from pymolplugins.annotation.filtering import FilterSyntaxError, compile_filter, validate_filter_presets
+from pymolplugins.annotation.filtering import FilterSyntaxError, compile_filter, compile_view_filter, validate_filter_presets
 
 
 class ColumnFilterTests(unittest.TestCase):
@@ -34,6 +35,16 @@ class ColumnFilterTests(unittest.TestCase):
         self.assertTrue(predicate({"source batch": "run A", "notes": "model.cif"}))
         self.assertFalse(predicate({"source batch": "run A", "notes": "SKIP.cif"}))
         self.assertFalse(predicate({"source batch": "run A", "notes": ""}))
+
+    def test_view_range_uses_exact_integers_and_preserves_text_search(self):
+        entry = SimpleNamespace(metadata={"score": "9007199254740993"},
+                                display_name="Candidate", source_path="model.pdb", resolved_path="mapped/file.pdb")
+        query = 'where:text_search("mapped") and 9007199254740993 <= score <= 9007199254740993'
+        self.assertTrue(compile_view_filter("mapped", ("score",))(entry))
+        self.assertTrue(compile_view_filter(query, ("score",))(entry))
+        entry.metadata["score"] = "9007199254740992"
+        self.assertFalse(compile_view_filter(query, ("score",))(entry))
+        self.assertFalse(compile_view_filter(query.replace("mapped", "absent"), ("score",))(entry))
 
 
 class FilterPresetTests(unittest.TestCase):
