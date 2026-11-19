@@ -53,7 +53,6 @@ class InteractiveFocus(Wizard):
             [1, f"Interactive focus ({RADIUS:g} A)", ""],
             [3, f"Camera: {_CAMERAS[self.camera]}", "camera"],
             [3, f"Contacts: {_CONTACT_LEVELS[self.contacts][0]}", "contacts"],
-            [2, "Pocket layers…", "cmd.get_wizard().show_pocket_layers()"],
             [3, "Pocket options", "pocket"],
             [2, "Clear focus", "cmd.get_wizard().clear()"],
             [2, "Done", "cmd.set_wizard()"],
@@ -109,9 +108,6 @@ class InteractiveFocus(Wizard):
         if self.layer:
             self.layer.show_contacts(self.cmd, _CONTACT_LEVELS[level][1])
         self.cmd.refresh_wizard()
-
-    def show_pocket_layers(self):
-        pocket_for(self).show_layers()
 
     def set_pocket_option(self, key, value):
         pocket = pocket_for(self)
@@ -218,4 +214,5 @@ def toggle_focus(api=cmd):
     except Exception:
         wizard.cleanup()
         raise
+    pocket_for(wizard).attach_layers(wizard)
     return "started"

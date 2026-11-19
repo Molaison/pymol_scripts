@@ -5,7 +5,7 @@ from pymol.Qt import QtCore, QtWidgets
 
 
 class CavityControls(QtWidgets.QWidget):
-    def __init__(self, parent=None, *, on_toggle=None):
+    def __init__(self, parent=None, *, on_toggle=None, compact=False):
         super().__init__(parent)
         self.checks, self.volumes, self.objects = {}, {}, {}
         self.on_toggle = on_toggle
@@ -15,13 +15,15 @@ class CavityControls(QtWidgets.QWidget):
         layout.setVerticalSpacing(2)
         layout.setColumnStretch(3, 1)
         layers = (
-            ("recesses", "Cyan · Water-accessible recess", "#0385cc"),
-            ("enclosed", "Violet · Enclosed void", "#a84dd1"),
+            ("recesses", "Cyan · Water-accessible recess", "Cyan recess", "#0385cc"),
+            ("enclosed", "Violet · Enclosed void", "Violet enclosed", "#a84dd1"),
         )
-        for row, (kind, caption, color) in enumerate(layers):
+        for row, (kind, caption, short_caption, color) in enumerate(layers):
             dot = QtWidgets.QLabel("●")
             dot.setStyleSheet(f"color: {color};")
-            check = QtWidgets.QCheckBox(caption)
+            check = QtWidgets.QCheckBox(short_caption if compact else caption)
+            if compact:
+                check.setToolTip(caption)
             check.setChecked(True)
             check.toggled.connect(lambda enabled, layer=kind: toggle(layer, enabled))
             volume = QtWidgets.QLabel("—")

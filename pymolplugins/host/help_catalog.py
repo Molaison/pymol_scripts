@@ -99,7 +99,7 @@ _TASKS = (
     _help_entry(
         "task",
         "navigate",
-        "Browse objects or groups: Left/Right step, Ctrl+Left/Right page; an empty command line handles navigation, while text keeps cursor editing. Use keys=0 to disable bindings and pp_nav stop to restore shortcuts and visibility.",
+        "Browse objects or groups with Left/Right and Ctrl+Left/Right after clicking the viewport. Click a populated command line to edit its text. Use keys=0 to disable bindings and pp_nav stop to restore shortcuts and visibility.",
         "pp_nav TARGET",
         'pp_nav groups, "walk_root_*"',
         True,
@@ -415,7 +415,7 @@ _COMMAND_ROWS = {
         ("surface", "display", "group", "表面"),
     ),
     "pp_nav": (
-        "Start object/group navigation with Left/Right and Ctrl+Left/Right; an empty command line navigates, while text keeps cursor editing. Set keys=0 to disable bindings; pp_nav stop restores shortcuts and visibility. Control actions reject start-only options.",
+        "Start object/group navigation with Left/Right and Ctrl+Left/Right after clicking the viewport or from an empty command line. Click a populated command line to edit its text. Set keys=0 to disable bindings; pp_nav stop restores shortcuts and visibility. Control actions reject start-only options.",
         "pp_nav [ACTION|TARGET]",
         'pp_nav groups, "walk_root_*"',
         True,

@@ -1,6 +1,6 @@
 """Interactive Focus pocket options and background probe-point rendering."""
 
-from weakref import WeakKeyDictionary
+from weakref import WeakKeyDictionary, ref
 
 from pymol.Qt import QtCore, QtWidgets
 from pymol.gui import get_qtwindow
@@ -26,32 +26,26 @@ def pocket_for(wizard):
 def close_pocket(wizard):
     pocket = _POCKETS.pop(wizard, None)
     if pocket:
-        if pocket.jobs:
-            pocket.jobs.close_cavity()
-        if pocket.dialog:
-            dialog, pocket.dialog = pocket.dialog, None
-            dialog.close()
-            dialog.deleteLater()
+        pocket.close()
 
 
 def _option(key, label, value):
     return [1, label, f"cmd.get_wizard().set_pocket_option({key!r}, {value!r})"]
 
 
-class PocketLayersDialog(QtWidgets.QDialog):
-    def __init__(self, pocket):
-        super().__init__(get_qtwindow(), QtCore.Qt.Tool)
+class PocketLayers(QtWidgets.QWidget):
+    def __init__(self, pocket, parent):
+        super().__init__(parent)
         self.pocket = pocket
-        self.setWindowTitle("Pocket layers")
-        self.setMinimumWidth(330)
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(6, 3, 6, 3)
         self.checks = {}
         for kind, label in _LAYERS.items():
             check = QtWidgets.QCheckBox(label)
             check.toggled.connect(lambda enabled, layer=kind: pocket.set_layer(layer, enabled))
             self.checks[kind] = check
             layout.addWidget(check)
-        self.cavities = CavityControls(self, on_toggle=pocket.set_void_layer)
+        self.cavities = CavityControls(self, on_toggle=pocket.set_void_layer, compact=True)
         layout.addWidget(self.cavities)
         self.status = QtWidgets.QLabel()
         self.status.setWordWrap(True)
@@ -78,7 +72,7 @@ class PocketLayersDialog(QtWidgets.QDialog):
             notes.append(pocket.cavity_note)
         self.status.setText("\n".join(notes))
         self.status.setVisible(bool(notes))
-        self.adjustSize()
+        self.updateGeometry()
 
 
 class FocusPocket:
@@ -89,7 +83,10 @@ class FocusPocket:
         self.options = {key: saved.get(key, value) for key, value in _DEFAULTS.items()}
         self.visible = dict.fromkeys(_LAYERS, False)
         self.void_layers = {"recesses": True, "enclosed": True}
-        self.dialog = None
+        self.panel = None
+        self.host_wizard = None
+        self.fallback_dock = None
+        self.wizard_ref = None
         self.layer = None
         self.jobs = None
         self.request = None
@@ -110,14 +107,50 @@ class FocusPocket:
             rows.append([1, title, [_option(key, label, value) for label, value in choices]])
         return rows
 
-    def show_layers(self):
-        if not isinstance(QtWidgets.QApplication.instance(), QtWidgets.QApplication):
-            raise RuntimeError("Pocket layers needs the PyMOL Qt window.")
-        if self.dialog is None:
-            self.dialog = PocketLayersDialog(self)
-        self.dialog.refresh()
-        self.dialog.show()
-        self.dialog.raise_()
+    def attach_layers(self, wizard):
+        window = get_qtwindow()
+        if not isinstance(window, QtWidgets.QMainWindow):
+            return
+        self.wizard_ref = ref(wizard)
+        contents = getattr(window, "contentsPanelFrame", None)
+        self.host_wizard = getattr(contents, "wizard_dialog", None)
+        if self.host_wizard is not None:
+            self.panel = PocketLayers(self, self.host_wizard)
+            self.host_wizard.wizardShownRequested.connect(self._insert_layers)
+            self.host_wizard.wizardHiddenRequested.connect(self.panel.hide)
+            self._insert_layers()
+        else:
+            dock = self.fallback_dock = QtWidgets.QDockWidget("Pocket layers", window)
+            dock.setFeatures(QtWidgets.QDockWidget.NoDockWidgetFeatures)
+            self.panel = PocketLayers(self, dock)
+            dock.setWidget(self.panel)
+            window.addDockWidget(QtCore.Qt.RightDockWidgetArea, dock)
+            self.panel.refresh()
+            dock.show()
+
+    def _insert_layers(self):
+        native = self.host_wizard
+        if native.wizard is not self.wizard_ref():
+            return
+        layout = native.layout
+        if layout.indexOf(self.panel) < 0:
+            # PyMOL detaches the controls when it rebuilds the native wizard.
+            layout.insertWidget(max(0, layout.count() - 2), self.panel)
+        self.panel.refresh()
+        self.panel.show()
+
+    def close(self):
+        if self.jobs:
+            self.jobs.close_cavity()
+        if self.host_wizard is not None:
+            self.host_wizard.wizardShownRequested.disconnect(self._insert_layers)
+            self.host_wizard.wizardHiddenRequested.disconnect(self.panel.hide)
+        if self.panel is not None:
+            self.panel.hide()
+            self.panel.deleteLater()
+        if self.fallback_dock is not None:
+            self.fallback_dock.hide()
+            self.fallback_dock.deleteLater()
 
     def set_layer(self, kind, enabled):
         if kind == "voids" and enabled and not self.visible[kind]:
@@ -159,8 +192,8 @@ class FocusPocket:
         self._refresh_layers()
 
     def _refresh_layers(self):
-        if self.dialog is not None:
-            self.dialog.refresh()
+        if self.panel is not None:
+            self.panel.refresh()
 
     def _cancel_voids(self):
         if self.jobs:

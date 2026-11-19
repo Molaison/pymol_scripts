@@ -4,13 +4,15 @@
 
 ## 常用入口
 
+PyMOL 主窗口的 **PymolPlugins** 工具栏直接打开 Annotator、Presets、Focus、Compare、Batch 和 RFD4。
+
 已加载的分子可在 **Plugin → PymolPlugins → Show presets…** 设置显示。选择对象和预设即可应用。**Copy command** 可复制同一配置，例如 `pp_view interface, model, radius=6`。
 
 在 **Plugin → PymolPlugins → Compare & align…** 或输入 `pp_align` 打开独立的结构比较窗口。勾选至少两个对象，选定参考对象。**Overlay** 直接叠加当前帧，**Align** 按选定方法拟合。Mobiles 和 Reference 可分别选择原子类型、链和残基范围，例如 `40-80+105`。多个移动对象共用 Mobiles 范围。**Clear comparison** 或关闭窗口会移除比较副本并恢复源对象的可见性。
 
 从 **Plugin → PymolPlugins → Interactive focus** 或输入 `pp_view focus` 进入点击聚焦。左键点残基或配体，显示同一对象内 5 Å 的邻域。**Camera** 默认保留当前角度、缩放和位置，可改用平滑居中、自动取景或单次取景。**Contacts** 可以关闭，或只显示极性候选、极性加盐桥、完整 Interface。**Pocket surface** 只用独立副本中的邻域聚合物残基计算半透明表面。再次点同一残基或点空白可清除聚焦，**Done** 退出。清除和退出都保留当前视角。
 
-**Pocket layers…** 可独立开关口袋表面、珊瑚色配体表面和空腔点。每次开启空腔点时，青点和紫点的复选框都默认勾选。青点表示探针可从体相进入的凹入区域，紫点表示探针可容纳的封闭区域。计算在后台运行并复用缓存。**Pocket options** 可设置口袋表面的半径和透明度，并在朝向配体的内壁与完整局部表面之间切换。
+Focus 的右侧控件可独立开关口袋表面、珊瑚色配体表面和空腔点。每次开启空腔点时，青点和紫点的复选框都默认勾选。青点表示探针可从体相进入的凹入区域，紫点表示探针可容纳的封闭区域。计算在后台运行并复用缓存。**Pocket options** 可设置口袋表面的半径和透明度，并在朝向配体的内壁与完整局部表面之间切换。
 
 | 任务 | 入口 |
 |---|---|
@@ -78,7 +80,7 @@ pp_nav stop
 
 开始后每个 group 作为一个候选，`window=2` 显示两个，`page=2` 每页移动两个，`wrap=0` 到边界停止。`pp_nav objects, "walk_*"` 可按对象浏览；名称和 glob 均可用。`window`、`page` 等是启动选项，不能附在 `next` 上。
 
-默认 Left/Right 前后切换，Ctrl+Left/Right 翻页；点击视图区后命令行为空时仍可使用，有文字时方向键用于编辑文本。启动命令加 `keys=0` 可关闭绑定。`pp_nav stop` 恢复原快捷键和原可见性；Annotator 的 Alt+Left/Right 独立切换审阅条目。组内原本关闭的子对象保持关闭；开启隐藏祖先时不会意外显示祖先下的外部兄弟对象。
+点击视图区后，Left/Right 前后切换，Ctrl+Left/Right 翻页。命令框里的草稿会保留。空命令框也支持导航，点击有文字的命令框可以继续用方向键编辑。启动命令加 `keys=0` 可关闭绑定。`pp_nav stop` 恢复原快捷键和原可见性。Annotator 的 Alt+Left/Right 切换审阅条目。组内原本关闭的子对象保持关闭；开启隐藏祖先时不会意外显示祖先下的外部兄弟对象。
 
 ## 选择序列并对齐
 

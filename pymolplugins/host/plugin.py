@@ -723,6 +723,8 @@ def pp_view(preset="", object_name="", mode="auto", radius="4", scope="nearby",
 
 def __init_plugin__(app=None):
     from pymol.plugins import addmenuitemqt
+    from pymolplugins.navigation.qt_keys import install_qt_navigation_keys
+    from .toolbar import install_toolbar
 
     for label, callback in (
         ("Show presets…", pp_view),
@@ -739,6 +741,15 @@ def __init_plugin__(app=None):
         ("Maintenance|Reload toolkit", pp_load),
     ):
         addmenuitemqt("PymolPlugins|" + label, callback)
+    install_toolbar((
+        ("Annotator", "Structure Annotator", show_structure_annotator_from_toolkit),
+        ("Presets", "Show presets", pp_view),
+        ("Focus", "Interactive focus", toggle_interactive_focus),
+        ("Compare", "Compare & align", show_comparison_from_toolkit),
+        ("Batch", "Batch Processing", show_batch_processing_from_toolkit),
+        ("RFD4", "RFD4 · Proteina", show_rfd4_from_toolkit),
+    ))
+    install_qt_navigation_keys()
     from .updater_widgets import start_update_check
     start_update_check()
 
