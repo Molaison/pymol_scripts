@@ -65,6 +65,14 @@ design_a,structures/model_a.pdb,0.82,典型模式
 
 代表性抽样是显式审阅路线，不等同全集或无偏统计样本。检查界面中的全集、筛选集和样本数量；重新导入回到完整筛选集合。批处理不会自动继承审阅的筛选和抽样。
 
+## 聚类并审阅代表结构
+
+在 **Review → Cluster…** 对当前 Filter 命中的候选聚类。选择 **Sequence**（MMseqs2）、**Structure**（Foldseek）或 **Sequence and structure**（同时属于同一序列簇和同一结构簇）。多链结构填要比较的蛋白链 ID，例如 binder 的链。序列也可从 CSV 的序列列读取。覆盖率要求比对覆盖两侧各自的长度。
+
+在 **Representative score** 选一列或填组合表达式，例如 `ipsae - 0.1 * rmsd`，再选分数越高或越低越好。列名有空格时用反引号。缺失与计算无效的分数排在末尾，同分按原始行序。改分数后点 **Show representatives** 可重选代表，不会重跑聚类。选择簇后点 **Show cluster members** 查看该簇，**Full filtered list** 返回完整筛选结果。状态栏显示跳过的行数，悬停可看原因。
+
+SSH 数据源默认在原 SSH profile 对应的服务器上跑，使用服务器的结构路径；分组结果返回本机。也可切换到 **This computer**。运行环境需要相应的 MMseqs2 或 Foldseek。读取结构时还需要 Python 3 的 Gemmi。Windows 支持使用默认 WSL 发行版，优先读取该环境中的 `~/.local/share/pymolplugins/clustering` 用户工具目录，再查找 PATH。 [MMseqs2](https://github.com/soedinglab/MMseqs2) · [Foldseek](https://github.com/steineggerlab/foldseek) · [Gemmi](https://gemmi.readthedocs.io/en/stable/mol.html)
+
 ## 叠加与对齐结构
 
 在 **Review** 的表格里按 **Ctrl** 点选候选，把该结构作为彩色副本叠加到当前结构。再点一次移除。普通点选继续切换当前候选。用 **Pin current** 保留当前结构以便之后切换，用 **Frame all** 将视角缩放到所有可见的比较对象。
