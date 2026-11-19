@@ -7,6 +7,7 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path, PureWindowsPath
 from tempfile import TemporaryDirectory
 from uuid import uuid4
+from weakref import WeakKeyDictionary
 import base64
 import json
 import os
@@ -23,6 +24,7 @@ SKILL_MODULES = (
     "acceptance_bundle", "acceptance_cavity_runtime", "acceptance_pocket_void",
     "acceptance_recipes", "acceptance_collection",
 )
+_BUNDLE_LEGENDS = WeakKeyDictionary()
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,14 @@ class CandidateCavity:
     title: str
     identity: str
     capture: Callable
+
+
+def clear_bundle_legend(api):
+    legend = _BUNDLE_LEGENDS.pop(api, None)
+    if legend is not None:
+        stack = api.get_wizard_stack()
+        if any(wizard is legend for wizard in stack):
+            api.set_wizard_stack([wizard for wizard in stack if wizard is not legend])
 
 
 @contextmanager
@@ -187,6 +197,7 @@ def _draw_bundle(api, owner, prepared):
                 message = "\n".join([title, *legend])
                 api.set_scene_message(focus, message)
                 api.scene(focus, "recall", animate=0)
+                _BUNDLE_LEGENDS[api] = api.get_wizard()
     except Exception:
         for state, coords in enumerate(coordinates, 1):
             api.load_coordset(coords, owner, state)
