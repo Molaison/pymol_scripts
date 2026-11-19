@@ -40,6 +40,15 @@ class CandidateCavity:
     title: str
     identity: str
     capture: Callable
+    interface: bool = False
+
+
+@dataclass(frozen=True)
+class CavityRender:
+    status: str
+    tooltip: str
+    volumes: dict
+    objects: dict
 
 
 def clear_bundle_legend(api):
@@ -233,14 +242,14 @@ def prepare_candidate_cavity(api, view):
 def draw_candidate_cavity(api, view, payload):
     result, cached = payload
     cavity = _load_skill()["acceptance_pocket_void"]
-    cavity.draw_cavity(view.identity, result, api=api)
-    recess = sum(region["volume"] for region in result["recesses"])
-    enclosed = sum(region["volume"] for region in result["enclosed"])
-    status = f"{view.title} · {recess:.1f} Å³ recess · {enclosed:.1f} Å³ enclosed"
+    products = cavity.draw_cavity(view.identity, result, api=api)
+    names = cavity.cavity_object_names(view.identity)
+    volumes = {kind: sum(region["volume"] for region in regions) for kind, regions in result.items()}
+    status = f"{view.title} · {volumes['recesses']:.1f} Å³ recess · {volumes['enclosed']:.1f} Å³ enclosed"
     tooltip = (
         f"{status}\nCyan: reached by a 1.4 Å probe from bulk, shielded from the 4.0 Å probe.\n"
         "Violet: the water-sized probe fits, with no path to bulk in this model.\n"
         "Volumes count probe-center grid cells in the bound geometry (0.5 Å grid).\n"
         + ("Read from cache." if cached else "Calculated for this structure.")
     )
-    return status, tooltip
+    return CavityRender(status, tooltip, volumes, {kind: name for kind, name in names.items() if name in products})
