@@ -335,32 +335,12 @@ def _quick_views(panel):
 
 
 def _interface_cavity_controls(panel):
-    panel.interface_cavity_controls = QtWidgets.QWidget(panel)
-    layout = QtWidgets.QGridLayout(panel.interface_cavity_controls)
-    layout.setContentsMargins(4, 0, 4, 0)
-    layout.setVerticalSpacing(2)
-    layout.setColumnStretch(3, 1)
-    panel.interface_cavity_checks = {}
-    panel.interface_cavity_volumes = {}
-    layers = (
-        ("recesses", "Cyan · Water-accessible recess", "#0385cc"),
-        ("enclosed", "Violet · Enclosed void", "#a84dd1"),
-    )
-    for row, (kind, caption, color) in enumerate(layers):
-        dot = QtWidgets.QLabel("●")
-        dot.setStyleSheet(f"color: {color};")
-        check = QtWidgets.QCheckBox(caption)
-        check.setChecked(True)
-        check.toggled.connect(lambda enabled, layer=kind: panel._set_interface_cavity_visible(layer, enabled))
-        volume = QtWidgets.QLabel("—")
-        volume.setAlignment(qt_enum("AlignmentFlag", "AlignRight") | qt_enum("AlignmentFlag", "AlignVCenter"))
-        layout.addWidget(dot, row, 0)
-        layout.addWidget(check, row, 1)
-        layout.addWidget(volume, row, 2)
-        panel.interface_cavity_checks[kind] = check
-        panel.interface_cavity_volumes[kind] = volume
-    panel.interface_cavity_controls.hide()
-    return panel.interface_cavity_controls
+    from .view_controls import CavityControls
+
+    controls = panel.interface_cavity_controls = CavityControls(panel)
+    panel.interface_cavity_checks = controls.checks
+    panel.interface_cavity_volumes = controls.volumes
+    return controls
 
 
 def _review_page(panel):

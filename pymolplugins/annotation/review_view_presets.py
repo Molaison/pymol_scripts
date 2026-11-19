@@ -13,10 +13,17 @@ from xml.etree.ElementTree import ParseError
 from .command_templates import LIPID_SELECTION, _chain_selection
 
 
-REVIEW_VIEW_COMMANDS = frozenset({"sa_view_cartoon", "sa_view_interface", "sa_view_membrane", "sa_view_mass"})
+REVIEW_VIEW_COMMANDS = frozenset({"pp_view", "sa_view_cartoon", "sa_view_interface", "sa_view_membrane", "sa_view_mass"})
 QUICK_VIEWS = {"cartoon": "Cartoon", "interface": "Interface", "membrane": "Membrane", "mass": "MASS"}
+SHOW_PRESETS = {**QUICK_VIEWS, "surface": "Molecular surface", "nucleic": "DNA / RNA"}
 _BACKBONE = "name N+C+O+OXT"
 _OVERLAYS = WeakKeyDictionary()
+
+
+def loaded_molecules(api):
+    overlays = set().union(*_OVERLAYS.get(api, {}).values())
+    return [name for name in api.get_names("objects")
+            if name not in overlays and api.get_type(name) == "object:molecule"]
 
 
 def encode_review_command(name, *values):
@@ -26,9 +33,49 @@ def encode_review_command(name, *values):
 
 
 def quick_view_command(view, source, radius="4", mass_chain=None):
-    chain = "auto" if mass_chain is None else "chain:" + mass_chain
-    args = {"interface": ("auto", radius, "nearby", "auto", "auto"), "mass": (chain, "auto")}
-    return encode_review_command("sa_view_" + view, source, *args.get(view, ()))
+    return show_preset_command(view, source, radius=radius, binder_chain=mass_chain)
+
+
+def _chain_option(value):
+    if value is None or value == "auto":
+        return "auto"
+    value = str(value)
+    return value if value.startswith("chain:") else "chain:" + value
+
+
+def show_preset_command(view, source, mode="auto", radius="4", scope="nearby",
+                        target_chain="auto", binder_chain="auto"):
+    if view not in SHOW_PRESETS:
+        raise ValueError("Choose " + ", ".join(SHOW_PRESETS))
+    options = ()
+    if view in ("interface", "mass"):
+        options = (mode, radius, scope, _chain_option(target_chain), _chain_option(binder_chain))
+    return encode_review_command("pp_view", view, source, *options)
+
+
+def _preset_fields(name, raw):
+    values = next(csv.reader([raw], strict=True, skipinitialspace=True))
+    if name != "pp_view":
+        source, *args = values
+        return name.removeprefix("sa_view_"), source, args
+    view, source, *options = values
+    defaults = dict(zip(("mode", "radius", "scope", "target_chain", "binder_chain"),
+                        ("auto", "4", "nearby", "auto", "auto")))
+    keys = tuple(defaults)
+    if len(options) > len(keys):
+        raise ValueError("Too many display preset options.")
+    for index, option in enumerate(options):
+        key, separator, value = option.partition("=")
+        if separator and key in defaults:
+            defaults[key] = value
+        else:
+            defaults[keys[index]] = option
+    mode, radius, scope, target, binder = defaults.values()
+    if view == "interface":
+        return view, source, (mode, radius, scope, _chain_option(target), _chain_option(binder))
+    if view == "mass":
+        return view, source, (_chain_option(binder), _chain_option(target))
+    return view, source, ()
 
 
 def _chain_arg(source, value, api):
@@ -56,8 +103,10 @@ def _source_object(api, source):
 def parse_review_command(line, api):
     """Resolve and validate a local recipe against the active candidate."""
     name, raw = line.split(None, 1)
-    source, *args = next(csv.reader([raw], strict=True, skipinitialspace=True))
-    if name == "sa_view_cartoon" and not args and source in api.get_names("objects"):
+    if name not in REVIEW_VIEW_COMMANDS:
+        raise ValueError(f"Unknown display command: {name}")
+    view, source, args = _preset_fields(name, raw)
+    if view == "cartoon" and not args and source in api.get_names("objects"):
         try:
             source = _source_object(api, source)
         except ValueError:
@@ -65,12 +114,14 @@ def parse_review_command(line, api):
                 raise
         return _show_cartoon, source, ()
     source = _source_object(api, source)
+    if view in ("surface", "nucleic") and not args:
+        return _show_basic_preset, source, (view,)
     protein = f"%{source} and polymer.protein"
     if not api.count_atoms(protein):
         raise ValueError("This preset requires protein atoms")
-    if name == "sa_view_membrane" and not args:
+    if view == "membrane" and not args:
         return _show_membrane, source, (protein,)
-    if name == "sa_view_mass" and len(args) == 2:
+    if view == "mass" and len(args) == 2:
         binder = _chain_arg(source, args[0], api)
         target = _chain_arg(source, args[1], api)
         if binder is None and target is None:
@@ -81,7 +132,7 @@ def parse_review_command(line, api):
         if binder is not None and binder == target:
             raise ValueError("Binder and target must be different chains")
         return _show_mass, source, (tuple(filter(None, (binder or protein, target))),)
-    if name == "sa_view_interface" and len(args) == 5:
+    if view == "interface" and len(args) == 5:
         mode, radius, scope, target_id, binder_id = args
         if mode not in {"auto", "protein", "ligand"} or radius not in {"4", "6"} or scope not in {"nearby", "interacting"}:
             raise ValueError("Choose protein or ligand, 4 or 6 Å, and nearby or interacting sidechains")
@@ -106,14 +157,23 @@ def parse_review_command(line, api):
                 partners = list(combinations((_chain_arg(source, "chain:" + value, api) for value in chains), 2))
             ligand = None
         return _draw_interface, source, (protein, partners, ligand, float(radius), scope)
-    raise ValueError("Invalid arguments for " + name)
+    raise ValueError(f"Invalid arguments for {view} preset.")
 
 
-def execute_review_command(line, api):
+def _show_basic_preset(api, source, view):
+    from .command_templates import format_commands, viewing_preset
+    from pymolplugins.targets.commands import _execute_checked
+
+    commands, _ = viewing_preset(view, source, api)
+    for _, command in format_commands("\n".join(commands), {"object": f"%{source}"}):
+        _execute_checked(api, command)
+
+
+def execute_review_command(line, api, *, exclusive=False):
     from .bundle_view import CandidateCavity, draw_candidate_cavity, prepare_candidate_cavity
 
     source, action, compute, draw = prepare_review_command(line, api)
-    followup = draw_review_view(api, source, action, draw, compute() if compute else None)
+    followup = draw_review_view(api, source, action, draw, compute() if compute else None, exclusive=exclusive)
     if isinstance(followup, CandidateCavity):
         try:
             compute, draw = prepare_candidate_cavity(api, followup)

@@ -57,7 +57,8 @@ _PAGES = (
         "选择一个任务，查看现有命令帮助和示例。",
         "<p>在下方选择常用任务。示例里的对象名、group 名和链名"
         "需要换成当前场景中的实际名称，再粘贴到 PyMOL 命令行运行。</p>"
-        "<p>审阅时可在 <b>Settings → Automation → Viewing presets…</b> 使用预设："
+        "<p>已加载的结构可直接用 <b>Plugin → PymolPlugins → Show presets…</b> 调整显示。"
+        "审阅时可从 <b>Viewing presets…</b> 将同类预设加入步骤："
         "先预览草稿，再确认插入并 Apply。对齐前请核对候选和参考的链对应。</p>",
     ),
     (
@@ -70,11 +71,12 @@ _PAGES = (
         "在 PyMOL 控制台查询命令用法，例如 <code>pp_help navigation</code>。</p>"
         "<p><b>Doctor</b>：检查本机能力及可选后端。"
         "部分分析需要额外后端，具体要求见对应命令帮助。</p>"
-        "<hr><p>再次打开：<b>Plugin → PymolPlugins: Getting Started</b>，"
+        "<hr><p>再次打开：<b>Plugin → PymolPlugins → Getting Started</b>，"
         "或输入 <code>pp_wizard</code>。</p>",
     ),
 )
 _TOOLS = (
+    ("结构显示预设", "pp_view"),
     ("对象 / group 导航", "navigate"),
     ("显示表面", "surface"),
     ("结构对齐", "pp_align"),

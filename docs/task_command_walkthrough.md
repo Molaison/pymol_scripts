@@ -2,6 +2,24 @@
 
 本指南让你在 PyMOL 控制台练习显示、对象和 group 导航、对齐、方向、样式和接触。先安装插件；使用一次性场景，避免示例对象名与现有对象冲突。命令中的 `walk_*` 在下方创建，`YOUR_*` 是必须替换成真实数据的占位符。
 
+## 常用入口
+
+已加载的分子可在 **Plugin → PymolPlugins → Show presets…** 设置显示。选择对象和预设即可应用。**Copy command** 可复制同一配置，例如 `pp_view interface, model, radius=6`。
+
+| 任务 | 入口 |
+|---|---|
+| 显示预设、界面、膜和残基配色 | `pp_view` |
+| 只显示或隐藏某种表示 | `pp_show` |
+| 浏览结构与 group | `pp_nav` |
+| 对齐与定向 | `pp_align`、`pp_orient` |
+| 计算接触与指标 | `pp_contacts`、`pp_metrics` |
+| 查看后台任务、撤销受支持的操作 | `pp_jobs`、`pp_undo` |
+| 切换出图样式 | `pp_style_apply` |
+| 审阅评分表与批处理 | **Structure Annotator**、**Batch Processing** |
+| 查用法与排查安装 | `pp_help`、`pp_doctor` |
+
+在 **Plugin → PymolPlugins** 可找到面板入口。用 `pp_help 命令名` 查询具体参数。
+
 ## 加载工具并创建练习对象
 
 ```pymol

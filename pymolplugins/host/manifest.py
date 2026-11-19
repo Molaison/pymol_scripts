@@ -22,7 +22,7 @@ CANONICAL_MODULES = (
 )
 
 CANONICAL_COMMANDS = {
-    "toolkit": ("pp_load", "pp_doctor", "pp_capabilities", "pp_help", "pp_wizard", "pp_review_groups"),
+    "toolkit": ("pp_view", "pp_help", "pp_wizard", "pp_review_groups", "pp_doctor", "pp_capabilities", "pp_load"),
     "tasks": (
         "pp_show", "pp_nav", "pp_align", "pp_orient",
         "pp_contacts", "pp_metrics", "pp_jobs", "pp_undo",

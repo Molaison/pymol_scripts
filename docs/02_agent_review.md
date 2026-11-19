@@ -84,7 +84,7 @@
 ## 导入并标注
 
 1. 将 `sum_scores.csv` 和生成的 `review.json` 放在同一目录，保留表中相对路径所指向的结构文件。
-2. 打开 **Plugin → PymolPlugins: Structure Annotator**，在 **Open data** 粘贴文件夹、`sum_scores.csv` 或相邻的 `review.json` 路径，按 Enter 或点 **Open**。也接受 `file:///` 链接。文件夹和 `review.json` 会优先打开 Bundle 声明的 `scores_file`。
+2. 打开 **Plugin → PymolPlugins → Structure Annotator**，在 **Open data** 粘贴文件夹、`sum_scores.csv` 或相邻的 `review.json` 路径，按 Enter 或点 **Open**。也接受 `file:///` 链接。文件夹和 `review.json` 会优先打开 Bundle 声明的 `scores_file`。
 3. 在 **Review** 查看结构、选定的评分列和代表性 `label`。选择人工标签，点击 **Save and next**；稍后可用 **Data → Continue last review** 继续。
 4. 如需交接，使用 **Data → Export review handoff…** 导出进度与标签摘要；它不包含结构文件。导出带标注的表格时选择新的输出路径。
 

@@ -60,6 +60,18 @@ def _help_entry(
 _TASKS = (
     _help_entry(
         "task",
+        "view",
+        "Open the modeless display preset picker for loaded PyMOL objects.",
+        "pp_view [PRESET, OBJECT]",
+        "pp_view",
+        True,
+        "Apply Cartoon to clear preset overlays for the selected object and return to a basic view.",
+        ("pp_view interface, model", "pp_help pp_view"),
+        ("display", "view", "show presets", "cartoon", "interface", "MASS", "显示预设"),
+        "toolkit",
+    ),
+    _help_entry(
+        "task",
         "diagnose",
         "Check the Host PyMOL API, command ownership, paths, and optional worker.",
         "pp_doctor check_worker=0",
@@ -317,8 +329,8 @@ _TASKS = (
         "task",
         "annotation",
         "Review directories, CSV rows or existing scene groups; candidate outputs switch as one bundle.",
-        "Plugin > PymolPlugins: Structure Annotator",
-        "Plugin > PymolPlugins: Structure Annotator",
+        "Plugin > PymolPlugins > Structure Annotator",
+        "Plugin > PymolPlugins > Structure Annotator",
         True,
         "Use the annotator's row-level Undo action.",
         ("Load a directory or CSV in the Source tab", "pp_review_groups parent=candidates"),
@@ -356,6 +368,16 @@ _CATEGORY_PURPOSE = {
 # Curated command rows use:
 # purpose, minimal usage, example, mutates, undo, next, keywords.
 _COMMAND_ROWS = {
+    "pp_view": (
+        "Open Show presets or apply Cartoon, Interface, Membrane, MASS, Surface, or DNA/RNA to a loaded object.",
+        "pp_view [PRESET, OBJECT [, mode=auto|protein|ligand] [, radius=4|6] "
+        "[, scope=nearby|interacting] [, target_chain=ID] [, binder_chain=ID]]",
+        "pp_view interface, model, radius=6, target_chain=A, binder_chain=B",
+        True,
+        "Apply pp_view cartoon, OBJECT to clear preset overlays and show a basic view.",
+        ("pp_view", "pp_help surface", "pp_help publication"),
+        ("view", "preset", "interface", "membrane", "mass", "display", "显示预设"),
+    ),
     "pp_review_groups": (
         "Open Structure Annotator on direct child groups, preserving external scene objects.",
         "pp_review_groups [PARENT] [, review_path=PATH] [, restore_saved=1]",
@@ -1134,7 +1156,10 @@ _PRESET_ROWS = (
 def default_tasks():
     """Return detached task-first help entries (always at most twelve)."""
 
-    return [deepcopy(value) for value in _TASKS]
+    by_name = {task["name"]: task for task in _TASKS}
+    keys = ("view", "annotation", "navigate", "align", "interactions",
+            "style", "surface", "orient", "worker metrics", "diagnose")
+    return [deepcopy(by_name[key]) for key in keys]
 
 
 def help_topics():
