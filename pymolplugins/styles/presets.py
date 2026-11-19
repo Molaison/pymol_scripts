@@ -191,6 +191,23 @@ MACARON_COOL = {
     "pp_macaron_cool_7": _rgb255(3, 19, 43),
 }
 
+MACARON_VARIANTS = {"default": MACARON_DEFAULT, "warm": MACARON_WARM, "cool": MACARON_COOL}
+
+COLOR_CHOICES = (
+    ("MASS · Paper by residue number", "mass"),
+    ("Macaron", "macaron_palette"),
+    ("RFdiffusion · Sam", "rfd2_sam_palette"),
+    ("Secondary structure", "professional_secondary_structure"),
+)
+
+LIGHTING_CHOICES = (
+    ("Publication", "publication_light"),
+    ("Clean outline", "clean_outline"),
+    ("Depth shading", "ao_cartoon"),
+    ("Soft glossy", "soft_glossy"),
+    ("Flat silhouettes", "goodsell_flat"),
+)
+
 PROFESSIONAL_COLORS = {
     "pp_professional_blue": _rgb255(60, 120, 180),
     "pp_professional_red": _rgb255(180, 60, 60),
@@ -221,6 +238,9 @@ RFD2_PAPER_COLORS = {
     "pp_rfd2_paper_blue": _rgb255(102, 134, 197),
     "pp_rfd2_paper_darkblue": _rgb255(75, 95, 170),
 }
+RFD2_PAPER_SPECTRUM = tuple("pp_rfd2_paper_" + shade for shade in (
+    "navajo", "melon", "pink", "purple", "lightblue", "blue", "darkblue",
+))
 
 
 SOFT_MACARON_SETTINGS = {
@@ -246,6 +266,16 @@ def _spectrum(colors):
             "selection": "{selection}",
             "byres": 0,
         },
+    )
+
+
+def _legacy_macaron(variant, colors):
+    alias = "macaron" if variant == "default" else f"{variant}_macaron"
+    return StylePreset(
+        name=f"macaron_{variant}", aliases=(alias,), category="scene",
+        description=f"{variant.title()} Macaron spectrum with soft, shadow-free lighting.",
+        colors=colors, global_settings=SOFT_MACARON_SETTINGS,
+        color_operations=_spectrum(colors), render_defaults={"width": 1600, "height": 1200},
     )
 
 
@@ -290,35 +320,11 @@ PRESETS = (
         },
         render_defaults={"width": 1600, "height": 1200},
     ),
+    *(_legacy_macaron(variant, colors) for variant, colors in MACARON_VARIANTS.items()),
     StylePreset(
-        name="macaron_default",
-        aliases=("macaron",),
-        description="Pastel macaron spectrum with soft, shadow-free lighting.",
-        category="scene",
-        colors=MACARON_DEFAULT,
-        global_settings=SOFT_MACARON_SETTINGS,
-        color_operations=_spectrum(MACARON_DEFAULT),
-        render_defaults={"width": 1600, "height": 1200},
-    ),
-    StylePreset(
-        name="macaron_warm",
-        aliases=("warm_macaron",),
-        description="Warm macaron spectrum with soft, shadow-free lighting.",
-        category="scene",
-        colors=MACARON_WARM,
-        global_settings=SOFT_MACARON_SETTINGS,
-        color_operations=_spectrum(MACARON_WARM),
-        render_defaults={"width": 1600, "height": 1200},
-    ),
-    StylePreset(
-        name="macaron_cool",
-        aliases=("cool_macaron",),
-        description="Cool macaron spectrum with soft, shadow-free lighting.",
-        category="scene",
-        colors=MACARON_COOL,
-        global_settings=SOFT_MACARON_SETTINGS,
-        color_operations=_spectrum(MACARON_COOL),
-        render_defaults={"width": 1600, "height": 1200},
+        name="macaron_palette", category="palette",
+        description="Macaron color palette. Choose variant=default, warm or cool.",
+        colors=MACARON_DEFAULT, color_operations=_spectrum(MACARON_DEFAULT),
     ),
     StylePreset(
         name="ink_wash",
@@ -388,17 +394,14 @@ PRESETS = (
         description="RFdiffusion2 paper-inspired seven-color spectrum.",
         category="palette",
         colors=RFD2_PAPER_COLORS,
-        color_operations=_spectrum(
-            (
-                "pp_rfd2_paper_navajo",
-                "pp_rfd2_paper_melon",
-                "pp_rfd2_paper_pink",
-                "pp_rfd2_paper_purple",
-                "pp_rfd2_paper_lightblue",
-                "pp_rfd2_paper_blue",
-                "pp_rfd2_paper_darkblue",
-            )
-        ),
+        color_operations=_spectrum(RFD2_PAPER_SPECTRUM),
+    ),
+    StylePreset(
+        name="mass", category="palette",
+        description="Paper palette by residue number, normalized independently within each protein chain.",
+        colors={name: RFD2_PAPER_COLORS[name] for name in RFD2_PAPER_SPECTRUM},
+        color_operations=({**_spectrum(RFD2_PAPER_SPECTRUM)[0], "expression": "resi",
+                           "selection": "({selection}) and polymer.protein", "per_chain": True},),
     ),
     StylePreset(
         name="rfd2_sam_palette",

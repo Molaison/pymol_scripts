@@ -781,8 +781,8 @@ _COMMAND_ROWS = {
         ("presets", "palette"),
     ),
     "pp_style_apply": (
-        "Apply a style preset and create a revert snapshot by default.",
-        "pp_style_apply PRESET [, selection=SELECTION]",
+        "Apply a color palette or scene lighting with a revert snapshot. Use variant=warm or cool with macaron_palette.",
+        "pp_style_apply PRESET [, selection=SELECTION] [, variant=TONE]",
         "pp_style_apply publication_light, selection=all",
         True,
         "pp_style_revert",
@@ -1031,8 +1031,24 @@ _PRESET_ROWS = (
         ("lighting", "style"),
     ),
     (
-        "macaron_default",
+        "mass",
+        ("paper palette", "residue-number color"),
+        "Apply the paper palette by residue number, independently for each protein chain.",
+        "pp_style_apply mass, selection=polymer.protein",
+        "pp_style_revert",
+        ("palette", "protein", "color"),
+    ),
+    (
+        "macaron_palette",
         ("macaron",),
+        "Apply Macaron colors with one of three tones: default, warm or cool.",
+        "pp_style_apply macaron_palette, selection=polymer, variant=warm",
+        "pp_style_revert",
+        ("palette", "color"),
+    ),
+    (
+        "macaron_default",
+        (),
         "Pastel macaron spectrum with soft lighting.",
         "pp_style_apply macaron_default, selection=polymer",
         "pp_style_revert",
@@ -1421,7 +1437,11 @@ def search_help(query, limit=5):
         for value in (command_help(name) for name in category)
         if value is not None
     )
-    entries.extend(_preset_entries())
+    from pymolplugins.styles.presets import COLOR_CHOICES, LIGHTING_CHOICES
+
+    appearance = {name for _, name in COLOR_CHOICES + LIGHTING_CHOICES}
+    entries.extend(entry for entry in _preset_entries()
+                   if entry["category"] != "styles" or entry["name"] in appearance)
     ranked = []
     for entry in entries:
         score = _score(requested, entry)

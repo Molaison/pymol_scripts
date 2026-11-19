@@ -11,6 +11,7 @@ from pymolplugins.annotation.review_view_presets import (
 )
 from pymolplugins.annotation.view_controls import CavityControls, ViewLayers
 from pymolplugins.annotation.view_jobs import ViewJobs
+from pymolplugins.styles.widgets import AppearancePage
 
 
 _dialog = None
@@ -39,7 +40,9 @@ class ShowPresetsDialog(QtWidgets.QDialog):
 
     def _build(self):
         layout = QtWidgets.QVBoxLayout(self)
-        form = QtWidgets.QFormLayout()
+        object_picker = QtWidgets.QWidget(self)
+        form = QtWidgets.QFormLayout(object_picker)
+        form.setContentsMargins(0, 0, 0, 0)
         self.objects = _combo((), "Object")
         self.objects.setMinimumContentsLength(16)
         self.objects.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -49,6 +52,18 @@ class ShowPresetsDialog(QtWidgets.QDialog):
         refresh.clicked.connect(self.refresh_objects)
         object_row.addWidget(refresh)
         form.addRow("Object", object_row)
+        layout.addWidget(object_picker)
+        self.tabs = QtWidgets.QTabWidget(self)
+        layout.addWidget(self.tabs)
+        structure = QtWidgets.QWidget(self.tabs)
+        self.tabs.addTab(structure, "Structure")
+        self.color_page = AppearancePage("color", self.objects.currentData, self.tabs)
+        self.lighting_page = AppearancePage("lighting", self.objects.currentData, self.tabs)
+        self.tabs.addTab(self.color_page, "Color")
+        self.tabs.addTab(self.lighting_page, "Lighting")
+        self.tabs.currentChanged.connect(lambda index: object_picker.setVisible(index != 2))
+        layout = QtWidgets.QVBoxLayout(structure)
+        form = QtWidgets.QFormLayout()
         self.preset = _combo(((title, key) for key, title in SHOW_PRESETS.items()), "Structure view")
         form.addRow("View", self.preset)
         layout.addLayout(form)
@@ -142,6 +157,8 @@ class ShowPresetsDialog(QtWidgets.QDialog):
         ready = bool(self.objects.currentData())
         self.apply.setEnabled(ready)
         self.copy.setEnabled(ready)
+        self.color_page.refresh()
+        self.lighting_page.refresh()
         if not ready:
             self.quick_view_status.setText("Load a structure in PyMOL, then click Refresh.")
 
@@ -195,7 +212,7 @@ class ShowPresetsDialog(QtWidgets.QDialog):
 
         self.jobs.start_cavity(followup.title, compute, show_cavity)
 
-def show_presets():
+def show_presets(tab=None, source=None, palette=None):
     from pymol.gui import get_qtwindow
 
     if not isinstance(QtWidgets.QApplication.instance(), QtWidgets.QApplication):
@@ -205,6 +222,16 @@ def show_presets():
         _dialog = ShowPresetsDialog(get_qtwindow())
         _dialog.finished.connect(_release_dialog)
     _dialog.refresh_objects()
+    if source is not None:
+        index = _dialog.objects.findData(source)
+        if index < 0:
+            raise ValueError(f"The loaded object {source} is unavailable in Structure views.")
+        _dialog.objects.setCurrentIndex(index)
+    if tab is not None:
+        _dialog.tabs.setCurrentIndex({"structure": 0, "color": 1, "lighting": 2}[tab])
+    if palette is not None:
+        control = _dialog.color_page.preset
+        control.setCurrentIndex(control.findData(palette))
     _dialog.show()
     _dialog.raise_()
     _dialog.activateWindow()

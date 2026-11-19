@@ -8,6 +8,8 @@ PyMOL 主窗口的 **PymolPlugins** 工具栏直接打开 Annotator、Views、Fo
 
 点 **Views** 或输入 `pp_view` 打开 **Structure views**。**Structure overview** 将 cartoon、小分子 sticks、可选分子表面和 DNA/RNA sticks 放在一起。**Interface & pocket** 的伙伴类型可选蛋白–蛋白或蛋白–配体，并可叠加独立计算的局部表面。**Copy command** 可复制当前配置，例如 `pp_view interface, model, radius=6, surface=1, transparency=0.6`。
 
+**Color** 为选中的对象配色。**MASS · Paper by residue number** 按各蛋白链的残基编号独立着色，**Macaron** 提供 Default、Warm、Cool 三个色调。**Lighting** 单独调整整场景的光照与渲染风格。RFD4 的 **配色…** 和 **光照…** 打开同一个窗口，并预选当前设计对象。命令行可用 `pp_style_apply mass, model` 或 `pp_style_apply macaron_palette, model, variant=warm`。旧 Macaron 命令保留其配色加柔光的效果。
+
 **Membrane topology** 优先使用结构中可辨认的脂质磷叶层，否则使用本机 TmDet 4.1.9。结果显示定位来源、膜厚和逐链跨膜区段。橙色 Tyr/Trp 位于膜水界面，青色 Arg/Lys 标识近膜碱性残基。只有出现明确的 positive-inside 偏向时，才标为推断的胞质侧。计算在后台运行，无法放置时会给出原因，结构继续可见。TmDet 属于可选本机依赖，Windows 支持已配置的 Debian WSL 运行时。校准 Bundle 自带的膜数据由 Bundle 视图使用。
 
 在 **Plugin → PymolPlugins → Compare & align…** 或输入 `pp_align` 打开独立的结构比较窗口。勾选至少两个对象，选定参考对象。**Overlay** 直接叠加当前帧，**Align** 按选定方法拟合。Mobiles 和 Reference 可分别选择原子类型、链和残基范围，例如 `40-80+105`。多个移动对象共用 Mobiles 范围。**Clear comparison** 或关闭窗口会移除比较副本并恢复源对象的可见性。
