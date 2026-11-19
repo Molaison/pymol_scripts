@@ -53,7 +53,9 @@ def reopen(directory):
         wait_for(_APP, lambda: control.release is not None and not control.busy, timeout=60)
         assert not control.release["newer"], control.status
         assert __version__ == control.release["version"]
-        next(action for action in _MENU.actions() if action.text() == "PymolPlugins: Updates").trigger()
+        toolkit = next(action.menu() for action in _MENU.actions() if action.text() == "PymolPlugins")
+        maintenance = next(action.menu() for action in toolkit.actions() if action.text() == "Maintenance")
+        next(action for action in maintenance.actions() if action.text() == "Updates").trigger()
         assert control.dialog.isVisible()
         from pymol.Qt import QtWidgets
         toggle = next(widget for widget in control.dialog.findChildren(QtWidgets.QCheckBox)

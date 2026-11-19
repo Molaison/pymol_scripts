@@ -692,18 +692,37 @@ def pp_wizard(topic="welcome"):
     return show_wizard(topic)
 
 
+def pp_view(preset="", object_name="", mode="auto", radius="4", scope="nearby",
+            target_chain="auto", binder_chain="auto"):
+    """Open Show presets or apply a named display preset to a loaded object."""
+    if not str(preset).strip():
+        from .show_presets import show_presets
+        return show_presets()
+    from pymolplugins.annotation.review_view_presets import execute_review_command, show_preset_command
+
+    if not object_name:
+        raise ValueError("Specify a loaded object, or open the picker with pp_view.")
+    command = show_preset_command(str(preset).strip().lower(), object_name, mode, radius, scope,
+                                  target_chain, binder_chain)
+    return execute_review_command(command, cmd, exclusive=True)
+
+
 def __init_plugin__(app=None):
     from pymol.plugins import addmenuitemqt
 
-    addmenuitemqt("PymolPlugins: Getting Started", pp_wizard)
-    addmenuitemqt("PymolPlugins: Load Toolkit", pp_load)
-    addmenuitemqt("PymolPlugins: Doctor", pp_doctor)
-    addmenuitemqt("PymolPlugins: Capabilities", pp_capabilities)
-    addmenuitemqt("PymolPlugins: Command Help", pp_help)
-    addmenuitemqt("PymolPlugins: Structure Annotator", show_structure_annotator_from_toolkit)
-    addmenuitemqt("PymolPlugins: Batch Processing", show_batch_processing_from_toolkit)
-    addmenuitemqt("PymolPlugins: RFD4 · Proteina", show_rfd4_from_toolkit)
-    addmenuitemqt("PymolPlugins: Updates", show_updates_from_toolkit)
+    for label, callback in (
+        ("Show presets…", pp_view),
+        ("Structure Annotator", show_structure_annotator_from_toolkit),
+        ("Batch Processing", show_batch_processing_from_toolkit),
+        ("RFD4 · Proteina", show_rfd4_from_toolkit),
+        ("Getting Started", pp_wizard),
+        ("Command Help", pp_help),
+        ("Maintenance|Updates", show_updates_from_toolkit),
+        ("Maintenance|Doctor", pp_doctor),
+        ("Maintenance|Capabilities", pp_capabilities),
+        ("Maintenance|Reload toolkit", pp_load),
+    ):
+        addmenuitemqt("PymolPlugins|" + label, callback)
     from .updater_widgets import start_update_check
     start_update_check()
 
@@ -721,6 +740,7 @@ _register_host_command("pp_capabilities", pp_capabilities)
 _register_host_command("pp_help", pp_help)
 _register_host_command("pp_wizard", pp_wizard)
 _register_host_command("pp_review_groups", pp_review_groups)
+_register_host_command("pp_view", pp_view)
 
 try:
     cmd.auto_arg[0]["pp_help"] = [
@@ -728,6 +748,10 @@ try:
         "task_command_or_preset",
         "",
     ]
+    from pymolplugins.annotation.review_view_presets import SHOW_PRESETS, loaded_molecules
+
+    cmd.auto_arg[0]["pp_view"] = [lambda: cmd.Shortcut(tuple(SHOW_PRESETS)), "preset", ", "]
+    cmd.auto_arg[1]["pp_view"] = [lambda: cmd.Shortcut(loaded_molecules(cmd)), "object", ""]
 except (AttributeError, KeyError, TypeError):
     # Headless/fake command APIs and some older Host builds expose no completion.
     pass

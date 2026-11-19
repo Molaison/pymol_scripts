@@ -88,16 +88,17 @@ sys.modules[updates.__name__] = updates
 bundle = importlib.import_module("pymol_plugins")
 bundle.__init_plugin__()
 assert set(menus) == {
-    "PymolPlugins: Getting Started",
-    "PymolPlugins: Load Toolkit", "PymolPlugins: Doctor",
-    "PymolPlugins: Capabilities", "PymolPlugins: Command Help",
-    "PymolPlugins: Structure Annotator",
-    "PymolPlugins: Batch Processing",
-    "PymolPlugins: RFD4 · Proteina",
-    "PymolPlugins: Updates",
+    "PymolPlugins|Show presets…",
+    "PymolPlugins|Getting Started",
+    "PymolPlugins|Maintenance|Reload toolkit", "PymolPlugins|Maintenance|Doctor",
+    "PymolPlugins|Maintenance|Capabilities", "PymolPlugins|Command Help",
+    "PymolPlugins|Structure Annotator",
+    "PymolPlugins|Batch Processing",
+    "PymolPlugins|RFD4 · Proteina",
+    "PymolPlugins|Maintenance|Updates",
 }, menus
 assert all(callable(callback) for callback in menus.values())
-loaded = menus["PymolPlugins: Load Toolkit"]()
+loaded = menus["PymolPlugins|Maintenance|Reload toolkit"]()
 assert loaded["status"] == "ok", loaded
 from pymolplugins.host.manifest import CANONICAL_MODULES, declared_command_names
 assert set(loaded["loaded"]) == set(CANONICAL_MODULES), loaded

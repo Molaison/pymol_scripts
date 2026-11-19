@@ -5888,7 +5888,6 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._quick_view = ""
         self._last_bundle_view = None
         self._interface_radius = "4"
-        self._interface_cavity_objects = {}
         self._mass_chain = None
         self.review = None
         self._state_save_timer = QtCore.QTimer(self)
@@ -7602,7 +7601,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             followup = draw_review_view(cmd, source, action, draw, data, exclusive=exclusive or action is _draw_bundle)
         if not isinstance(followup, CandidateCavity):
             return
-        self._reset_interface_cavity(followup.interface)
+        self.interface_cavity_controls.reset(followup.interface)
         try:
             compute, draw_cavity = prepare_candidate_cavity(cmd, followup)
         except Exception as error:
@@ -7613,30 +7612,11 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             with _capture_command_products(owner):
                 rendered = draw_review_view(cmd, source, draw_candidate_cavity, draw_cavity, result)
             if followup.interface:
-                self._show_interface_cavity(rendered)
+                self.interface_cavity_controls.show_result(rendered)
                 return "", rendered.tooltip
             return rendered.status, rendered.tooltip
 
         self._view_jobs.start_cavity(followup.title, compute, show_cavity)
-
-    def _reset_interface_cavity(self, visible):
-        self._interface_cavity_objects = {}
-        for volume in self.interface_cavity_volumes.values():
-            volume.setText("—")
-        self.interface_cavity_controls.setToolTip("")
-        self.interface_cavity_controls.setVisible(visible)
-
-    def _show_interface_cavity(self, rendered):
-        self._interface_cavity_objects = rendered.objects
-        self.interface_cavity_controls.setToolTip(rendered.tooltip)
-        for kind, check in self.interface_cavity_checks.items():
-            self.interface_cavity_volumes[kind].setText(f"{rendered.volumes[kind]:.1f} Å³")
-            self._set_interface_cavity_visible(kind, check.isChecked())
-
-    def _set_interface_cavity_visible(self, kind, visible):
-        name = self._interface_cavity_objects.get(kind)
-        if name and name in cmd.get_names("objects"):
-            (cmd.enable if visible else cmd.disable)(name)
 
     def _start_candidate_views(self, recipes=(), warnings=()):
         from .bundle_view import BundleViewRequest, clear_bundle_legend
@@ -7652,7 +7632,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                 self._quick_view = ""
                 for button in self.quick_view_buttons.values():
                     button.setChecked(False)
-        self._reset_interface_cavity(self._quick_view == "interface")
+        self.interface_cavity_controls.reset(self._quick_view == "interface")
         title = QUICK_VIEWS.get(self._quick_view, "")
         owner = STATE.current_object
         if self._quick_view:

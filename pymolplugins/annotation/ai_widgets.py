@@ -10,7 +10,7 @@ from pymol import cmd
 from pymol.Qt import QtCore, QtWidgets
 
 from .ai_commands import build_prompt, output_schema, parse_draft
-from .command_templates import VIEW_PRESETS, viewing_preset
+from .command_templates import CORE_VIEW_PRESETS, VIEW_PRESETS, viewing_preset
 from .panel_style import STYLE
 from ..host.workspace import window_settings
 from ..remote.client import _strict_json_loads
@@ -249,8 +249,12 @@ class AICommandDialog(QtWidgets.QDialog):
         presets = QtWidgets.QHBoxLayout()
         self.preset_combo = QtWidgets.QComboBox()
         self.preset_combo.addItem("Choose a viewing preset…", "")
+        for key in CORE_VIEW_PRESETS:
+            self.preset_combo.addItem(VIEW_PRESETS[key], key)
+        self.preset_combo.insertSeparator(self.preset_combo.count())
         for key, title in VIEW_PRESETS.items():
-            self.preset_combo.addItem(title, key)
+            if key not in CORE_VIEW_PRESETS:
+                self.preset_combo.addItem(title, key)
         self.saved_presets = json.loads(str(window_settings().value("command_presets", "{}")))
         for name in sorted(self.saved_presets):
             self.preset_combo.addItem("Saved · " + name, "saved:" + name)

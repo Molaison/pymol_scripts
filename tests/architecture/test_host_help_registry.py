@@ -85,7 +85,7 @@ class HostManifestTests(unittest.TestCase):
         compat = {
             name for values in AUTOLOADED_COMPAT_COMMANDS.values() for name in values
         }
-        self.assertEqual(len(canonical), 77)
+        self.assertEqual(len(canonical), 78)
         self.assertEqual(
             compat,
             {
@@ -99,8 +99,8 @@ class HostManifestTests(unittest.TestCase):
                 "seq_select",
             },
         )
-        self.assertEqual(len(declared_command_names()), 85)
-        self.assertEqual(len(set(declared_command_names())), 85)
+        self.assertEqual(len(declared_command_names()), 86)
+        self.assertEqual(len(set(declared_command_names())), 86)
         self.assertEqual(set(COMMAND_TARGETS), canonical | compat)
 
 

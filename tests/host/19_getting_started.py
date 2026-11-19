@@ -161,8 +161,8 @@ try:
     plugin.__init_plugin__()
     app.processEvents()
     assert wizard._wizard is None, "The guide must not auto-open."
-    menu_action = next(action for action in window.findChildren(QtWidgets.QAction)
-                       if action.text() == "PymolPlugins: Getting Started")
+    menu_action = next(action for action in window.menudict["PluginQt|PymolPlugins"].actions()
+                       if action.text() == "Getting Started")
     menu_action.trigger()
     app.processEvents()
     guide = wizard._wizard

@@ -4,7 +4,7 @@
 
 ## 打开评分表
 
-1. 打开 **Plugin → PymolPlugins: Structure Annotator**。
+1. 打开 **Plugin → PymolPlugins → Structure Annotator**。
 2. **Open from** 选择 **This computer** 或已配置的 SSH 主机；在 **Path** 选择结构目录或 CSV/TSV，点击 **Open**。
 3. 如提示 **Structure column**，选择指向 `.pdb`、`.cif` 或其 `.gz` 文件的列。相对路径默认相对于表格所在目录；需要时在 **Import options → File locations** 指定基准目录或映射。
 4. 在 **Review** 查看当前结构及选定的评分列。选择标签，再点击 **Save and next**；保存成功后进入下一条。
@@ -165,7 +165,7 @@ sa_cache_status 1
 
 ## 更新插件
 
-打开 **Plugin → PymolPlugins: Updates**，点击 **Check now** 检查正式版本；发现更新后点击 **Download and install**。安装完成后完全退出并重新打开 PyMOL；插件不会在当前会话热重载。
+打开 **Plugin → PymolPlugins → Maintenance → Updates**，点击 **Check now** 检查正式版本。发现更新后点击 **Download and install**。新版本在下次启动 PyMOL 时加载。
 
 在同一窗口，**Check for updates when PyMOL starts** 控制启动时检查，默认开启；**Automatically install stable updates (restart required)** 控制自动安装稳定版本，默认关闭。两项可分别设置；自动安装后同样需要完全重启。
 

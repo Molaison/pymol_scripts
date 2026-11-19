@@ -23,6 +23,8 @@ VIEW_PRESETS = {
     "nucleic": "DNA / RNA complex",
     "surface": "Molecular surface",
 }
+CORE_VIEW_PRESETS = ("cartoon", "interface_detail", "membrane_layer",
+                     "mass_residue_colors", "surface", "nucleic")
 LIPID_SELECTION = "resn POPC+POPE+POPG+POPS+DPPC+DPPE+DOPC+DOPE+DOPS+DLPC+DMPC+CHOL+CLR"
 
 
@@ -114,18 +116,17 @@ def viewing_preset(name, object_name, api, *, reference_name="", reference_objec
 
 
 def _review_viewing_preset(name, target_chain, binder_chain, mode, radius, scope):
-    from .review_view_presets import encode_review_command
+    from .review_view_presets import show_preset_command
 
-    binder = "auto" if binder_chain is None else "chain:" + binder_chain
-    target = "auto" if target_chain is None else "chain:" + target_chain
     if name == "interface_detail":
-        command = encode_review_command("sa_view_interface", "{object}", mode, radius, scope, target, binder)
-        note = "Teal dashes: polar contacts. Pink thick dashes: salt bridges. Violet beads: π stacking. Blue dots: estimated voids."
+        command = show_preset_command("interface", "{object}", mode, radius, scope, target_chain, binder_chain)
+        note = ("Teal dashes: polar contacts. Thick pink dashes: salt bridges. "
+                "Blue beads: π stacking. Cyan dots: accessible recesses. Violet dots: enclosed voids.")
     elif name == "membrane_layer":
-        command = "sa_view_membrane {object}"
+        command = show_preset_command("membrane", "{object}")
         note = "Translucent hydrophobic surface. Bilayer bounds use modeled leaflets or local TmDet, with a helix-geometry fallback."
     else:
-        command = encode_review_command("sa_view_mass", "{object}", binder, target)
+        command = show_preset_command("mass", "{object}", target_chain=target_chain, binder_chain=binder_chain)
         note = "MASS paper palette by residue number. Select a target to color both chains, each over its own range."
     return [command], note
 
