@@ -23,7 +23,8 @@ _OVERLAYS = WeakKeyDictionary()
 def loaded_molecules(api):
     overlays = set().union(*_OVERLAYS.get(api, {}).values())
     return [name for name in api.get_names("objects")
-            if name not in overlays and api.get_type(name) == "object:molecule"]
+            if name not in overlays and not name.startswith("_pp_focus_")
+            and api.get_type(name) == "object:molecule"]
 
 
 def encode_review_command(name, *values):
@@ -249,7 +250,9 @@ def _cylinders(api, source, kind, pairs, color, radius, dash):
             b = start + delta * ((i + (0.53 if dash else 1)) / count)
             body.extend((CYLINDER, *a, *b, radius, *color, *color))
     if body:
-        api.load_cgo([float(value) for value in body], api.get_unused_name(f"{source}_{kind}"))
+        name = api.get_unused_name(f"{source}_{kind}")
+        api.load_cgo([float(value) for value in body], name)
+        return name
 
 
 def _dots(api, source, kind, points, color, radius):

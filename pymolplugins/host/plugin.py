@@ -686,6 +686,12 @@ def show_comparison_from_toolkit():
     return show_compare()
 
 
+def toggle_interactive_focus():
+    from .interactive_focus import toggle_focus
+
+    return toggle_focus(cmd)
+
+
 def pp_wizard(topic="welcome"):
     """Open the toolkit introduction and step-by-step guide.
 
@@ -700,16 +706,18 @@ def pp_wizard(topic="welcome"):
 
 def pp_view(preset="", object_name="", mode="auto", radius="4", scope="nearby",
             target_chain="auto", binder_chain="auto"):
-    """Open Show presets or apply a named display preset to a loaded object."""
-    if not str(preset).strip():
+    """Open Show presets, toggle Interactive focus, or apply a display preset."""
+    preset = str(preset).strip().lower()
+    if not preset:
         from .show_presets import show_presets
         return show_presets()
+    if preset == "focus" and not object_name:
+        return toggle_interactive_focus()
     from pymolplugins.annotation.review_view_presets import execute_review_command, show_preset_command
 
     if not object_name:
         raise ValueError("Specify a loaded object, or open the picker with pp_view.")
-    command = show_preset_command(str(preset).strip().lower(), object_name, mode, radius, scope,
-                                  target_chain, binder_chain)
+    command = show_preset_command(preset, object_name, mode, radius, scope, target_chain, binder_chain)
     return execute_review_command(command, cmd, exclusive=True)
 
 
@@ -718,6 +726,7 @@ def __init_plugin__(app=None):
 
     for label, callback in (
         ("Show presets…", pp_view),
+        ("Interactive focus", toggle_interactive_focus),
         ("Compare & align…", show_comparison_from_toolkit),
         ("Structure Annotator", show_structure_annotator_from_toolkit),
         ("Batch Processing", show_batch_processing_from_toolkit),
@@ -757,7 +766,7 @@ try:
     ]
     from pymolplugins.annotation.review_view_presets import SHOW_PRESETS, loaded_molecules
 
-    cmd.auto_arg[0]["pp_view"] = [lambda: cmd.Shortcut(tuple(SHOW_PRESETS)), "preset", ", "]
+    cmd.auto_arg[0]["pp_view"] = [lambda: cmd.Shortcut(("focus", *SHOW_PRESETS)), "preset", ", "]
     cmd.auto_arg[1]["pp_view"] = [lambda: cmd.Shortcut(loaded_molecules(cmd)), "object", ""]
 except (AttributeError, KeyError, TypeError):
     # Headless/fake command APIs and some older Host builds expose no completion.
