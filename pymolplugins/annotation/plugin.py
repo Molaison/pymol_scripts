@@ -7586,11 +7586,12 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._view_jobs.start_cavity(followup.title, compute, show_cavity)
 
     def _start_candidate_views(self, recipes=(), warnings=()):
-        from .bundle_view import BundleViewRequest
+        from .bundle_view import BundleViewRequest, clear_bundle_legend
         from .review_view_presets import QUICK_VIEWS, quick_view_command
 
         if not hasattr(self, "_view_jobs"):
             return
+        clear_bundle_legend(cmd)
         if STATE.bundle_view is not self._last_bundle_view:
             self._last_bundle_view = STATE.bundle_view
             if STATE.bundle_view is not None and self._quick_view:
