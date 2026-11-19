@@ -109,6 +109,14 @@ class ColumnPicker(QtWidgets.QToolButton):
 
 
 _FILTER_TOKEN = re.compile(r"""("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\x60[^\x60]*\x60)|(["'\x60].*)|([\w.]+|[!<>=]=?|\S)""")
+_COLUMN_ARGUMENT = "<column>"
+_TEXT_ARGUMENT = "text"
+_TEXT_ARGUMENT_PREFIX = ', "'
+_TEXT_ARGUMENT_TAIL = _TEXT_ARGUMENT_PREFIX + _TEXT_ARGUMENT + '")'
+_TEXT_FUNCTION_OPENINGS = tuple(name + "(" for name in TEXT_OPERATORS)
+_TEXT_FUNCTION_SNIPPETS = {
+    opening + _COLUMN_ARGUMENT + _TEXT_ARGUMENT_TAIL: opening for opening in _TEXT_FUNCTION_OPENINGS
+}
 
 
 def _filter_completions(text, columns):
@@ -130,8 +138,10 @@ def _filter_completions(text, columns):
         options, headers = ("None",), ()
     elif previous in COMPARISON_OPERATORS or previous == ",":
         options, headers = ("True", "False", "None"), columns
+    elif previous == "(" and len(tokens) > 1 and tokens[-2].group() in TEXT_OPERATORS:
+        options, headers = (), columns
     elif previous in ("", "(", "and", "or", "not"):
-        options, headers = ("not", "(") + tuple(name + "(" for name in TEXT_OPERATORS), columns
+        options, headers = ("not", "(") + tuple(_TEXT_FUNCTION_SNIPPETS), columns
     else:
         options, headers = ("and", "or", "is None", "is not None") + COMPARISON_OPERATORS, ()
     choices = [item for item in options if item.casefold().startswith(fragment.casefold())]
@@ -169,12 +179,17 @@ class ColumnCompletion(QtCore.QObject):
         self.columns = list(dict.fromkeys(columns))
         self.model.setStringList(self.columns)
 
+    def _prefix_end(self):
+        if self.widget.selectedText() == _COLUMN_ARGUMENT:
+            return self.widget.selectionStart()
+        return self.widget.cursorPosition()
+
     def refresh(self, *args):
         if not self.enabled:
             self.completer.popup().hide()
             return
         if self.expression:
-            _, values = _filter_completions(self.widget.text()[:self.widget.cursorPosition()], self.columns)
+            _, values = _filter_completions(self.widget.text()[:self._prefix_end()], self.columns)
         else:
             query = self.widget.text()
             values = fuzzy_matches(self.columns, query)
@@ -188,21 +203,36 @@ class ColumnCompletion(QtCore.QObject):
             self.completer.popup().hide()
 
     def _accept(self, value):
+        self.completer.popup().hide()
         if not self.expression:
             self.widget.setText(value)
             self.widget.setCursorPosition(len(value))
-            self.completer.popup().hide()
             return
         text, end = self.widget.text(), self.widget.cursorPosition()
-        start, _ = _filter_completions(text[:end], self.columns)
-        if start < end:
+        prefix_end = self._prefix_end()
+        start, _ = _filter_completions(text[:prefix_end], self.columns)
+        if start < prefix_end:
             remaining = re.match(r"[\w.]*", text[end:])
             end += len(remaining.group())
+        opening = _TEXT_FUNCTION_SNIPPETS.get(value)
+        if opening:
+            if text[end:].lstrip().startswith("("):
+                name = opening[:-1]
+                self.widget.setText(text[:start] + name + text[end:])
+                self.widget.setCursorPosition(start + len(name) + text[end:].index("(") + 1)
+            else:
+                self.widget.setText(text[:start] + value + text[end:])
+                self.widget.setSelection(start + len(opening), len(_COLUMN_ARGUMENT))
+            self.refresh()
+            return
         if value in ("and", "or", "not", *COMPARISON_OPERATORS) and not text[end:end + 1].isspace():
             value += " "
         self.widget.setText(text[:start] + value + text[end:])
-        self.widget.setCursorPosition(start + len(value))
-        self.completer.popup().hide()
+        position = start + len(value)
+        if text[end:].startswith(_TEXT_ARGUMENT_TAIL) and text[:start].rstrip().endswith(_TEXT_FUNCTION_OPENINGS):
+            self.widget.setSelection(position + len(_TEXT_ARGUMENT_PREFIX), len(_TEXT_ARGUMENT))
+        else:
+            self.widget.setCursorPosition(position)
 
     def eventFilter(self, obj, event):
         if self.enabled and event.type() == QtCore.QEvent.KeyPress and self.completer.popup().isVisible():
@@ -216,7 +246,6 @@ class ColumnCompletion(QtCore.QObject):
                 if not index.isValid():
                     index = self.model.index(0, 0)
                 self._accept(str(index.data()))
-                self.completer.popup().hide()
                 return True
         return super().eventFilter(obj, event)
 
