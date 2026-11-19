@@ -5,6 +5,7 @@ import json
 
 from .command_templates import STEP_FIELDS, format_commands
 from .filtering import compile_view_filter, validate_filter_presets
+from .header_filters import normalize_filter_query
 from .review_file import (
     read_review_file, check_review_unchanged, validate_review_config,
     validate_review_columns,
@@ -137,10 +138,11 @@ def check_bundle(csv_path, *, resolve_dataset, path_column=None, id_column="",
                 })
     presets = _attempt(issues, "filter_presets", lambda: validate_filter_presets(
         config.get("filter_presets", []))) or []
-    expressions = [("current filter", config.get("filter_text", ""))]
-    expressions += [(preset["name"], "where:" + preset["expression"]) for preset in presets]
-    for name, expression in expressions:
-        predicate = _attempt(issues, "filter:" + name, lambda: compile_view_filter(expression, columns))
+    expressions = [("current filter", config.get("filter_text", ""), True)]
+    expressions += [(preset["name"], "where:" + preset["expression"], False) for preset in presets]
+    for name, expression, restore in expressions:
+        predicate = _attempt(issues, "filter:" + name,
+                             lambda: compile_view_filter(normalize_filter_query(expression, restore=restore), columns))
         if predicate:
             count = sum(predicate(entry) for entry in candidates)
             filters.append({"name": name, "matches": count, "total": len(dataset.entries)})

@@ -23,7 +23,7 @@ from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 import traceback
 import sys
 from pymolplugins.annotation.filtering import compile_filter, compile_view_filter
-from pymolplugins.annotation.header_filters import read_header_filters
+from pymolplugins.annotation.header_filters import normalize_filter_query, read_header_filters
 from pymolplugins.annotation.persistence import pending_errors, submit_write
 from pymolplugins.annotation.sources.csv_source import CsvReadCancelled, CsvSourceError, read_csv_header
 from pymolplugins.annotation.review_config import default_fields, decode_value, field_key, missing_required, validate_fields, validate_score_config
@@ -3566,6 +3566,7 @@ def _prepare_csv_load(
         next_filter = str(review.config.get("filter_text", next_filter))
         next_sort_column = str(review.config.get("sort_column", next_sort_column))
         next_sort_descending = bool(review.config.get("sort_descending", next_sort_descending))
+    next_filter = normalize_filter_query(next_filter, restore=True)
 
     _check_csv_preparation_cancelled(cancel_event)
     source = CsvDatasetSource(
@@ -4849,7 +4850,7 @@ def sa_filter(
     parked: List[_ParkedManagedObject] = []
     scene_swap_started = False
     try:
-        next_filter = str(query or "")
+        next_filter = normalize_filter_query(str(query or ""))
         next_sort = str(sort_column or "")
         next_descending = _flag(descending)
         sortable_columns = STATE.dataset.columns if STATE.dataset is not None else tuple(STATE.all_entries[0].metadata)
@@ -5911,23 +5912,42 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         edit.setFocus()
 
     def _change_header_filter(self, column, choice):
+        self._apply_header_filters(read_header_filters(STATE.filter_text).change(column, choice))
+
+    def _set_header_filter_choices(self, column, choices):
+        self._apply_header_filters(read_header_filters(STATE.filter_text).set_choices(column, choices))
+
+    def _apply_header_filters(self, filters):
         if self._table_mode != "active" or self._csv_task_id or STATE.dataset is None:
             return
-        query = read_header_filters(STATE.filter_text).change(column, choice).query()
+        query = filters.query()
         if query == STATE.filter_text:
             return
         condition = query.startswith("where:")
+        text = query[6:] if condition else query
+        if len(text.encode("utf-16-le")) // 2 > self.filter_edit.maxLength():
+            self._show_error("Too many category values for one filter. Use Select all or choose fewer values.")
+            return
         self.filter_mode_combo.setCurrentIndex(1 if condition else 0)
-        self.filter_edit.setText(query[6:] if condition else query)
+        self.filter_edit.setText(text)
         self.sort_column_combo.setCurrentText(STATE.sort_column)
         self.sort_desc_cb.setChecked(STATE.sort_descending)
         self._apply_view()
 
+    def _filter_input(self):
+        text = self.filter_edit.text()
+        if self.filter_mode_combo.currentIndex() != 1:
+            return text
+        query = normalize_filter_query("where:" + text)
+        if query[6:] != text:
+            self.filter_edit.setText(query[6:])
+        return query
+
     def _apply_filters(self):
         try:
-            if self.filter_mode_combo.currentIndex() == 1 and STATE.dataset is not None:
-                from .filtering import compile_filter
-                compile_filter(self.filter_edit.text(), STATE.dataset.columns)
+            query = self._filter_input()
+            if query.startswith("where:") and STATE.dataset is not None:
+                compile_filter(query[6:], STATE.dataset.columns)
         except ValueError as exc:
             self.filter_error_label.setText(str(exc))
             self.filter_error_label.show()
@@ -5986,6 +6006,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                                                        text=self.filter_preset_combo.currentData() or "")
         if not accepted:
             return
+        self._filter_input()
         candidate = {"name": name, "expression": self.filter_edit.text(),
                      "sort_column": self.sort_column_combo.currentText(),
                      "sort_descending": self.sort_desc_cb.isChecked()}
@@ -7209,10 +7230,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             if self._csv_task_kind != "view":
                 return
             self._cancel_csv_task(announce=False)
+        query = self._filter_input()
         arguments = self._view_arguments()
-        query = arguments["query"]
-        if self.filter_mode_combo.currentIndex() == 1 and query.strip():
-            query = "where:" + query
         self._start_csv_task("view", _prepare_view, arguments, worker_arguments={
             "entries": tuple(STATE.all_entries), "query": query,
             "sort_column": arguments["sort_column"], "descending": arguments["descending"],

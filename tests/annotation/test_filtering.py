@@ -48,6 +48,10 @@ class ColumnFilterTests(unittest.TestCase):
 
 
 class FilterPresetTests(unittest.TestCase):
+    def test_loaded_presets_drop_unmatched_parentheses(self):
+        groups = validate_filter_presets([{"name": "High", "expression": "((score > 2)"}], ["score"])
+        self.assertEqual(groups[0]["expression"], "(score > 2)")
+
     def test_old_review_and_named_views_share_the_existing_filter_language(self):
         from pymolplugins.annotation.review_file import validate_review_config, validate_review_columns
         old = {"path_column": "path", "display_columns": ["score"]}

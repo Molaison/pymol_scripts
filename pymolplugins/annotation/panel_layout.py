@@ -328,6 +328,7 @@ def _review_page(panel):
     panel._dataset_model = _DatasetTableModel(panel.dataset_table)
     header = ScoreProfileHeader(panel.dataset_table, panel._dataset_model, _get_bg_executor)
     header.filterRequested.connect(panel._change_header_filter)
+    header.choicesRequested.connect(panel._set_header_filter_choices)
     panel.dataset_table.setHorizontalHeader(header)
     panel.dataset_table.setModel(panel._dataset_model)
     panel.dataset_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)

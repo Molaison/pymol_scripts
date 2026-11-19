@@ -98,7 +98,7 @@ review.json 的 steps 列表定义命名对象和命令的执行顺序。固定�
 
 用 Filter 旁的下拉箭头切换或新建命名组。在 Column conditions 中用 Add condition… 选择字段与条件，用 Group conditions 加括号。Enter 提交当前输入，Tab 或鼠标接受补全。Save group… 保存当前条件和排序，Delete 删除所选组。CSV 源的分组修改写入 review.override.json。分组允许重叠。
 
-点击 Scores 表头可选中或取消类别。同列选项用 or，不同列用 and。重新拖选直方图会替换这一列的表头范围。输入条件参数时会建议该列中的实际取值。
+点击 Scores 表头的复选框可选中或取消类别。展开 Other ▸ 可勾选更多类别、全选或清空，再点 Apply。同列选项用 or，不同列用 and。重新拖选直方图会替换这一列的表头范围。提交或保存 Filter 时会移除引号外的落单括号。
 
 ## 其他入口
 

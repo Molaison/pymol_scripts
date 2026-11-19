@@ -6,19 +6,21 @@ import traceback
 
 from pymol.Qt import QtCore, QtGui, QtWidgets
 
-from .column_profiles import build_column_profiles, format_proportion
+from .category_picker import OtherCategoryPicker
+from .column_profiles import build_column_profiles, format_proportion, other_category_counts
 from .header_filters import HeaderChoice
 
 
 class ScoreProfileHeader(QtWidgets.QHeaderView):
     filterRequested = QtCore.Signal(str, object)
+    choicesRequested = QtCore.Signal(str, object)
 
     def __init__(self, table, model, get_executor):
         super().__init__(QtCore.Qt.Horizontal, table)
         self._table = table
         self.profiles = {}
         self.selections = {}
-        self._legend_rows = 4
+        self._other_popup = None
         self.can_filter = False
         self._expanded = False
         self._future = None
@@ -31,6 +33,8 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
         model.modelReset.connect(self._refresh)
 
     def _refresh(self):
+        if self._other_popup is not None:
+            self._other_popup.close()
         self._timer.stop()
         self._cancel.set()
         if self._future is not None:
@@ -65,16 +69,46 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
             self.profiles = dict(enumerate(future.result(), self._first_profile))
         except Exception:
             traceback.print_exc()
-        rows = max([4] + [len(profile.categories) + bool(profile.other or self.is_selected(index, "other"))
-                          for index, profile in self.profiles.items()])
-        if rows != self._legend_rows:
-            self._legend_rows = rows
-            self.updateGeometry()
-            self.geometriesChanged.emit()
         self.viewport().update()
 
     def is_selected(self, index, kind, label=None):
         return any(choice.key == (kind, label) for choice in self.selections.get(index, ()))
+
+    def _other_state(self, index, profile):
+        visible = {label for label, _ in profile.categories}
+        for choice in self.selections.get(index, ()):
+            if choice.kind == "other":
+                return QtCore.Qt.Checked if set(choice.value) == visible else QtCore.Qt.PartiallyChecked
+            if choice.kind == "category" and choice.value not in visible:
+                return QtCore.Qt.PartiallyChecked
+        return QtCore.Qt.Unchecked
+
+    def has_other(self, index, profile):
+        return bool(profile.other or self._other_state(index, profile) != QtCore.Qt.Unchecked)
+
+    def open_other(self, index, point):
+        profile = self.profiles[index]
+        name = self.model().headerData(index, QtCore.Qt.Horizontal, QtCore.Qt.DisplayRole)
+        displayed = tuple(label for label, _ in profile.categories)
+        choices = self.selections.get(index, ())
+        explicit = {choice.value for choice in choices if choice.kind == "category"}
+        remainder = next((choice.value for choice in choices if choice.kind == "other"), None)
+        rows, _columns, _kinds, _preview, filters, source = self.model().profile_input()
+        future = self._get_executor().submit(other_category_counts, rows, name, set(displayed), filters, source)
+        popup = OtherCategoryPicker(self, future, explicit, remainder, profile.total)
+        self._other_popup = popup
+        kept = tuple(choice for choice in choices if choice.kind in ("missing", "range")
+                     or (choice.kind == "category" and choice.value in displayed))
+        popup.applied.connect(lambda values, all_checked: self.choicesRequested.emit(
+            name, kept + ((HeaderChoice("other", displayed),) if all_checked
+                          else tuple(HeaderChoice("category", value) for value in values))
+        ))
+        popup.aboutToHide.connect(self._close_other)
+        popup.popup(self.viewport().mapToGlobal(point + QtCore.QPoint(0, 6)))
+
+    def _close_other(self):
+        popup, self._other_popup = self._other_popup, None
+        popup.deleteLater()
 
     def _summary_font(self):
         font = QtGui.QFont(self.font())
@@ -85,7 +119,7 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
         hint = super().sizeHint()
         if self._expanded:
             line = QtGui.QFontMetrics(self._summary_font()).height() + 1
-            hint.setHeight(hint.height() + (2 + self._legend_rows) * line + 8)
+            hint.setHeight(hint.height() + 6 * line + 8)
         return hint
 
     def summary_rect(self, section):
@@ -116,29 +150,45 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
         line = metrics.height() + 1
         painter.setPen(QtGui.QColor("#687078"))
         missing = f"Missing {profile.missing:,} ({format_proportion(profile.missing, profile.total)})"
-        for offset, text in enumerate((missing, f"{profile.distinct:,} distinct")):
-            bounds = QtCore.QRect(rect.x(), rect.y() + offset * line, rect.width(), line)
-            if offset == 0 and self.is_selected(index, "missing"):
-                painter.fillRect(bounds, QtGui.QColor("#dbe6fc"))
-                text = "✓ " + text
-            painter.drawText(bounds, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
-                             metrics.elidedText(text, QtCore.Qt.ElideRight, bounds.width()))
+        missing_row = QtCore.QRect(rect.x(), rect.y(), rect.width(), line)
+        missing_selected = self.is_selected(index, "missing")
+        self._paint_checkbox(painter, missing_row, missing, "",
+                             QtCore.Qt.Checked if missing_selected else QtCore.Qt.Unchecked,
+                             enabled=bool(profile.missing or missing_selected))
+        distinct = QtCore.QRect(rect.x(), rect.y() + line, rect.width(), line)
+        self._paint_pair(painter, distinct, f"{profile.distinct:,} distinct", "")
         rect = rect.adjusted(0, 2 * line, 0, 0)
         if profile.bins:
             limits = next((choice.value for choice in self.selections.get(index, ()) if choice.kind == "range"), None)
             active = profile.bins_overlapping(*limits) if limits else None
             self._paint_histogram(painter, rect, line, profile, self._brush.selected_bins(index), active)
         else:
-            has_other = profile.other or self.is_selected(index, "other")
-            categories = profile.categories + (("Other", profile.other),) if has_other else profile.categories
-            for offset, (name, count) in enumerate(categories):
+            for offset, (name, count) in enumerate(profile.categories):
                 row = QtCore.QRect(rect.x(), rect.y() + line * offset, rect.width(), line)
-                selected = (self.is_selected(index, "category", name) if offset < len(profile.categories)
-                            else self.is_selected(index, "other"))
-                if selected:
-                    painter.fillRect(row, QtGui.QColor("#dbe6fc"))
-                    name = "✓ " + name
-                self._paint_pair(painter, row, name, format_proportion(count, profile.total))
+                state = QtCore.Qt.Checked if self.is_selected(index, "category", name) else QtCore.Qt.Unchecked
+                self._paint_checkbox(painter, row, name, format_proportion(count, profile.total), state)
+            if self.has_other(index, profile):
+                row = QtCore.QRect(rect.x(), rect.y() + line * len(profile.categories), rect.width(), line)
+                self._paint_checkbox(painter, row, "Other ▸", format_proportion(profile.other, profile.total),
+                                     self._other_state(index, profile))
+
+    def _paint_checkbox(self, painter, row, title, value, state, *, enabled=True):
+        style = self.style()
+        option = QtWidgets.QStyleOptionButton()
+        width = style.pixelMetric(QtWidgets.QStyle.PM_IndicatorWidth, option, self)
+        height = style.pixelMetric(QtWidgets.QStyle.PM_IndicatorHeight, option, self)
+        option.rect = QtCore.QRect(row.x(), row.y() + (row.height() - height) // 2, width, height)
+        option.state = {
+            QtCore.Qt.Checked: QtWidgets.QStyle.State_On,
+            QtCore.Qt.PartiallyChecked: QtWidgets.QStyle.State_NoChange,
+            QtCore.Qt.Unchecked: QtWidgets.QStyle.State_Off,
+        }[state]
+        if enabled:
+            option.state |= QtWidgets.QStyle.State_Enabled
+        if state != QtCore.Qt.Unchecked:
+            painter.fillRect(row, QtGui.QColor("#dbe6fc"))
+        style.drawPrimitive(QtWidgets.QStyle.PE_IndicatorCheckBox, option, painter, self)
+        self._paint_pair(painter, row.adjusted(width + 4, 0, 0, 0), title, value)
 
     @staticmethod
     def _paint_pair(painter, row, left, right):
@@ -195,6 +245,8 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
                         lines.append("Drag across the histogram to set the range for this column")
                 elif profile.categories and self.can_filter:
                     lines.append("Click categories to select or clear them")
+                    if self.has_other(index, profile):
+                        lines.append("Open Other to choose individual categories")
                 lines.extend(f"{value}: {count:,} ({format_proportion(count, profile.total)})"
                              for value, count in profile.categories)
                 if profile.other:
@@ -255,7 +307,7 @@ class _HeaderFilterInteraction(QtCore.QObject):
         category = y // line - 2
         if 0 <= category < len(profile.categories):
             return index, "category", category
-        if category == len(profile.categories) and (profile.other or self.header.is_selected(index, "other")):
+        if category == len(profile.categories) and self.header.has_other(index, profile):
             return index, "other", None
         return None
 
@@ -265,8 +317,6 @@ class _HeaderFilterInteraction(QtCore.QObject):
             return HeaderChoice("missing")
         if kind == "category":
             return HeaderChoice("category", profile.categories[value][0])
-        if kind == "other":
-            return HeaderChoice("other", tuple(label for label, _count in profile.categories))
         bounds = profile.selected_range(*self.selected_bins(index))
         return HeaderChoice("range", bounds) if bounds else None
 
@@ -294,10 +344,13 @@ class _HeaderFilterInteraction(QtCore.QObject):
             if self.pressed[1] == "bins":
                 self.current_bin = self._bin_at(self.pressed[0], event.pos().x())
                 target = self.pressed
-            choice = self._choice(*target) if target == self.pressed else None
+            same_target = target == self.pressed
+            choice = self._choice(*target) if same_target and target[1] != "other" else None
             self.reset()
             self.viewport.update()
-            if choice is not None:
+            if same_target and target[1] == "other":
+                self.header.open_other(target[0], event.pos())
+            elif choice is not None:
                 name = self.header.model().headerData(target[0], QtCore.Qt.Horizontal, QtCore.Qt.DisplayRole)
                 self.header.filterRequested.emit(name, choice)
             return True

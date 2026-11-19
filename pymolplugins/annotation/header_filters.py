@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from io import StringIO
 import tokenize
 
-from .filtering import _column_name, _quoted_columns, column_expression
+from .filtering import _column_name, _quoted_columns, column_expression, filter_parentheses, remove_unmatched_parentheses
 
 
 @dataclass(frozen=True)
@@ -35,13 +35,16 @@ class HeaderFilters:
     selections: dict = field(default_factory=dict)
 
     def change(self, column, choice):
-        selections = dict(self.selections)
-        current = selections.get(column, ())
+        current = self.selections.get(column, ())
         remaining = tuple(item for item in current if item.key != choice.key)
         if choice.kind == "range" or len(remaining) == len(current):
             remaining += (choice,)
-        if remaining:
-            selections[column] = remaining
+        return self.set_choices(column, remaining)
+
+    def set_choices(self, column, choices):
+        selections = dict(self.selections)
+        if choices:
+            selections[column] = tuple(choices)
         else:
             selections.pop(column, None)
         return HeaderFilters(self.base, selections)
@@ -137,18 +140,88 @@ def _manual_query(nodes, aliases):
     return "where:" + expression
 
 
+def _add_choices(groups, column, choices):
+    unique = {choice.key: choice for choice in (*groups.get(column, ()), *choices)}
+    groups[column] = tuple(unique.values())
+
+
+def _legacy_choice(source):
+    try:
+        translated, aliases = _quoted_columns(source.strip())
+        return _read_choice(ast.parse(translated, mode="eval").body, aliases)
+    except (SyntaxError, ValueError):
+        return None
+
+
+def _read_legacy_groups(source):
+    """Recover the earlier '(filter) and (header condition)' pattern."""
+    pairs, extra = filter_parentheses(source)
+    if extra:
+        return None
+    start, end = 0, len(source)
+    suffix = []
+    while start in pairs:
+        close = pairs[start]
+        right = close + len(" and (")
+        if source[close + 1:right + 1] != " and (" or pairs.get(right) != end - 1:
+            break
+        choice = _legacy_choice(source[right + 1:end - 1])
+        if choice is None:
+            break
+        suffix.append(choice)
+        start, end = start + 1, close
+    if not suffix:
+        return None
+    base = source[start:end].strip()
+    first = _legacy_choice(base)
+    if first is not None:
+        suffix.append(first)
+        base = ""
+    groups = {}
+    for column, choice in reversed(suffix):
+        _add_choices(groups, column, (choice,))
+    return HeaderFilters("where:" + base if base else "", groups)
+
+
 def read_header_filters(query):
     """Separate generated top-level header groups from the user's base Filter."""
-    if not query.startswith("where:") or "header_filter" not in query:
+    if not query.startswith("where:"):
         return HeaderFilters(query)
-    expression, aliases = _quoted_columns(query[6:].strip())
+    source = query[6:].strip()
+    legacy = _read_legacy_groups(source) if source.startswith("(") and " and (" in source else None
+    if legacy:
+        return legacy
+    if "header_filter" not in source:
+        return HeaderFilters(query)
+    expression, aliases = _quoted_columns(source)
     parsed = ast.parse(expression, mode="eval").body
     parts = parsed.values if isinstance(parsed, ast.BoolOp) and isinstance(parsed.op, ast.And) else [parsed]
     manual, selections = [], {}
     for part in parts:
         group = _read_group(part, aliases)
-        if group is None or group[0] in selections:
+        if group is None:
             manual.append(part)
         else:
-            selections[group[0]] = group[1]
+            _add_choices(selections, *group)
     return HeaderFilters(_manual_query(manual, aliases), selections) if selections else HeaderFilters(query)
+
+
+def normalize_filter_query(query, *, restore=False):
+    """Repair the condition text and normalize old or repeated header clauses."""
+    query = str(query or "")
+    if not query.startswith("where:"):
+        return query
+    expression = remove_unmatched_parentheses(query[6:]).strip()
+    if not expression:
+        return ""
+    cleaned = "where:" + expression
+    try:
+        filters = read_header_filters(cleaned)
+        if restore and not filters.selections:
+            legacy = _legacy_choice(expression)
+            if legacy and legacy[1].expression(column_expression(legacy[0])) == expression:
+                return HeaderFilters().change(*legacy).query()
+        return filters.query()
+    except (SyntaxError, ValueError):
+        # Leave other syntax errors to the validator so it can explain them.
+        return cleaned
