@@ -89,7 +89,7 @@ class FocusLayer:
             api.enable(self.surface)
             return
         carve = (anchor, radius) if anchor else None
-        name = api.get_unused_name(f"{self.copies[0]}_pocket_surface")
+        name = api.get_unused_name(f"{self.copies[0]}_pocket_surface_{uuid4().hex[:8]}")
         _create_surface(api, name, selection, self.state, "gray80", transparency, carve)
         if self.surface:
             api.delete(self.surface)
