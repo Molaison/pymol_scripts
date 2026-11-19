@@ -27,6 +27,10 @@ QPushButton[role='choice'] { padding: 9px 12px; border: 2px solid #d8dce0; min-w
 QPushButton[role='choice']:checked { background: #eaf0ff; border-color: #356ae6; color: #2854ab; }
 QPushButton[role='quiet'], QToolButton[role='quiet'] { background: transparent; border-color: transparent; color: #626a73; }
 QPushButton[role='quiet']:hover, QToolButton[role='quiet']:hover { background: #eaf0fa; color: #274a8b; }
+QToolButton[role='view'] { background: transparent; border-color: transparent; color: #4d5968; }
+QToolButton[role='view']:hover { background: #edf2fa; }
+QToolButton[role='view']:checked { background: #eaf0ff; border-color: #9db4e5; color: #2854ab; }
+QToolButton[role='view']:disabled { color: #9ba1a8; }
 QToolButton[role='icon'] {
     background: transparent; border: 0; padding: 0;
     min-width: 34px; max-width: 34px; min-height: 34px; max-height: 34px;

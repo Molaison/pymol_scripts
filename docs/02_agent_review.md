@@ -92,7 +92,11 @@
 
 ## 用 Step commands 预设调整显示
 
-在 **Settings → Saved settings → Automation** 中打开 **Viewing presets…**，选择预设和触发时机，点 **Use preset** 检查草稿，再 **Insert draft… → 确认 → Apply commands**。应用后，命令会在下次打开或重载候选、或保存对应标签时执行。在 **Settings → Live session** 中可用 **Preview on current candidate** 试跑当前编辑器里的命令。面板的窗口菜单提供 **Fit to screen**，打开和切换窗口模式时也会校正尺寸。
+在 **Review** 顶部直接点 **Cartoon、Interface、Membrane** 或 **MASS**。选中的视图会跟随本次会话的候选切换。Interface 默认使用 4 Å，箭头菜单可选 6 Å。MASS 默认给所有蛋白链分别渐变，箭头菜单可选一条链。再次点当前视图后，后续候选使用保存的命令。
+
+候选结构先加载，界面几何和膜定位在后台计算。预设不适用时，Review 工具栏会显示原因，可以继续切换候选。
+
+需要保存自定义工作流时，打开 **Settings → Saved commands… → Preset editor…**。选择预设和触发时机，点 **Use preset** 生成草稿，再用 **Insert draft…** 和 **Apply commands** 保存。用 **Settings → Run command once…** 直接试跑当前编辑器的命令。窗口菜单提供 **Fit to screen**。
 
 | 预设 | 适用场景 | 相机/坐标 |
 | --- | --- | --- |

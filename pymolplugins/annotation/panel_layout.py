@@ -287,6 +287,46 @@ def _csv_fields(panel, form):
     form.addRow(panel.bundle_check_btn)
 
 
+def _quick_views(panel):
+    from .review_view_presets import QUICK_VIEWS
+
+    panel.quick_views = QtWidgets.QWidget(panel)
+    layout = QtWidgets.QHBoxLayout(panel.quick_views)
+    layout.setContentsMargins(0, 0, 0, 0)
+    panel.quick_view_buttons = {}
+    panel.interface_radius_actions = {}
+    for name, title in QUICK_VIEWS.items():
+        button = QtWidgets.QToolButton(panel.quick_views)
+        button.setText(title)
+        button.setCheckable(True)
+        button.setProperty("role", "view")
+        button.clicked.connect(lambda checked, key=name: panel._choose_quick_view(key if checked else ""))
+        button.setToolTip(f"{title} for this review session. Click again to follow saved commands on the next candidate.")
+        layout.addWidget(button)
+        panel.quick_view_buttons[name] = button
+        if name == "interface":
+            menu = QtWidgets.QMenu(button)
+            for radius in ("4", "6"):
+                action = menu.addAction(radius + " Å neighborhood")
+                action.setCheckable(True)
+                action.setChecked(radius == "4")
+                action.triggered.connect(lambda _checked, value=radius: panel._choose_quick_view("interface", value))
+                panel.interface_radius_actions[radius] = action
+            button.setMenu(menu)
+            button.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
+        elif name == "mass":
+            menu = QtWidgets.QMenu(button)
+            menu.aboutToShow.connect(lambda: panel._fill_mass_view_menu(menu))
+            button.setMenu(menu)
+            button.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
+    panel.quick_view_status = ElidedLabel()
+    panel.quick_view_status.setProperty("role", "muted")
+    panel.quick_view_status.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+    layout.addWidget(panel.quick_view_status, 1)
+    panel.quick_views.setEnabled(False)
+    return panel.quick_views
+
+
 def _review_page(panel):
     from .plugin import _DatasetTableModel, _get_bg_executor
     from .qt_widgets import ScoresTable
@@ -294,6 +334,7 @@ def _review_page(panel):
     page = QtWidgets.QWidget()
     layout = QtWidgets.QVBoxLayout(page)
     layout.setContentsMargins(0, 0, 0, 0)
+    layout.addWidget(_quick_views(panel))
     panel.review_splitter = QtWidgets.QSplitter(qt_enum("Orientation", "Horizontal"))
     candidates = card("candidateCard")
     candidates_layout = QtWidgets.QVBoxLayout(candidates)
@@ -489,12 +530,7 @@ def _settings_page(panel):
     layout.setContentsMargins(24, 8, 24, 20)
     layout.setSpacing(20)
 
-    saved = CollapsibleSection("Saved settings", expanded=True)
-    saved_layout = QtWidgets.QVBoxLayout(saved.content)
-    saved_layout.setContentsMargins(0, 0, 0, 0)
-    saved_layout.setSpacing(12)
-    basic = CollapsibleSection("Annotations", expanded=True)
-    form = QtWidgets.QFormLayout(basic.content)
+    form = QtWidgets.QFormLayout()
     panel.label_edit = QtWidgets.QLineEdit()
     panel.label_edit.editingFinished.connect(panel._on_label_changed)
     panel.values_edit = QtWidgets.QLineEdit()
@@ -504,10 +540,35 @@ def _settings_page(panel):
     panel.annotation_fields_button = _button("Configure annotation fields…", lambda: panel.review.configure_fields())
     form.addRow(panel.annotation_fields_button)
     _save_options(panel, form)
-    saved_layout.addWidget(basic)
-    _loading_settings(panel, saved_layout)
-    commands = CollapsibleSection("Automation")
-    command_layout = QtWidgets.QVBoxLayout(commands.content)
+    layout.addLayout(form)
+    _command_settings(panel)
+    panel.saved_commands_button = _button("Saved commands…", lambda: _show_command_settings(panel, 0))
+    panel.live_commands_button = _button("Run command once…", lambda: _show_command_settings(panel, 1))
+    layout.addWidget(_row(panel.saved_commands_button, panel.live_commands_button))
+    _loading_settings(panel, layout)
+    panel.settings_save_btn = _button("Save settings", panel._save_ui_state)
+    panel.settings_save_btn.setParent(panel)
+    panel.settings_save_btn.hide()
+    layout.addStretch()
+    return page
+
+
+def _show_command_settings(panel, index):
+    panel.command_tabs.setCurrentIndex(index)
+    panel.command_settings_dialog.show()
+    panel.command_settings_dialog.raise_()
+
+
+def _command_settings(panel):
+    dialog = panel.command_settings_dialog = QtWidgets.QDialog(panel)
+    dialog.setWindowTitle("Review commands")
+    dialog.resize(580, 490)
+    layout = QtWidgets.QVBoxLayout(dialog)
+    panel.command_tabs = QtWidgets.QTabWidget(dialog)
+    layout.addWidget(panel.command_tabs)
+    saved = QtWidgets.QWidget()
+    panel.command_tabs.addTab(_scroll(saved), "Saved")
+    command_layout = QtWidgets.QVBoxLayout(saved)
     command_layout.addWidget(_button("Review steps…", panel._edit_review_steps))
     command_layout.addWidget(QtWidgets.QLabel("When a structure opens"))
     panel.step_cmd_edit = QtWidgets.QPlainTextEdit()
@@ -518,12 +579,11 @@ def _settings_page(panel):
     panel.step_cmd_edit.textChanged.connect(panel._commands_edited)
     command_layout.addWidget(panel.step_cmd_edit)
     panel.command_history_btn = _button("Recent commands…", panel._show_command_history, "quiet")
-    command_layout.addWidget(panel.command_history_btn)
     from .ai_widgets import show_ai_commands
     panel.ai_commands_button = _button("AI command drafts…", lambda: show_ai_commands(panel))
     panel.ai_commands_button.setToolTip("Generate editable drafts using the selected AI connection")
-    panel.command_presets_button = _button("Viewing presets…", lambda: show_ai_commands(panel, preset=True))
-    command_layout.addWidget(_row(panel.command_presets_button, panel.ai_commands_button))
+    panel.command_presets_button = _button("Preset editor…", lambda: show_ai_commands(panel, preset=True))
+    command_layout.addWidget(_row(panel.command_presets_button, panel.ai_commands_button, panel.command_history_btn))
     panel.values_box = QtWidgets.QGroupBox("After saving a label")
     panel.values_layout = QtWidgets.QVBoxLayout(panel.values_box)
     command_layout.addWidget(panel.values_box)
@@ -533,17 +593,12 @@ def _settings_page(panel):
     panel.commands_apply_btn = _button("Apply commands", panel._apply_commands, "primary")
     panel.commands_view_btn = _button("Apply and view…", panel._apply_commands_and_view)
     command_layout.addWidget(panel.command_draft_label)
-    command_layout.addWidget(panel.commands_apply_btn)
-    command_layout.addWidget(panel.commands_view_btn)
-    saved_layout.addWidget(commands)
-    layout.addWidget(saved)
+    command_layout.addWidget(_row(panel.commands_apply_btn, panel.commands_view_btn))
+    command_layout.addStretch(1)
 
-    live = CollapsibleSection("Live session", expanded=True)
-    live_layout = QtWidgets.QVBoxLayout(live.content)
-    live_note = QtWidgets.QLabel("Preview commands on the current candidate in this PyMOL session.")
-    live_note.setWordWrap(True)
-    live_note.setProperty("role", "muted")
-    live_layout.addWidget(live_note)
+    live = QtWidgets.QWidget()
+    panel.command_tabs.addTab(live, "Run once")
+    live_layout = QtWidgets.QVBoxLayout(live)
     panel.live_step_cmd_edit = QtWidgets.QPlainTextEdit()
     panel.live_step_cmd_edit.setObjectName("liveCommandEditor")
     panel.live_step_cmd_edit.setAccessibleName("Live session On-open command draft")
@@ -560,18 +615,9 @@ def _settings_page(panel):
         "Preview on current candidate", panel._preview_live_commands, "primary"
     )
     panel.live_reset_btn = _button("Reset draft from saved commands", panel._reset_live_commands_draft, "quiet")
-    panel.live_details_btn = _button(
-        "Structure details…", lambda: panel.details_cb.setChecked(True), "quiet"
-    )
-    live_layout.addWidget(panel.live_preview_btn)
-    live_layout.addWidget(_row(panel.live_reset_btn, panel.live_details_btn))
-    layout.addWidget(live)
-
-    panel.settings_save_btn = _button("Save settings", panel._save_ui_state)
-    panel.settings_save_btn.setParent(panel)
-    panel.settings_save_btn.hide()
-    layout.addStretch()
-    return page
+    live_layout.addWidget(_row(panel.live_reset_btn, panel.live_preview_btn))
+    live_layout.addStretch(1)
+    layout.addWidget(_button("Close", dialog.close))
 
 
 def _loading_settings(panel, layout):
