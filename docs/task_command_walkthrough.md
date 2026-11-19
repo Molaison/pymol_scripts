@@ -4,9 +4,11 @@
 
 ## 常用入口
 
-PyMOL 主窗口的 **PymolPlugins** 工具栏直接打开 Annotator、Presets、Focus、Compare、Batch 和 RFD4。
+PyMOL 主窗口的 **PymolPlugins** 工具栏直接打开 Annotator、Views、Focus、Compare、Batch 和 RFD4。
 
-已加载的分子可在 **Plugin → PymolPlugins → Show presets…** 设置显示。选择对象和预设即可应用。**Copy command** 可复制同一配置，例如 `pp_view interface, model, radius=6`。
+点 **Views** 或输入 `pp_view` 打开 **Structure views**。**Structure overview** 将 cartoon、小分子 sticks、可选分子表面和 DNA/RNA sticks 放在一起。**Interface & pocket** 的伙伴类型可选蛋白–蛋白或蛋白–配体，并可叠加独立计算的局部表面。**Copy command** 可复制当前配置，例如 `pp_view interface, model, radius=6, surface=1, transparency=0.6`。
+
+**Membrane topology** 优先使用结构中可辨认的脂质磷叶层，否则使用本机 TmDet 4.1.9。结果显示定位来源、膜厚和逐链跨膜区段。橙色 Tyr/Trp 位于膜水界面，青色 Arg/Lys 标识近膜碱性残基。只有出现明确的 positive-inside 偏向时，才标为推断的胞质侧。计算在后台运行，无法放置时会给出原因，结构继续可见。TmDet 属于可选本机依赖，Windows 支持已配置的 Debian WSL 运行时。校准 Bundle 自带的膜数据由 Bundle 视图使用。
 
 在 **Plugin → PymolPlugins → Compare & align…** 或输入 `pp_align` 打开独立的结构比较窗口。勾选至少两个对象，选定参考对象。**Overlay** 直接叠加当前帧，**Align** 按选定方法拟合。Mobiles 和 Reference 可分别选择原子类型、链和残基范围，例如 `40-80+105`。多个移动对象共用 Mobiles 范围。**Clear comparison** 或关闭窗口会移除比较副本并恢复源对象的可见性。
 
@@ -142,7 +144,7 @@ pp_contacts YOUR_COMPLEX, focus="YOUR_LIGAND_SELECTION", kind=polar
 pp_undo
 ```
 
-用 `kind=polar` 只画氢键候选线。两侧为蛋白链时可指定 `focus="chain A", partner="chain B"`。默认的 `ligand_contacts` 报告距离内的最近重原子接触，`polar_qc` 默认同时报告极性配对与同类极性冲突。新默认结果会隐藏同一来源之前的默认结果组。需要并排查看时，为每次计算指定不同的 `group=`。日常运行用 `pp_contacts`，脚本可以用 `pp_interact_run` 设置距离阈值、表面、标签或 JSON 输出。可选后端见 [worker 指南](wsl_worker.md)。
+用 `kind=polar` 只画氢键候选线。两侧为蛋白链时可指定 `focus="chain A", partner="chain B"`。默认的 `ligand_contacts` 报告距离内的最近重原子接触，`polar_qc` 默认同时报告极性配对与同类极性冲突。π 堆叠等 PLIP 分类可以用 `pp_contacts complex, focus="resn LIG", preset=plip_overview, kind=pi`。新默认结果会隐藏同一来源之前的默认结果组。需要并排查看时，为每次计算指定不同的 `group=`。可选后端见 [worker 指南](wsl_worker.md)。
 
 ## 清理练习场景
 

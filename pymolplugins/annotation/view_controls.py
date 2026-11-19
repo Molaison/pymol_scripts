@@ -4,6 +4,36 @@ from pymol import cmd
 from pymol.Qt import QtCore, QtWidgets
 
 
+class ViewLayers(QtWidgets.QWidget):
+    """Shared layer options for the view window and saved review recipes."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        form = QtWidgets.QFormLayout(self)
+        form.setContentsMargins(0, 0, 0, 0)
+        self.surface = QtWidgets.QCheckBox("Show surface")
+        self.transparency = QtWidgets.QSpinBox()
+        self.transparency.setRange(0, 95)
+        self.transparency.setValue(50)
+        self.transparency.setSuffix("%")
+        self.transparency.setEnabled(False)
+        self.surface.toggled.connect(self.transparency.setEnabled)
+        self.nucleic = QtWidgets.QCheckBox("Show DNA/RNA sticks")
+        self.nucleic.setChecked(True)
+        form.addRow(self.surface)
+        form.addRow("Surface transparency", self.transparency)
+        form.addRow(self.nucleic)
+
+    def set_view(self, view):
+        self.setVisible(view in {"overview", "interface"})
+        self.surface.setText("Show interface surface" if view == "interface" else "Show surface")
+        self.nucleic.setVisible(view == "overview")
+
+    def arguments(self):
+        return {"surface": self.surface.isChecked(), "transparency": str(self.transparency.value() / 100),
+                "nucleic": self.nucleic.isChecked()}
+
+
 class CavityControls(QtWidgets.QWidget):
     def __init__(self, parent=None, *, on_toggle=None, compact=False):
         super().__init__(parent)

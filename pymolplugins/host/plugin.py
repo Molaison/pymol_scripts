@@ -705,8 +705,8 @@ def pp_wizard(topic="welcome"):
 
 
 def pp_view(preset="", object_name="", mode="auto", radius="4", scope="nearby",
-            target_chain="auto", binder_chain="auto"):
-    """Open Show presets, toggle Interactive focus, or apply a display preset."""
+            target_chain="auto", binder_chain="auto", surface="0", transparency="0.5", nucleic="1"):
+    """Open Structure views, toggle Interactive focus, or apply a structure view."""
     preset = str(preset).strip().lower()
     if not preset:
         from .show_presets import show_presets
@@ -717,7 +717,8 @@ def pp_view(preset="", object_name="", mode="auto", radius="4", scope="nearby",
 
     if not object_name:
         raise ValueError("Specify a loaded object, or open the picker with pp_view.")
-    command = show_preset_command(preset, object_name, mode, radius, scope, target_chain, binder_chain)
+    command = show_preset_command(preset, object_name, mode, radius, scope, target_chain, binder_chain,
+                                  surface, transparency, nucleic)
     return execute_review_command(command, cmd, exclusive=True)
 
 
@@ -727,7 +728,7 @@ def __init_plugin__(app=None):
     from .toolbar import install_toolbar
 
     for label, callback in (
-        ("Show presets…", pp_view),
+        ("Structure views…", pp_view),
         ("Interactive focus", toggle_interactive_focus),
         ("Compare & align…", show_comparison_from_toolkit),
         ("Structure Annotator", show_structure_annotator_from_toolkit),
@@ -743,7 +744,7 @@ def __init_plugin__(app=None):
         addmenuitemqt("PymolPlugins|" + label, callback)
     install_toolbar((
         ("Annotator", "Structure Annotator", show_structure_annotator_from_toolkit),
-        ("Presets", "Show presets", pp_view),
+        ("Views", "Structure views", pp_view),
         ("Focus", "Interactive focus", toggle_interactive_focus),
         ("Compare", "Compare & align", show_comparison_from_toolkit),
         ("Batch", "Batch Processing", show_batch_processing_from_toolkit),

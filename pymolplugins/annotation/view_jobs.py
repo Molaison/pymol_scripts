@@ -64,6 +64,7 @@ class ViewJobs(CavityJobs):
         self.cancel()
         self.identity, self.title, self.exclusive = identity, title, exclusive
         self.warnings = list(warnings)
+        self.notice = None
         self.queue.extend(recipes)
         if recipes:
             self._status(f"{title or 'Saved view'} · preparing…")
@@ -94,19 +95,22 @@ class ViewJobs(CavityJobs):
             self._status("")
             return
         try:
+            notice = None
             if self.job is not None:
                 future, owner, source, action, draw = self.job
                 if not future.done():
                     return
                 self.job = None
-                self.draw(owner, source, action, draw, future.result(), self.exclusive)
+                notice = self.draw(owner, source, action, draw, future.result(), self.exclusive)
             elif self.queue:
                 owner, line = self.queue.popleft()
                 source, action, compute, draw = self.prepare(owner, line)
                 if compute is None:
-                    self.draw(owner, source, action, draw, None, self.exclusive)
+                    notice = self.draw(owner, source, action, draw, None, self.exclusive)
                 else:
                     self.job = (self.pool.submit(compute), owner, source, action, draw)
+            if notice is not None:
+                self.notice = notice
         except Exception as exc:
             detail = str(exc).strip() or type(exc).__name__
             message = f"{self.title or 'Saved view'} skipped · {detail.splitlines()[0]}"
@@ -115,4 +119,10 @@ class ViewJobs(CavityJobs):
         if self.job is None and not self.queue:
             self.timer.stop()
             if self.cavity_job is None:
-                self._status(self.warnings[-1] if self.warnings else "")
+                message = self.warnings[-1] if self.warnings else ""
+                if self.notice is not None:
+                    text = "\n".join(filter(None, (self.notice.text, message)))
+                    tooltip = "\n".join(filter(None, (self.notice.tooltip, message)))
+                    self._status(text, tooltip)
+                else:
+                    self._status(message)

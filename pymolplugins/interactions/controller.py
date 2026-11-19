@@ -2321,7 +2321,7 @@ class InteractionController:
             if len(ligand_residues) > 1:
                 raise ValueError(
                     "default organic matches %d ligand residues; PLIP requires an "
-                    "explicit ligand selection (use ligand=... in pp_interact_run)"
+                    "explicit ligand selection (use focus=... in pp_contacts)"
                     % len(ligand_residues)
                 )
         receptor_count = _count_atoms(self.cmd, receptor, state_value)
@@ -2605,7 +2605,7 @@ def _resolve_public_source(
     if not candidates:
         raise ValueError(
             "no molecule object with atoms is loaded; load a protein-ligand complex "
-            "and run pp_interact_run"
+            "and run pp_contacts"
         )
     raise ValueError(
         "source is ambiguous; molecule objects: %s. Choose one with "
@@ -2878,8 +2878,8 @@ def _interaction_console_guard(command_name: str, function: Any) -> Any:
             worker_code = str(getattr(exc, "code", ""))
             if worker_code:
                 action = (
-                    "Run pp_worker_health; meanwhile use `pp_interact_run "
-                    "ligand_contacts, source=OBJECT` for local distance contacts."
+                    "Run pp_worker_health; meanwhile use `pp_contacts OBJECT, "
+                    "preset=ligand_contacts` for local distance contacts."
                 )
                 expected = True
             elif isinstance(exc, StaleInteractionOwnerError):

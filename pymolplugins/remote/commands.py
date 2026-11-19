@@ -87,7 +87,7 @@ def _worker_error_action(exc: Exception) -> str:
                 if backend == "PLIP":
                     action += (
                         " For an explicitly local fallback, run pp_contacts "
-                        "SOURCE, focus=LIGAND or pp_interact_run ligand_contacts."
+                        "SOURCE, focus=LIGAND, preset=ligand_contacts."
                     )
                 return action
             return (

@@ -5,10 +5,11 @@ from pymol.Qt import QtCore, QtWidgets
 
 from pymolplugins.annotation.bundle_view import CandidateCavity, draw_candidate_cavity, prepare_candidate_cavity
 from pymolplugins.annotation.panel_style import apply_style
+from pymolplugins.annotation.review_membrane import MembraneNotice
 from pymolplugins.annotation.review_view_presets import (
     SHOW_PRESETS, draw_review_view, loaded_molecules, prepare_review_command, show_preset_command,
 )
-from pymolplugins.annotation.view_controls import CavityControls
+from pymolplugins.annotation.view_controls import CavityControls, ViewLayers
 from pymolplugins.annotation.view_jobs import ViewJobs
 
 
@@ -26,7 +27,7 @@ def _combo(entries, label):
 class ShowPresetsDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("PymolPlugins · Show presets")
+        self.setWindowTitle("PymolPlugins · Structure views")
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
         self.setModal(False)
         self.resize(500, 290)
@@ -48,8 +49,8 @@ class ShowPresetsDialog(QtWidgets.QDialog):
         refresh.clicked.connect(self.refresh_objects)
         object_row.addWidget(refresh)
         form.addRow("Object", object_row)
-        self.preset = _combo(((title, key) for key, title in SHOW_PRESETS.items()), "Preset")
-        form.addRow("Preset", self.preset)
+        self.preset = _combo(((title, key) for key, title in SHOW_PRESETS.items()), "Structure view")
+        form.addRow("View", self.preset)
         layout.addLayout(form)
         self.options = QtWidgets.QWidget()
         choices = QtWidgets.QFormLayout(self.options)
@@ -65,6 +66,8 @@ class ShowPresetsDialog(QtWidgets.QDialog):
                                ("Second chain", self.second)):
             choices.addRow(label, element)
         layout.addWidget(self.options)
+        self.layers = ViewLayers(self)
+        layout.addWidget(self.layers)
         self.cavities = CavityControls(self)
         layout.addWidget(self.cavities)
         self.quick_view_status = QtWidgets.QLabel()
@@ -126,6 +129,7 @@ class ShowPresetsDialog(QtWidgets.QDialog):
 
     def _update_options(self):
         key = self.preset.currentData()
+        self.layers.set_view(key)
         self.options.setVisible(key in ("interface", "mass"))
         form = self.options.layout()
         for control in (self.mode, self.radius, self.scope):
@@ -147,7 +151,8 @@ class ShowPresetsDialog(QtWidgets.QDialog):
         second = self.second.currentData() if self.second.isEnabled() else "auto"
         target, binder = (second, first) if key == "mass" else (first, second)
         return show_preset_command(key, self.objects.currentData(), self.mode.currentData(),
-                                   self.radius.currentData(), self.scope.currentData(), target, binder)
+                                   self.radius.currentData(), self.scope.currentData(), target, binder,
+                                   **self.layers.arguments())
 
     def copy_command(self):
         QtWidgets.QApplication.clipboard().setText(self.command())
@@ -172,6 +177,8 @@ class ShowPresetsDialog(QtWidgets.QDialog):
 
     def _draw(self, owner, source, action, draw, data, exclusive):
         followup = draw_review_view(cmd, source, action, draw, data, exclusive=exclusive)
+        if isinstance(followup, MembraneNotice):
+            return followup
         if not isinstance(followup, CandidateCavity):
             self.jobs.warnings.append(f"{self.preset.currentText()} applied to {owner}.")
             return
