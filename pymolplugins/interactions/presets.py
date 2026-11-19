@@ -134,7 +134,7 @@ PRESETS = PresetRegistry(
             summary="Local PyMOL hydrogen bonds and salt bridges between chain partners.",
             backend="pymol-local",
             parameters=dict(_COMMON_LOCAL),
-            examples=("pp_interact_run interchain_basic, source=complex",),
+            examples=('pp_contacts complex, focus="chain A", partner="chain B"',),
             limitations=(
                 "Geometry and PyMOL atom typing only; it is not an energetic interface score.",
             ),
@@ -164,7 +164,7 @@ PRESETS = PresetRegistry(
                 },
             },
             examples=(
-                "pp_interact_run polar_qc, source=complex, partner1=chain A, partner2=chain B",
+                'pp_contacts complex, preset=polar_qc, focus="chain A", partner="chain B"',
             ),
             limitations=(
                 "Distance/type heuristics flag candidates; inspect protonation and geometry.",
@@ -191,8 +191,8 @@ PRESETS = PresetRegistry(
                 },
             },
             examples=(
-                "pp_interact_run",
-                'pp_interact_run contacts, source=complex, ligand="resn LIG"',
+                "pp_contacts complex",
+                'pp_contacts complex, focus="resn LIG"',
             ),
             limitations=(
                 "Distance-only contacts are not hydrogen-bond, hydrophobic, or energy classifications.",
@@ -215,7 +215,7 @@ PRESETS = PresetRegistry(
                 "hbond_cutoff": dict(_COMMON_LOCAL["hbond_cutoff"]),
             },
             examples=(
-                'pp_interact_run ligand_quick, source=complex, ligand="resn LIG"',
+                'pp_contacts complex, focus="resn LIG", kind=polar',
             ),
             limitations=(
                 "Reports local donor/acceptor geometry only; use PLIP for broader chemistry.",
@@ -249,7 +249,7 @@ PRESETS = PresetRegistry(
                 },
             },
             examples=(
-                'pp_interact_run ligand_site, source=complex, ligand="resn LIG"',
+                'pp_contacts complex, preset=ligand_site, focus="resn LIG"',
             ),
             limitations=(
                 "Local PyMOL typing covers hydrogen bonds and salt bridges, not all PLIP categories.",
@@ -267,7 +267,7 @@ PRESETS = PresetRegistry(
                 },
             },
             examples=(
-                'pp_interact_run plip_overview, source=complex, ligand="resn LIG"',
+                'pp_contacts complex, preset=plip_overview, focus="resn LIG"',
             ),
             limitations=(
                 "Requires a reachable WSL worker with PLIP; run pp_worker_health first.",
@@ -298,7 +298,7 @@ PRESETS = PresetRegistry(
                 },
             },
             examples=(
-                'pp_interact_run plip_publication, source=complex, ligand="resn LIG"',
+                'pp_contacts complex, preset=plip_publication, focus="resn LIG"',
             ),
             limitations=(
                 "Requires a reachable WSL worker with PLIP; local fallback is ligand_site.",
@@ -306,6 +306,13 @@ PRESETS = PresetRegistry(
         ),
     )
 )
+
+
+def ligand_preset_for_kind(kind: str) -> str:
+    return {
+        "polar": "ligand_quick",
+        "salt": "ligand_site",
+    }.get(str(kind).strip().lower(), "ligand_contacts")
 
 
 def preset_parameters(definition: PresetDefinition) -> Dict[str, Any]:

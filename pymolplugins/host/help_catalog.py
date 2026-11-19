@@ -157,9 +157,9 @@ _TASKS = (
     _help_entry(
         "task",
         "align",
-        "Align an explicit payload from selection, motif, or ligand anchors.",
-        "pp_align MOBILE, REFERENCE",
-        "pp_align mobile, target, motif=GGH",
+        "Compare loaded objects in a standalone window or align explicit anchors in scripts.",
+        "pp_align [MOBILE, REFERENCE]",
+        "pp_align",
         True,
         "pp_undo",
         (
@@ -248,9 +248,9 @@ _TASKS = (
     _help_entry(
         "task",
         "interactions",
-        "Render a manifest-owned ligand, chain, polar, or PLIP interaction result.",
-        "pp_contacts SOURCE",
-        "pp_contacts complex, focus=organic",
+        "Show ligand or chain contacts, with kind=polar for hydrogen-bond lines.",
+        "pp_contacts SOURCE [, focus=SELECTION] [, partner=SELECTION] [, kind=TYPE]",
+        "pp_contacts complex, focus=organic, kind=polar",
         True,
         "pp_undo [OPERATION_ID] after any local or async result completes",
         (
@@ -424,9 +424,9 @@ _COMMAND_ROWS = {
         ("browse", "group batch", "arrows", "keyboard", "导航", "方向键", "快捷键"),
     ),
     "pp_align": (
-        "Align objects, anchors, one motif, or one ligand and journal the mutation.",
-        "pp_align MOBILE, REFERENCE",
-        "pp_align mobile, reference, motif=GGH",
+        "Open Compare & align for loaded objects, or align and journal explicit anchors.",
+        "pp_align [MOBILE, REFERENCE]",
+        "pp_align",
         True,
         "pp_undo",
         (
@@ -445,9 +445,9 @@ _COMMAND_ROWS = {
         ("pca", "symmetry axis", "定向"),
     ),
     "pp_contacts": (
-        "Render a safely inferred local contact result or one explicit preset.",
-        "pp_contacts SOURCE",
-        "pp_contacts complex, focus=organic",
+        "Show ligand or chain contacts, optionally limited to one interaction kind.",
+        "pp_contacts SOURCE [, focus=SELECTION] [, partner=SELECTION] [, kind=TYPE]",
+        "pp_contacts complex, focus=organic, kind=polar",
         True,
         "pp_undo [OPERATION_ID] after any local or async result completes",
         (
@@ -817,9 +817,9 @@ _COMMAND_ROWS = {
         ("contacts", "presets"),
     ),
     "pp_interact_run": (
-        "Compute and render one manifest-owned interaction result.",
-        "pp_interact_run [PRESET] [, source=SELECTION]",
-        "pp_interact_run",
+        "Advanced interaction settings for scripts: cutoffs, labels, surfaces, or JSON export.",
+        "pp_interact_run [PRESET] [, source=SELECTION] [, kind=TYPE]",
+        "pp_interact_run ligand_site, source=complex, hbond_cutoff=3.2, kind=polar",
         True,
         "pp_interact_clear GENERATED_GROUP",
         ("pp_interact_export GENERATED_GROUP, interactions.json",),
@@ -1097,8 +1097,8 @@ _PRESET_ROWS = (
     (
         "ligand_contacts",
         (),
-        "Fast local heavy-atom ligand contacts with one closest residue pair.",
-        "pp_interact_run ligand_contacts, source=complex",
+        "Distance-only ligand contacts with one closest heavy-atom pair per residue pair.",
+        "pp_contacts complex, preset=ligand_contacts",
         "pp_interact_clear GENERATED_GROUP",
         ("contacts", "interaction", "ligand"),
     ),
@@ -1106,7 +1106,7 @@ _PRESET_ROWS = (
         "ligand_quick",
         ("ligand",),
         "Focused local ligand-site hydrogen bonds.",
-        "pp_interact_run ligand_quick, source=complex",
+        "pp_contacts complex, kind=polar",
         "pp_interact_clear GENERATED_GROUP",
         ("contacts", "interaction"),
     ),
@@ -1114,7 +1114,7 @@ _PRESET_ROWS = (
         "ligand_site",
         ("binding_site",),
         "Ligand site with hydrogen bonds, salt bridges, and property colors.",
-        "pp_interact_run ligand_site, source=complex",
+        "pp_contacts complex, preset=ligand_site",
         "pp_interact_clear GENERATED_GROUP",
         ("contacts", "interaction"),
     ),
@@ -1122,7 +1122,7 @@ _PRESET_ROWS = (
         "interchain_basic",
         ("interchain",),
         "Local chain-chain hydrogen bonds and salt bridges.",
-        "pp_interact_run interchain_basic, source=complex",
+        'pp_contacts complex, focus="chain A", partner="chain B"',
         "pp_interact_clear GENERATED_GROUP",
         ("contacts", "interaction", "chains"),
     ),
@@ -1130,7 +1130,7 @@ _PRESET_ROWS = (
         "polar_qc",
         (),
         "Classify good/weak polar pairs and like-polar clashes.",
-        'pp_interact_run polar_qc, source=complex, partner1="chain A", partner2="chain B"',
+        'pp_contacts complex, preset=polar_qc, focus="chain A", partner="chain B"',
         "pp_interact_clear GENERATED_GROUP",
         ("contacts", "interaction", "clash"),
     ),
@@ -1138,7 +1138,7 @@ _PRESET_ROWS = (
         "plip_overview",
         (),
         "Complete PLIP interaction categories through the WSL worker.",
-        "pp_interact_run plip_overview, source=complex",
+        "pp_contacts complex, preset=plip_overview",
         "pp_interact_clear GENERATED_GROUP",
         ("contacts", "interaction", "wsl"),
     ),
@@ -1146,7 +1146,7 @@ _PRESET_ROWS = (
         "plip_publication",
         (),
         "Focused publication-oriented PLIP result.",
-        "pp_interact_run plip_publication, source=complex",
+        "pp_contacts complex, preset=plip_publication",
         "pp_interact_clear GENERATED_GROUP",
         ("contacts", "interaction", "wsl"),
     ),
@@ -1255,7 +1255,7 @@ def _preset_entries():
                  "pp_style_revert", (item.category, "figure", "style"))
                 for item in PRESETS if item.name not in curated)
     for name, aliases, purpose, example, undo, keywords in rows:
-        command = "pp_style_apply" if example.startswith("pp_style") else "pp_interact_run"
+        command = "pp_style_apply" if example.startswith("pp_style") else "pp_contacts"
         values.append(
             _help_entry(
                 "preset",

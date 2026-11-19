@@ -680,6 +680,12 @@ def show_rfd4_from_toolkit():
     return open_panel()
 
 
+def show_comparison_from_toolkit():
+    from .compare_structures import show_compare
+
+    return show_compare()
+
+
 def pp_wizard(topic="welcome"):
     """Open the toolkit introduction and step-by-step guide.
 
@@ -712,6 +718,7 @@ def __init_plugin__(app=None):
 
     for label, callback in (
         ("Show presets…", pp_view),
+        ("Compare & align…", show_comparison_from_toolkit),
         ("Structure Annotator", show_structure_annotator_from_toolkit),
         ("Batch Processing", show_batch_processing_from_toolkit),
         ("RFD4 · Proteina", show_rfd4_from_toolkit),

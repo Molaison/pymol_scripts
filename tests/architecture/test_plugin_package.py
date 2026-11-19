@@ -89,6 +89,7 @@ bundle = importlib.import_module("pymol_plugins")
 bundle.__init_plugin__()
 assert set(menus) == {
     "PymolPlugins|Show presets…",
+    "PymolPlugins|Compare & align…",
     "PymolPlugins|Getting Started",
     "PymolPlugins|Maintenance|Reload toolkit", "PymolPlugins|Maintenance|Doctor",
     "PymolPlugins|Maintenance|Capabilities", "PymolPlugins|Command Help",
