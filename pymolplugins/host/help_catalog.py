@@ -61,13 +61,13 @@ _TASKS = (
     _help_entry(
         "task",
         "view",
-        "Open the modeless display preset picker for loaded PyMOL objects.",
+        "Open display presets or turn on click-to-focus for loaded structures.",
         "pp_view [PRESET, OBJECT]",
         "pp_view",
         True,
         "Apply Cartoon to clear preset overlays for the selected object and return to a basic view.",
-        ("pp_view interface, model", "pp_help pp_view"),
-        ("display", "view", "show presets", "cartoon", "interface", "MASS", "显示预设"),
+        ("pp_view focus", "pp_view interface, model", "pp_help pp_view"),
+        ("display", "view", "show presets", "cartoon", "interface", "MASS", "显示预设", "聚焦"),
         "toolkit",
     ),
     _help_entry(
@@ -369,14 +369,14 @@ _CATEGORY_PURPOSE = {
 # purpose, minimal usage, example, mutates, undo, next, keywords.
 _COMMAND_ROWS = {
     "pp_view": (
-        "Open Show presets or apply Cartoon, Interface, Membrane, MASS, Surface, or DNA/RNA to a loaded object.",
+        "Open Show presets, toggle Interactive focus, or apply a preset to a loaded object.",
         "pp_view [PRESET, OBJECT [, mode=auto|protein|ligand] [, radius=4|6] "
         "[, scope=nearby|interacting] [, target_chain=ID] [, binder_chain=ID]]",
         "pp_view interface, model, radius=6, target_chain=A, binder_chain=B",
         True,
         "Apply pp_view cartoon, OBJECT to clear preset overlays and show a basic view.",
-        ("pp_view", "pp_help surface", "pp_help publication"),
-        ("view", "preset", "interface", "membrane", "mass", "display", "显示预设"),
+        ("pp_view focus", "pp_view", "pp_help surface", "pp_help publication"),
+        ("view", "preset", "interface", "membrane", "mass", "display", "显示预设", "interactive focus"),
     ),
     "pp_review_groups": (
         "Open Structure Annotator on direct child groups, preserving external scene objects.",
