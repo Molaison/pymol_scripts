@@ -35,7 +35,7 @@ from pymolplugins.annotation.score_summary import prepare_score_summary
 from pymolplugins.annotation.command_templates import format_commands
 from pymolplugins.annotation.review_file import (
     REVIEW_KEYS, bundle_table_name, bundle_view_config, check_review_unchanged, read_review_file, review_paths,
-    validate_review_columns, write_review_override,
+    is_legacy_bundle_step, validate_review_columns, write_review_override,
 )
 from pymolplugins.annotation.path_formats import rewrite_path
 from pymolplugins.targets.commands import _execute_checked
@@ -2499,9 +2499,14 @@ def _ensure_loaded(index, focus, allow_gz_fallback=True, *, trust_materialized=F
         context = {"file": STATE.files[index], "index": str(index), "count": str(len(STATE.files)),
                    "entry_id": entry.id if entry else "", "row_number": str(entry.row_number or "") if entry else ""}
         candidate = None
+        shared_step_executed = False
         for item in steps:
             if item["type"] == "commands":
-                _run_pymol_commands(item.get("commands", STATE.step_cmd), context, view_run=view_run)
+                if "commands" in item:
+                    _run_pymol_commands(item["commands"], context, view_run=view_run)
+                elif not shared_step_executed:
+                    _run_pymol_commands(STATE.step_cmd, context, view_run=view_run)
+                    shared_step_executed = True
             elif item["name"] == "candidate":
                 loaded = _object_name_for_index(STATE.files[index], index) not in existing
                 candidate = _ensure_candidate_loaded(index, True, allow_gz_fallback,
@@ -3828,6 +3833,10 @@ def _prepare_csv_load(
         raise ValueError(f"Unknown reference column: {reference_column}")
     persisted_config = dict(persisted_config or {})
     persisted_config["reference_column"] = reference_column
+    step_cmd = persisted_config.get("step_cmd", runtime.config.get("step_cmd", ""))
+    bundle_view = bundle_view_config(review, canonical_csv, step_cmd=step_cmd)
+    if bundle_view is not None and is_legacy_bundle_step(step_cmd):
+        persisted_config["step_cmd"] = ""
     persisted_config["steps"] = validate_steps(persisted_config.get("steps", []) if same_active_csv or persisted or "steps" in review.config else [],
         persisted_config.get("step_cmd", runtime.config.get("step_cmd", "")), dataset.columns)
     prepared_assets, prepared_cache = _prepare_step_assets(
@@ -3880,7 +3889,7 @@ def _prepare_csv_load(
         source_fingerprint=after,
         state_path=dataset_state_path(canonical_csv, source_mode="csv", csv_path=canonical_csv),
         review_config=review.config,
-        bundle_view=bundle_view_config(review, canonical_csv),
+        bundle_view=bundle_view,
         step_assets=prepared_assets, step_materialized=prepared_cache,
         navigation_session=_new_navigation_session(active_entries, _resume_entry_index(active_entries, requested_entry, requested_index)),
     )
@@ -5866,6 +5875,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._quick_view = ""
         self._last_bundle_view = None
         self._interface_radius = "4"
+        self._interface_cavity_objects = {}
         self._mass_chain = None
         self.review = None
         self._state_save_timer = QtCore.QTimer(self)
@@ -7573,6 +7583,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             followup = draw_review_view(cmd, source, action, draw, data, exclusive=exclusive or action is _draw_bundle)
         if not isinstance(followup, CandidateCavity):
             return
+        self._reset_interface_cavity(followup.interface)
         try:
             compute, draw_cavity = prepare_candidate_cavity(cmd, followup)
         except Exception as error:
@@ -7581,9 +7592,32 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
 
         def show_cavity(result):
             with _capture_command_products(owner):
-                return draw_review_view(cmd, source, draw_candidate_cavity, draw_cavity, result)
+                rendered = draw_review_view(cmd, source, draw_candidate_cavity, draw_cavity, result)
+            if followup.interface:
+                self._show_interface_cavity(rendered)
+                return "", rendered.tooltip
+            return rendered.status, rendered.tooltip
 
         self._view_jobs.start_cavity(followup.title, compute, show_cavity)
+
+    def _reset_interface_cavity(self, visible):
+        self._interface_cavity_objects = {}
+        for volume in self.interface_cavity_volumes.values():
+            volume.setText("—")
+        self.interface_cavity_controls.setToolTip("")
+        self.interface_cavity_controls.setVisible(visible)
+
+    def _show_interface_cavity(self, rendered):
+        self._interface_cavity_objects = rendered.objects
+        self.interface_cavity_controls.setToolTip(rendered.tooltip)
+        for kind, check in self.interface_cavity_checks.items():
+            self.interface_cavity_volumes[kind].setText(f"{rendered.volumes[kind]:.1f} Å³")
+            self._set_interface_cavity_visible(kind, check.isChecked())
+
+    def _set_interface_cavity_visible(self, kind, visible):
+        name = self._interface_cavity_objects.get(kind)
+        if name and name in cmd.get_names("objects"):
+            (cmd.enable if visible else cmd.disable)(name)
 
     def _start_candidate_views(self, recipes=(), warnings=()):
         from .bundle_view import BundleViewRequest, clear_bundle_legend
@@ -7598,6 +7632,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                 self._quick_view = ""
                 for button in self.quick_view_buttons.values():
                     button.setChecked(False)
+        self._reset_interface_cavity(self._quick_view == "interface")
         title = QUICK_VIEWS.get(self._quick_view, "")
         owner = STATE.current_object
         if self._quick_view:

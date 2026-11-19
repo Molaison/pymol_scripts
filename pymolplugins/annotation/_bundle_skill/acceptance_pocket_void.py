@@ -36,17 +36,22 @@ def capture_interface_cavity(api, source, pairs, state):
     return {"atoms": _atom_rows(atoms), "interface_pairs": blocks}
 
 
+def cavity_object_names(identity):
+    return {key: asset_name(identity, role) for key, (role, _, _) in _LAYERS.items()}
+
+
 def draw_cavity(identity, result, *, api=cmd):
     """Draw sampled probe centers using colors that distinguish accessibility."""
     layers = {}
-    for key, (role, color, legend) in _LAYERS.items():
+    names = cavity_object_names(identity)
+    for key, (_, color, legend) in _LAYERS.items():
         points = [xyz for region in result[key] for xyz in region["points"]]
         if not points:
             continue
         dots = [ALPHA, 0.86, COLOR, *color]
         for xyz in points:
             dots.extend((SPHERE, *map(float, xyz), 0.20))
-        name = asset_name(identity, role)
+        name = names[key]
         api.load_cgo(dots, name, zoom=0)
         layers[name] = legend, len(points)
     return layers

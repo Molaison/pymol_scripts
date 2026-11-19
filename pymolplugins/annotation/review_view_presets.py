@@ -117,8 +117,8 @@ def execute_review_command(line, api):
     if isinstance(followup, CandidateCavity):
         try:
             compute, draw = prepare_candidate_cavity(api, followup)
-            status, _ = draw_review_view(api, source, draw_candidate_cavity, draw, compute())
-            print(status)
+            rendered = draw_review_view(api, source, draw_candidate_cavity, draw, compute())
+            print(rendered.status)
         except Exception as error:
             print(f"{followup.title} skipped · {error}")
 
@@ -266,7 +266,7 @@ def _draw_interface(api, source, protein, ligand, scope, state, focus, proximity
             return renderer.capture_cavity(api, protein, ligand, state)
         return renderer.capture_interface_cavity(api, source, proximity, state)
 
-    return CandidateCavity("Interface cavity", f"{source}_{uuid4().hex[:12]}", capture)
+    return CandidateCavity("Interface cavity", f"{source}_{uuid4().hex[:12]}", capture, interface=True)
 
 
 def _tmdet_pdb(api, source, protein, state):
