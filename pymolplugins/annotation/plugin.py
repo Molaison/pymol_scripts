@@ -12,6 +12,7 @@ import os
 import posixpath
 import re
 import shutil
+import sqlite3
 import tempfile
 import threading
 import uuid
@@ -3155,6 +3156,7 @@ class _CsvFileFingerprint:
     inode: int
     size: int
     mtime_ns: int
+    ctime_ns: Optional[int] = None
 
 
 def _csv_file_fingerprint(path: str, *, cancel_event=None) -> _CsvFileFingerprint:
@@ -3162,7 +3164,7 @@ def _csv_file_fingerprint(path: str, *, cancel_event=None) -> _CsvFileFingerprin
         value = SshClient(path).stat(cancel_event=cancel_event)
         if not value["file"]:
             raise ValueError("Remote table path is not a regular file.")
-        return _CsvFileFingerprint(value["device"], value["inode"], value["size"], value["mtime_ns"])
+        return _CsvFileFingerprint(value["device"], value["inode"], value["size"], value["mtime_ns"], value["ctime_ns"])
     try:
         metadata = os.stat(_long_path(path))
     except OSError as exc:
@@ -3384,8 +3386,9 @@ def _find_folder_table(path, *, cancel_event=None):
     """Find the canonical bundle or a uniquely identifiable structure table."""
     folder = normalize_source_path(path)
     if is_ssh_path(folder):
+        from pymolplugins.remote.import_cache import recent_directory
         remote = parse_ssh_path(folder)
-        entries = SshClient(remote).list_directory(cancel_event=cancel_event)["entries"]
+        entries = recent_directory(remote, cancel_event=cancel_event)["entries"]
         files = {entry["name"]: remote.at(entry["path"]).uri for entry in entries if entry.get("file")}
     else:
         with os.scandir(_long_path(folder)) as entries:
@@ -6221,6 +6224,49 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
     def _show_import(self) -> None:
         self.main_tabs.setCurrentIndex(1)
         (self.csv_edit if self._source_mode() == "csv" else self.dir_edit).setFocus()
+
+    def _update_remote_actions(self):
+        idle = not self._csv_task_id
+        self.reload_remote_action.setEnabled(idle and is_ssh_path(_active_source_reference()))
+        self.clear_remote_cache_action.setEnabled(idle)
+
+    def _clear_remote_cache(self):
+        if self._csv_task_id:
+            return
+        from pymolplugins.remote.import_cache import clear_remote_imports
+
+        try:
+            count = clear_remote_imports()
+        except (OSError, sqlite3.Error) as exc:
+            self._show_error(f"Could not clear remote import cache: {exc}")
+            return
+        self._prepared_preview = None
+        self._header_csv_path = ""
+        self.status_label.setText(f"Cleared remote import cache for {count} sources.")
+
+    def _reload_remote_data(self):
+        source = _active_source_reference()
+        if self._csv_task_id or not is_ssh_path(source):
+            return
+        if STATE.source_mode == "directory":
+            from pymolplugins.remote.import_cache import clear_remote_imports
+            try:
+                clear_remote_imports(source)
+            except (OSError, sqlite3.Error) as exc:
+                self._show_error(f"Could not refresh remote directory cache: {exc}")
+                return
+        self._history_restore = None
+        self._syncing_widgets = True
+        try:
+            self._sync_from_state()
+            if STATE.source_mode == "directory":
+                self.source_type_combo.setCurrentIndex(self.source_type_combo.findData("directory"))
+        finally:
+            self._syncing_widgets = False
+        self._prepared_preview = None
+        self._header_csv_path = ""
+        self._show_import()
+        self._load_dataset()
 
     def _show_configuration_history(self) -> None:
         from .history_browser import HistoryRestoreDialog

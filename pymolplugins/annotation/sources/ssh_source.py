@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 import hashlib
 import re
 
+from pymolplugins.remote.import_cache import recent_directory
 from pymolplugins.remote.ssh import SshClient, SshCancelled, parse_ssh_path
 from ..model import AnnotationDataset, AnnotationEntry
 from ..path_resolver import PathResolution
@@ -57,7 +58,7 @@ def _checked_entry(entry, value):
 def load_ssh_directory(path, pattern=DEFAULT_STRUCTURE_PATTERN, *, prefer_gz=True, cancel_event=None):
     remote = parse_ssh_path(path)
     pattern = re.compile(pattern or DEFAULT_STRUCTURE_PATTERN, re.IGNORECASE)
-    listing = SshClient(remote).list_directory(cancel_event=cancel_event)
+    listing = recent_directory(remote, cancel_event=cancel_event)
     selected = {}
     for value in listing["entries"]:
         if not pattern.match(value["name"]) or not value.get("file"):

@@ -24,7 +24,8 @@ from pymolplugins.annotation.model import (
     build_display_metadata,
 )
 from pymolplugins.annotation.state_store import csv_dataset_namespace
-from pymolplugins.remote.ssh import SshClient, is_ssh_path, local_source_file, normalize_source_path, parse_ssh_path
+from pymolplugins.remote.import_cache import recent_header, recent_table
+from pymolplugins.remote.ssh import is_ssh_path, normalize_source_path, parse_ssh_path
 
 
 AUTO_DELIMITER = "auto"
@@ -262,12 +263,12 @@ def read_csv_header(
     """Read exact column names without requiring a path column or reading rows."""
     selected = _normalize_delimiter(delimiter)
     if is_ssh_path(csv_path):
-        result = SshClient(csv_path).read_header(encoding=encoding, delimiter=selected, cancel_event=cancel_event)
+        result = recent_header(csv_path, encoding=encoding, delimiter=selected, cancel_event=cancel_event)
         result["columns"] = tuple(result["columns"])
         _validate_column_names(result["columns"])
         return result
     try:
-        with local_source_file(csv_path, cancel_event=cancel_event) as local_path, open(local_path, "r", encoding=encoding, newline="") as handle:
+        with open(csv_path, "r", encoding=encoding, newline="") as handle:
             if selected == AUTO_DELIMITER:
                 sample = handle.read(65536)
                 selected = _detect_delimiter(sample, "")
@@ -476,7 +477,7 @@ class CsvDatasetSource(DatasetSource):
     def load(self, *, cancel_event=None, progress=None) -> AnnotationDataset:
         """Parse rows once, checking the declared columns before the data records."""
         source_path = normalize_source_path(self.config.csv_path)
-        with local_source_file(source_path, cancel_event=cancel_event) as local_path:
+        with recent_table(source_path, cancel_event=cancel_event) as local_path:
             header, rows, delimiter = self._read_rows(
                 local_path, cancel_event=cancel_event, progress=progress
             )
