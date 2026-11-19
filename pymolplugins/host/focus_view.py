@@ -26,6 +26,11 @@ class FocusLayer:
     names: list
     copy_indices: dict
     counts: tuple
+    contact_layers: dict
+    focus_selection: str
+    frame_selection: str
+    pocket_selection: str
+    surface: str = ""
 
     @property
     def copies(self):
@@ -34,6 +39,43 @@ class FocusLayer:
     def delete(self, api):
         for name in self.names:
             api.delete(name)
+
+    def show_contacts(self, api, kinds):
+        for kind, name in self.contact_layers.items():
+            (api.enable if kind in kinds else api.disable)(name)
+
+    def move_camera(self, api, camera):
+        if camera == "center":
+            api.center(self.focus_selection, state=self.state, animate=0.25)
+        elif camera == "frame":
+            api.zoom(self.frame_selection, 4, state=self.state, complete=1, animate=0.3)
+
+    def show_surface(self, api, enabled):
+        if self.surface:
+            (api.enable if enabled else api.disable)(self.surface)
+        elif enabled:
+            self.surface = _create_pocket_surface(api, self)
+            self.names.append(self.surface)
+
+
+def _create_pocket_surface(api, layer):
+    """Calculate a molecular surface on only the extracted polymer shell."""
+    if not api.count_atoms(layer.pocket_selection, state=layer.state):
+        raise ValueError("No nearby polymer residues")
+    name = api.get_unused_name(f"{layer.copies[0]}_pocket_surface")
+    scope = f"%{name}"
+    try:
+        api.create(name, layer.pocket_selection, source_state=layer.state, target_state=1, zoom=0)
+        api.hide("everything", scope)
+        api.set("surface_solvent", 0, name)
+        api.set("surface_color", "gray80", name)
+        api.set("transparency", 0.55, name)
+        api.mask(scope)
+        api.show("surface", scope)
+    except Exception:
+        api.delete(name)
+        raise
+    return name
 
 
 def picked_source(api, picked, current):
@@ -131,13 +173,15 @@ def draw_focus(api, prefix, source, index, state, residue):
         util.cbc(scope, _self=api)
         api.color("yellow", f"{scope} and organic and elem C")
         util.cnc(scope, _self=api)
-        draw_interface_contacts(api, prefix, coords, polar, salt, pi, names)
-        api.zoom(f"({focus}) or ({sidechains})", 4, state=state, animate=0)
-        api.center(focus, state=state, animate=0)
+        layers = draw_interface_contacts(api, prefix, coords, polar, salt, pi, names)
     except Exception:
         for name in names:
             api.delete(name)
         raise
     _, chain, resi, resn = residue
     label = f"{source} / {chain or '–'} / {resn} {resi}"
-    return FocusLayer(source, state, residue, label, names, copy_indices, (len(polar), len(salt), len(pi)))
+    return FocusLayer(
+        source, state, residue, label, names, copy_indices, (len(polar), len(salt), len(pi)),
+        layers, focus, f"({focus}) or ({surrounding})",
+        f"({neighborhood}) and %{source} and polymer and not elem H",
+    )

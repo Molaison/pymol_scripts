@@ -9,11 +9,23 @@ from pymol.wizard import Wizard
 from .focus_view import RADIUS, draw_focus, focus_identity, picked_source
 
 
+_CAMERAS = {"keep": "Keep view", "center": "Center smoothly", "frame": "Frame pocket"}
+_CONTACT_LEVELS = {
+    "off": ("Off", ()),
+    "polar": ("Polar", ("polar_contacts",)),
+    "ionic": ("Polar + salts", ("polar_contacts", "salt_bridges")),
+    "interface": ("Interface", ("polar_contacts", "salt_bridges", "pi_stacks")),
+}
+
+
 class InteractiveFocus(Wizard):
     def __init__(self, api):
         super().__init__(_self=api)
         self.layer = None
-        self.previous_view = None
+        self.camera = self.session.get("camera", "keep")
+        self.contacts = self.session.get("contacts", "interface")
+        self.surface_enabled = False
+        self.surface_note = ""
         self.error = ""
         self.closed = False
         self.handling_pick = False
@@ -40,9 +52,25 @@ class InteractiveFocus(Wizard):
     def get_panel(self):
         return [
             [1, f"Interactive focus ({RADIUS:g} A)", ""],
+            [3, f"Camera: {_CAMERAS[self.camera]}", "camera"],
+            [3, f"Contacts: {_CONTACT_LEVELS[self.contacts][0]}", "contacts"],
+            [2, "Pocket surface: " + ("On" if self.surface_enabled else "Off"),
+             "cmd.get_wizard().toggle_surface()"],
             [2, "Clear focus", "cmd.get_wizard().clear()"],
             [2, "Done", "cmd.set_wizard()"],
         ]
+
+    def get_menu(self, tag):
+        if tag == "camera":
+            return [[2, "Camera on click", ""]] + [
+                [1, label, f"cmd.get_wizard().set_camera({key!r})"] for key, label in _CAMERAS.items()
+            ] + [[1, "Frame this pocket once", "cmd.get_wizard().frame_once()"]]
+        if tag == "contacts":
+            return [[2, "Show contacts", ""]] + [
+                [1, label, f"cmd.get_wizard().set_contacts({key!r})"]
+                for key, (label, _kinds) in _CONTACT_LEVELS.items()
+            ]
+        return super().get_menu(tag)
 
     def get_prompt(self):
         if self.error:
@@ -50,10 +78,47 @@ class InteractiveFocus(Wizard):
         if self.layer is None:
             return ["Click a residue or ligand to focus."]
         hbonds, salts, stacks = self.layer.counts
-        return [
-            self.layer.label,
-            f"Teal polar {hbonds}  |  Magenta salt bridges {salts}  |  Violet pi stacks {stacks}",
-        ]
+        labels = (
+            ("polar_contacts", f"Teal polar {hbonds}"),
+            ("salt_bridges", f"Magenta salt bridges {salts}"),
+            ("pi_stacks", f"Violet pi stacks {stacks}"),
+        )
+        kinds = _CONTACT_LEVELS[self.contacts][1]
+        prompt = [self.layer.label]
+        if kinds:
+            prompt.append("  |  ".join(label for kind, label in labels if kind in kinds))
+        if self.surface_note:
+            prompt.append(self.surface_note)
+        return prompt
+
+    def set_camera(self, mode):
+        self.camera = self.session["camera"] = mode
+        if self.layer:
+            self.layer.move_camera(self.cmd, mode)
+        self.cmd.refresh_wizard()
+
+    def frame_once(self):
+        if self.layer:
+            self.layer.move_camera(self.cmd, "frame")
+
+    def set_contacts(self, level):
+        self.contacts = self.session["contacts"] = level
+        if self.layer:
+            self.layer.show_contacts(self.cmd, _CONTACT_LEVELS[level][1])
+        self.cmd.refresh_wizard()
+
+    def toggle_surface(self):
+        self.surface_enabled = not self.surface_enabled
+        self._update_surface()
+        self.cmd.refresh_wizard()
+
+    def _update_surface(self):
+        self.surface_note = ""
+        if self.layer:
+            try:
+                self.layer.show_surface(self.cmd, self.surface_enabled)
+            except Exception as error:
+                self.surface_note = f"Pocket surface: {error}"
 
     def do_select(self, name):
         if self.closed or self.handling_pick or name != self.capture:
@@ -82,13 +147,13 @@ class InteractiveFocus(Wizard):
             self.clear()
             self.cmd.select(self.capture, "none", enable=1, quiet=1)
         elif self.layer and self.layer.source not in self.cmd.get_names("objects", enabled_only=1):
-            self.clear(restore_view=False)
+            self.clear()
 
     def do_state(self, _state):
         if self.layer and not self.handling_pick:
             source = self.layer.source
             if source not in self.cmd.get_names("objects") or self.layer.state != self.cmd.get_object_state(source):
-                self.clear(restore_view=False)
+                self.clear()
 
     def _focus_pick(self, selection):
         try:
@@ -101,26 +166,24 @@ class InteractiveFocus(Wizard):
             if previous and (source, state, residue) == (previous.source, previous.state, previous.residue):
                 self.clear()
                 return
-            before = self.cmd.get_view()
             self.layer = draw_focus(self.cmd, self.prefix, source, index, state, residue)
             if previous:
                 previous.delete(self.cmd)
-            else:
-                self.previous_view = before
+            self.layer.show_contacts(self.cmd, _CONTACT_LEVELS[self.contacts][1])
+            self._update_surface()
+            self.layer.move_camera(self.cmd, self.camera)
             self.error = ""
         except Exception as error:
             self.error = f"Focus skipped: {error}"
             print_exc()
         self.cmd.refresh_wizard()
 
-    def clear(self, restore_view=True):
+    def clear(self):
         layer, self.layer = self.layer, None
-        view, self.previous_view = self.previous_view, None
         self.error = ""
+        self.surface_note = ""
         if layer:
             layer.delete(self.cmd)
-        if view and restore_view:
-            self.cmd.set_view(view, animate=0)
         if not self.closed:
             self.cmd.refresh_wizard()
 

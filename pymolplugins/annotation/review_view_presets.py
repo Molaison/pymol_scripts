@@ -236,7 +236,7 @@ def _capture_interactions(api, first, second, state):
     return typed, models
 
 
-def _cylinders(api, source, kind, pairs, color, radius, dash):
+def _cylinders(api, source, kind, pairs, color, radius, dash, *, zoom=-1):
     import numpy as np
     from pymol.cgo import CYLINDER
 
@@ -251,7 +251,7 @@ def _cylinders(api, source, kind, pairs, color, radius, dash):
             body.extend((CYLINDER, *a, *b, radius, *color, *color))
     if body:
         name = api.get_unused_name(f"{source}_{kind}")
-        api.load_cgo([float(value) for value in body], name)
+        api.load_cgo([float(value) for value in body], name, zoom=zoom)
         return name
 
 
@@ -263,25 +263,29 @@ def _dots(api, source, kind, points, color, radius):
         body.extend((SPHERE, *map(float, xyz), radius))
     if len(body) > 6:
         name = api.get_unused_name(f"{source}_{kind}")
-        api.load_cgo(body, name)
+        api.load_cgo(body, name, zoom=0)
         return name
 
 
 def draw_interface_contacts(api, source, coords, polar, salt, pi_pairs, names):
     """Draw the contact layers shared by Interface and Interactive focus."""
+    layers = {}
     for kind, pairs, color, radius, dash in (
         ("polar_contacts", polar, (0.12, 0.76, 0.69), 0.06, 0.45),
         ("salt_bridges", salt, (0.91, 0.26, 0.62), 0.13, 1.1),
     ):
         name = _cylinders(api, source, kind, ((coords[a], coords[b]) for a, b in sorted(pairs)),
-                          color, radius, dash)
+                          color, radius, dash, zoom=0)
         if name is not None:
             names.append(name)
+            layers[kind] = name
     name = _dots(api, source, "pi_stacks",
                  (a + (b - a) * t for a, b in pi_pairs for t in (0, .25, .5, .75, 1)),
                  (0.46, 0.51, 1.0), 0.19)
     if name is not None:
         names.append(name)
+        layers["pi_stacks"] = name
+    return layers
 
 
 def _capture_interface(api, source, protein, partners, ligand, radius, scope):
