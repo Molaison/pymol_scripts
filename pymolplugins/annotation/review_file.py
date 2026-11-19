@@ -40,11 +40,23 @@ def review_table_layer(path, raw, table_path):
     """Read the table options of a PyMOL skill bundle alongside its declared table."""
     if not isinstance(raw, dict) or raw.get("mode") != "bundle" or ntpath.basename(path) != "review.json":
         return raw
-    source = parse_ssh_path(table_path).path if is_ssh_path(table_path) else table_path
-    compare = ntpath.normcase if os.name == "nt" and not is_ssh_path(table_path) else str
-    if compare(ntpath.basename(source)) != compare(bundle_table_name(raw)):
+    if not _bundle_matches_table(raw, table_path):
         return {}
     return {name: raw[name] for name in _BUNDLE_TABLE_FIELDS if name in raw}
+
+
+def _bundle_matches_table(raw, table_path):
+    source = parse_ssh_path(table_path).path if is_ssh_path(table_path) else table_path
+    compare = ntpath.normcase if os.name == "nt" and not is_ssh_path(table_path) else str
+    return compare(ntpath.basename(source)) == compare(bundle_table_name(raw))
+
+
+def bundle_view_config(review, table_path):
+    """Return the generated Bundle manifest for its own score table."""
+    for path, raw in review.layers:
+        if ntpath.basename(path) == "review.json" and bundle_table_name(raw) and _bundle_matches_table(raw, table_path):
+            return raw
+    return None
 
 
 def review_paths(table_path):

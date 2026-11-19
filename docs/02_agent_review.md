@@ -88,7 +88,9 @@
 3. 在 **Review** 查看结构、选定的评分列和代表性 `label`。选择人工标签，点击 **Save and next**；稍后可用 **Data → Continue last review** 继续。
 4. 如需交接，使用 **Data → Export review handoff…** 导出进度与标签摘要；它不包含结构文件。导出带标注的表格时选择新的输出路径。
 
-插件从 Bundle 清单读取结构路径列、显示列、标签列和可选的行 ID。配置修改写入 `review.override.json`，人工标注另存。完整的 ligand pocket、共价键及校准膜视图由 PyMOL skill 的 `acc_bundle_open` 渲染。详见 [CSV、SSH 与审阅步骤](structure_annotator_csv_walkthrough.md)。
+插件从 Bundle 清单读取结构路径列、显示列、标签列和可选的行 ID。结构载入后，插件按 `review.json` 自动应用 PyMOL skill 的视图，包括已声明的配体口袋、共价连接和校准膜。切换候选时会重新应用视图。视图失败时，**Review** 显示原因，结构、评分和候选切换仍可用。配置修改写入 `review.override.json`，人工标注另存。[CSV、SSH 与审阅步骤](structure_annotator_csv_walkthrough.md)
+
+插件安装包自带 Bundle 渲染器。更新 PyMOL skill 的 Bundle 渲染时，同步更新插件 `pymolplugins/annotation/_bundle_skill/` 内的四个脚本和 skill 的 `references/BUNDLE_MODE.md`，再运行 `python scripts/package_plugin.py`。
 
 ## 用 Step commands 预设调整显示
 

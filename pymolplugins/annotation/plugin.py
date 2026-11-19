@@ -34,7 +34,7 @@ from pymolplugins.annotation.review_actions import save_annotations, undo_annota
 from pymolplugins.annotation.score_summary import prepare_score_summary
 from pymolplugins.annotation.command_templates import format_commands
 from pymolplugins.annotation.review_file import (
-    REVIEW_KEYS, bundle_table_name, check_review_unchanged, read_review_file, review_paths,
+    REVIEW_KEYS, bundle_table_name, bundle_view_config, check_review_unchanged, read_review_file, review_paths,
     validate_review_columns, write_review_override,
 )
 from pymolplugins.annotation.path_formats import rewrite_path
@@ -536,6 +536,7 @@ class AnnotatorState:
     navigation_generation: int = -1
     state_path: str = ""
     review_reference: dict = field(default_factory=dict)
+    bundle_view: Optional[dict] = None
 
     def values(self) -> List[str]:
         return _split_values(self.values_text) or ["Good", "Bad"]
@@ -887,7 +888,7 @@ def _runtime_snapshot() -> Dict[str, object]:
         "dataset_generation", "entries", "files", "index", "undo_history", "annotated_indices",
         "annotated_entry_ids", "row_annotation_store", "materialized_paths",
         "materialization_errors", "navigation_session", "managed_objects",
-        "navigation_generation", "current_object", "state_path", "review_reference",
+        "navigation_generation", "current_object", "state_path", "review_reference", "bundle_view",
         "sampling", "filtered_count", "steps", "step_assets", "step_materialized", "step_context",
     )
     snapshot: Dict[str, object] = {}
@@ -3349,6 +3350,7 @@ class _PreparedCsvLoad:
     wsl_distribution: str = ""
     state_path: str = ""
     review_config: dict = field(default_factory=dict)
+    bundle_view: Optional[dict] = None
     step_assets: dict = field(default_factory=dict)
     step_materialized: dict = field(default_factory=dict)
 
@@ -3878,6 +3880,7 @@ def _prepare_csv_load(
         source_fingerprint=after,
         state_path=dataset_state_path(canonical_csv, source_mode="csv", csv_path=canonical_csv),
         review_config=review.config,
+        bundle_view=bundle_view_config(review, canonical_csv),
         step_assets=prepared_assets, step_materialized=prepared_cache,
         navigation_session=_new_navigation_session(active_entries, _resume_entry_index(active_entries, requested_entry, requested_index)),
     )
@@ -3923,6 +3926,7 @@ def _commit_prepared_csv_load(plan: _PreparedCsvLoad) -> Dict[str, object]:
         STATE.state_path = plan.state_path
         STATE.review_reference = {key: copy.deepcopy(getattr(STATE, key)) for key in REVIEW_KEYS}
         STATE.review_reference.update(copy.deepcopy(plan.review_config))
+        STATE.bundle_view = plan.bundle_view
         STATE.all_entries = list(dataset.entries)
         STATE.row_annotation_store = plan.row_annotation_store
         STATE.undo_history.clear()
@@ -4159,6 +4163,7 @@ def _commit_prepared_directory_load(plan):
         STATE.dataset = plan.dataset
         STATE.state_path = plan.state_path
         STATE.review_reference = {}
+        STATE.bundle_view = None
         STATE.all_entries = list(plan.entries)
         STATE.row_annotation_store = plan.annotation_store
         _install_entries(plan.entries, index=plan.index, active_entries=plan.entries, navigation_session=plan.navigation_session)
@@ -4295,6 +4300,7 @@ def sa_load_groups(parent: str = "", review_path: str = "scene-review.json", res
             config.pop("source_mode", None)
             _apply_persisted_config(config)
         STATE.source_mode = "groups"
+        STATE.bundle_view = None
         STATE.scene_groups, STATE.scene_parent = names, parent
         STATE.dataset_dir, STATE.csv_path, STATE.state_path = os.path.dirname(path), "", path
         STATE.reference_column, STATE.steps = "", []
@@ -5858,6 +5864,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._history_restore = None
         self._syncing_widgets = True
         self._quick_view = ""
+        self._last_bundle_view = None
         self._interface_radius = "4"
         self._mass_chain = None
         self.review = None
@@ -7544,8 +7551,11 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                 and STATE.current_object in cmd.get_names("objects"))
 
     def _prepare_candidate_view(self, owner, line):
+        from .bundle_view import BundleViewRequest, prepare_bundle_view
         from .review_view_presets import REVIEW_VIEW_COMMANDS, prepare_review_command
 
+        if isinstance(line, BundleViewRequest):
+            return prepare_bundle_view(cmd, owner, line)
         if owner in STATE.managed_objects:
             _candidate_bundles.check_command_references(owner, [(1, line)])
         if line.split(None, 1)[0] in REVIEW_VIEW_COMMANDS:
@@ -7553,23 +7563,41 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         return owner, None, None, lambda _: _execute_checked(cmd, line)
 
     def _draw_candidate_view(self, owner, source, action, draw, data, exclusive):
+        from .bundle_view import _draw_bundle
         from .review_view_presets import draw_review_view
 
         with _capture_command_products(owner):
             if action is None:
                 draw(data)
             else:
-                draw_review_view(cmd, source, action, draw, data, exclusive=exclusive)
+                draw_review_view(cmd, source, action, draw, data, exclusive=exclusive or action is _draw_bundle)
 
     def _start_candidate_views(self, recipes=(), warnings=()):
+        from .bundle_view import BundleViewRequest
         from .review_view_presets import QUICK_VIEWS, quick_view_command
 
         if not hasattr(self, "_view_jobs"):
             return
+        if STATE.bundle_view is not self._last_bundle_view:
+            self._last_bundle_view = STATE.bundle_view
+            if STATE.bundle_view is not None and self._quick_view:
+                self._quick_view = ""
+                for button in self.quick_view_buttons.values():
+                    button.setChecked(False)
+        title = QUICK_VIEWS.get(self._quick_view, "")
+        owner = STATE.current_object
         if self._quick_view:
-            owner = STATE.current_object
             recipes = [(owner, quick_view_command(self._quick_view, owner, self._interface_radius, self._mass_chain))]
-        self._view_jobs.start(self._view_identity(), recipes, title=QUICK_VIEWS.get(self._quick_view, ""),
+        elif STATE.source_mode == "csv" and STATE.bundle_view is not None and owner:
+            entry = STATE.current_entry()
+            if entry is not None:
+                column = STATE.bundle_view.get("path_column", "structure_path")
+                request = BundleViewRequest(
+                    STATE.csv_path, STATE.bundle_view, entry.metadata.get(column, ""), entry.display_name
+                )
+                recipes = [*recipes, (owner, request)]
+                title = "Bundle view"
+        self._view_jobs.start(self._view_identity(), recipes, title=title,
                               warnings=warnings, exclusive=bool(self._quick_view))
 
     def _choose_quick_view(self, name, radius=None):
