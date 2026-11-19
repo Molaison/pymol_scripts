@@ -22,6 +22,7 @@ from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 import traceback
 import sys
 from pymolplugins.annotation.filtering import compile_filter, compile_view_filter
+from pymolplugins.annotation.header_filters import read_header_filters
 from pymolplugins.annotation.persistence import pending_errors, submit_write
 from pymolplugins.annotation.sources.csv_source import CsvReadCancelled, CsvSourceError, read_csv_header
 from pymolplugins.annotation.review_config import default_fields, decode_value, field_key, missing_required, validate_fields, validate_score_config
@@ -5498,7 +5499,10 @@ class _DatasetTableModel(QtCore.QAbstractTableModel):
 
     def profile_input(self):
         """Return the row snapshot and metadata columns for the header worker."""
-        return self._rows, self._display_columns, self._column_kinds, self._mode == "preview"
+        preview = self._mode == "preview"
+        filters = read_header_filters("" if preview else STATE.filter_text)
+        source = tuple(STATE.all_entries) if filters.selections and self._display_columns else ()
+        return self._rows, self._display_columns, self._column_kinds, preview, filters, source
 
     def _entry_id(self, row: int) -> str:
         if not 0 <= row < len(self._rows):
@@ -5903,16 +5907,15 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             edit.setCursorPosition(edit.cursorPosition() - 1)
         edit.setFocus()
 
-    def _append_header_filter(self, expression):
+    def _change_header_filter(self, column, choice):
         if self._table_mode != "active" or self._csv_task_id or STATE.dataset is None:
             return
-        query = STATE.filter_text.strip()
-        if query.startswith("where:"):
-            previous = query[6:].strip()
-        else:
-            previous = f"text_search({query!r})" if query else ""
-        self.filter_mode_combo.setCurrentIndex(1)
-        self.filter_edit.setText(f"({previous}) and ({expression})" if previous else expression)
+        query = read_header_filters(STATE.filter_text).change(column, choice).query()
+        if query == STATE.filter_text:
+            return
+        condition = query.startswith("where:")
+        self.filter_mode_combo.setCurrentIndex(1 if condition else 0)
+        self.filter_edit.setText(query[6:] if condition else query)
         self.sort_column_combo.setCurrentText(STATE.sort_column)
         self.sort_desc_cb.setChecked(STATE.sort_descending)
         self._apply_view()
@@ -7773,7 +7776,6 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             self.position_label.setText("")
             self.current_title_label.setText("No matching candidates" if STATE.all_entries else "")
             self.goto_spin.setRange(1, 1)
-            self._dataset_model.clear_rows()
             self.review.selection.clear()
             self.metadata_table.setRowCount(0)
             self._dataset_table_signature = None
@@ -7786,10 +7788,13 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             if STATE.all_entries:
                 self._dataset_model.set_active((), STATE.display_columns, STATE.source_mode,
                                                normalize_label_key(STATE.label_name), {})
+                self._display_source_columns()
                 self.view_summary_label.setText("0 matches")
                 self.view_scope_label.setText(f"Filtered 0 / {len(STATE.all_entries):,}")
                 self.view_scope_label.show()
                 self._refresh_filter_button()
+            else:
+                self._dataset_model.clear_rows()
             self.review.refresh()
             return
 

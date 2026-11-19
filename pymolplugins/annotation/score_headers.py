@@ -7,15 +7,17 @@ import traceback
 from pymol.Qt import QtCore, QtGui, QtWidgets
 
 from .column_profiles import build_column_profiles, format_proportion
-from .filtering import column_expression
+from .header_filters import HeaderChoice
 
 
 class ScoreProfileHeader(QtWidgets.QHeaderView):
-    filterRequested = QtCore.Signal(str)
+    filterRequested = QtCore.Signal(str, object)
 
     def __init__(self, table, model, get_executor):
         super().__init__(QtCore.Qt.Horizontal, table)
         self.profiles = {}
+        self.selections = {}
+        self._legend_rows = 4
         self.can_filter = False
         self._expanded = False
         self._future = None
@@ -35,14 +37,18 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
         self._future = None
         self.profiles = {}
         self._brush.reset()
-        rows, columns, kinds, preview = self.model().profile_input()
+        rows, columns, kinds, preview, filters, source = self.model().profile_input()
         self.can_filter = not preview
-        self._expanded = bool(rows and columns)
+        self._expanded = bool(columns and (rows or filters.selections))
         self._first_profile = self.model().columnCount() - len(columns)
+        self.selections = {index: filters.selections[column]
+                           for index, column in enumerate(columns, self._first_profile)
+                           if column in filters.selections}
         if self._expanded:
             self._cancel = Event()
             self._future = self._get_executor().submit(
-                build_column_profiles, rows, columns, kinds, preview=preview, cancelled=self._cancel
+                build_column_profiles, rows, columns, kinds, preview=preview, cancelled=self._cancel,
+                filters=filters, source=source,
             )
             self._timer.start()
         self.updateGeometry()
@@ -58,7 +64,16 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
             self.profiles = dict(enumerate(future.result(), self._first_profile))
         except Exception:
             traceback.print_exc()
+        rows = max([4] + [len(profile.categories) + bool(profile.other or self.is_selected(index, "other"))
+                          for index, profile in self.profiles.items()])
+        if rows != self._legend_rows:
+            self._legend_rows = rows
+            self.updateGeometry()
+            self.geometriesChanged.emit()
         self.viewport().update()
+
+    def is_selected(self, index, kind, label=None):
+        return any(choice.key == (kind, label) for choice in self.selections.get(index, ()))
 
     def _summary_font(self):
         font = QtGui.QFont(self.font())
@@ -69,7 +84,7 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
         hint = super().sizeHint()
         if self._expanded:
             line = QtGui.QFontMetrics(self._summary_font()).height() + 1
-            hint.setHeight(hint.height() + 6 * line + 8)
+            hint.setHeight(hint.height() + (2 + self._legend_rows) * line + 8)
         return hint
 
     def summary_rect(self, section):
@@ -102,15 +117,26 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
         missing = f"Missing {profile.missing:,} ({format_proportion(profile.missing, profile.total)})"
         for offset, text in enumerate((missing, f"{profile.distinct:,} distinct")):
             bounds = QtCore.QRect(rect.x(), rect.y() + offset * line, rect.width(), line)
+            if offset == 0 and self.is_selected(index, "missing"):
+                painter.fillRect(bounds, QtGui.QColor("#dbe6fc"))
+                text = "✓ " + text
             painter.drawText(bounds, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
                              metrics.elidedText(text, QtCore.Qt.ElideRight, bounds.width()))
         rect = rect.adjusted(0, 2 * line, 0, 0)
         if profile.bins:
-            self._paint_histogram(painter, rect, line, profile, self._brush.selected_bins(index))
+            limits = next((choice.value for choice in self.selections.get(index, ()) if choice.kind == "range"), None)
+            active = profile.bins_overlapping(*limits) if limits else None
+            self._paint_histogram(painter, rect, line, profile, self._brush.selected_bins(index), active)
         else:
-            categories = profile.categories + (("Other", profile.other),) if profile.other else profile.categories
+            has_other = profile.other or self.is_selected(index, "other")
+            categories = profile.categories + (("Other", profile.other),) if has_other else profile.categories
             for offset, (name, count) in enumerate(categories):
                 row = QtCore.QRect(rect.x(), rect.y() + line * offset, rect.width(), line)
+                selected = (self.is_selected(index, "category", name) if offset < len(profile.categories)
+                            else self.is_selected(index, "other"))
+                if selected:
+                    painter.fillRect(row, QtGui.QColor("#dbe6fc"))
+                    name = "✓ " + name
                 self._paint_pair(painter, row, name, format_proportion(count, profile.total))
 
     @staticmethod
@@ -123,20 +149,21 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
         painter.drawText(row, QtCore.Qt.AlignLeft | align,
                          metrics.elidedText(left, QtCore.Qt.ElideRight, available))
 
-    def _paint_histogram(self, painter, rect, line, profile, selection):
+    def _paint_histogram(self, painter, rect, line, profile, selection, active):
         width = max(0, rect.width())
         height = 3 * line - 4
         baseline = rect.y() + height
         peak = max(profile.bins)
         minimum, maximum = profile.minimum, profile.maximum
-        if selection:
-            first, last = selection
+        if selection or active:
+            first, last = selection or active
             left = first * width // len(profile.bins)
             right = (last + 1) * width // len(profile.bins)
             painter.fillRect(rect.x() + left, rect.y(), right - left, height, QtGui.QColor("#dbe6fc"))
-            selected = profile.selected_range(first, last)
-            if selected:
-                minimum, maximum = selected
+            if selection:
+                selected = profile.selected_range(first, last)
+                if selected:
+                    minimum, maximum = selected
         for index, count in enumerate(profile.bins):
             if count:
                 left = index * width // len(profile.bins)
@@ -153,14 +180,18 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
             profile = self.profiles.get(index)
             if profile is not None:
                 name = self.model().headerData(index, QtCore.Qt.Horizontal, QtCore.Qt.DisplayRole)
-                lines = [str(name), f"{profile.total:,} displayed rows · {profile.distinct:,} distinct",
+                scope = "rows matching the other filters" if index in self.selections else "displayed rows"
+                lines = [str(name), f"{profile.total:,} {scope} · {profile.distinct:,} distinct",
                          f"Missing: {profile.missing:,} ({format_proportion(profile.missing, profile.total)})"]
                 if profile.bins:
                     lines.append(f"Range: {profile.minimum} to {profile.maximum}")
+                    limits = next((choice.value for choice in self.selections.get(index, ()) if choice.kind == "range"), None)
+                    if limits:
+                        lines.append(f"Selected range: {limits[0]} to {limits[1]}")
                     if self.can_filter:
-                        lines.append("Drag across the histogram to add a range filter")
+                        lines.append("Drag across the histogram to set the range for this column")
                 elif profile.categories and self.can_filter:
-                    lines.append("Click a category to add a filter")
+                    lines.append("Click categories to select or clear them")
                 lines.extend(f"{value}: {count:,} ({format_proportion(count, profile.total)})"
                              for value, count in profile.categories)
                 if profile.other:
@@ -214,30 +245,27 @@ class _HeaderFilterInteraction(QtCore.QObject):
             return None
         line = QtGui.QFontMetrics(self.header._summary_font()).height() + 1
         y = point.y() - rect.top()
-        if y < line and profile.missing:
+        if y < line and (profile.missing or self.header.is_selected(index, "missing")):
             return index, "missing", None
         if profile.bins and 2 * line <= y < 5 * line - 4:
             return index, "bins", self._bin_at(index, point.x())
         category = y // line - 2
         if 0 <= category < len(profile.categories):
             return index, "category", category
-        if category == len(profile.categories) and profile.other:
+        if category == len(profile.categories) and (profile.other or self.header.is_selected(index, "other")):
             return index, "other", None
         return None
 
-    def _expression(self, index, kind, value):
-        name = self.header.model().headerData(index, QtCore.Qt.Horizontal, QtCore.Qt.DisplayRole)
-        field = column_expression(name)
+    def _choice(self, index, kind, value):
         profile = self.header.profiles[index]
         if kind == "missing":
-            return f"{field} is None"
+            return HeaderChoice("missing")
         if kind == "category":
-            return f"{field} == {profile.categories[value][0]!r}"
+            return HeaderChoice("category", profile.categories[value][0])
         if kind == "other":
-            return " and ".join([f"{field} is not None"] +
-                                [f"{field} != {label!r}" for label, _count in profile.categories])
+            return HeaderChoice("other", tuple(label for label, _count in profile.categories))
         bounds = profile.selected_range(*self.selected_bins(index))
-        return f"{bounds[0]!r} <= {field} <= {bounds[1]!r}" if bounds else ""
+        return HeaderChoice("range", bounds) if bounds else None
 
     def eventFilter(self, _widget, event):
         event_type = event.type()
@@ -263,11 +291,12 @@ class _HeaderFilterInteraction(QtCore.QObject):
             if self.pressed[1] == "bins":
                 self.current_bin = self._bin_at(self.pressed[0], event.pos().x())
                 target = self.pressed
-            expression = self._expression(*target) if target == self.pressed else ""
+            choice = self._choice(*target) if target == self.pressed else None
             self.reset()
             self.viewport.update()
-            if expression:
-                self.header.filterRequested.emit(expression)
+            if choice is not None:
+                name = self.header.model().headerData(target[0], QtCore.Qt.Horizontal, QtCore.Qt.DisplayRole)
+                self.header.filterRequested.emit(name, choice)
             return True
         return False
 

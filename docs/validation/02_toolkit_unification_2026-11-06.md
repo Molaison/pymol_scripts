@@ -317,3 +317,11 @@ Scores 表头在后台计算当前表格行的类别占比、缺失、不同值�
 点击 Scores 表头的类别、Other 或 Missing，或者拖选直方图，向当前 Filter 追加条件并应用。组合时保留原表达式优先级、Text search 和排序。数值范围取所选分箱中的实际边界，空分箱不会生成条件。字段比较、匹配函数参数和 Add condition… 的 Value 提供当前数据源的列值补全。
 
 47 项相关测试通过。Windows PyMOL 3.1.3.1 / Qt 5.15.8 在独立隐藏桌面验证真实点击、拖选、已有 OR 与 Text search 保留，以及类别和数值补全。[验收结果](../../output/23_header_filters/01_result.json) · [本机安装记录](../../output/23_header_filters/local_install/01_install_result.json)
+
+## 2026-11-19 表头多选和范围替换
+
+同列类别以 OR 组合，可点击取消；不同列以 AND 组合。数值拖选替换该列的表头范围。生成的 `header_filter(…)` 表达式在保存和重开后仍能由表头编辑。表头计算本列选项时保留其他条件，已选的零计数类别保持可点。
+
+Windows PyMOL 3.1.3.1 / Qt 5.15.8 独立隐藏桌面验收了真实多选、跨列组合、0 行时恢复、重开后取消、Other/Missing 和扩大范围。[验收结果](../../output/24_header_multiselect/01_result.json) · [本机安装记录](../../output/24_header_multiselect/local_install/01_install_result.json)
+
+50 项定向回归通过。另跑核心 Filter 四项，旧 CSV 更换列名后仍引用旧显示列的测试失败。同一失败已在本轮基线 `3d9a80a` 独立复现。
