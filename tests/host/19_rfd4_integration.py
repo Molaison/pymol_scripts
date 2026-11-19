@@ -34,7 +34,7 @@ def wait_for(predicate, timeout=55):
 def check():
     try:
         import pymolplugins
-        assert pymolplugins.__version__ == "0.19.0"
+        assert pymolplugins.__version__ == plugins.plugins["pymol_plugins"].get_version()
         assert "rfd4_pymol" not in plugins.plugins
         assert "rfd4_studio" not in cmd.keyword
         assert "pymolplugins.rfd4.panel" not in sys.modules

@@ -60,18 +60,26 @@ def review_table_layer(path, raw, table_path):
         if not bundle_matches_table(raw, table_path):
             return {}
         raw = {name: raw[name] for name in (*_BUNDLE_TABLE_FIELDS, "step_cmd") if name in raw}
+        raw.setdefault("step_cmd", "")
     return {**raw, "step_cmd": ""} if is_legacy_bundle_step(raw.get("step_cmd")) else raw
 
 
 def is_legacy_bundle_step(step_cmd):
     if not isinstance(step_cmd, str):
         return False
+    lines = tuple(line.strip() for line in step_cmd.splitlines() if line.strip())
+    return lines in _LEGACY_BUNDLE_STEPS
+
+
+def _uses_bundle_sidecar(step_cmd):
+    """Recognize a migrated sidecar when the shared command is disabled."""
+    if not isinstance(step_cmd, str):
+        return False
+    if is_legacy_bundle_step(step_cmd):
+        return True
     text_call = '/bundle_renderer("{object}", str(bundle_source))'
     path_call = '/bundle_renderer("{object}", bundle_source)'
-    lines = [line.strip() for line in step_cmd.splitlines() if line.strip()]
-    if lines and lines[-1] == text_call:
-        lines[-1] = path_call
-    return tuple(lines) in _LEGACY_BUNDLE_STEPS
+    return is_legacy_bundle_step(step_cmd.replace(text_call, path_call))
 
 
 def bundle_matches_table(raw, table_path):
@@ -89,7 +97,7 @@ def bundle_view_config(review, table_path, *, step_cmd=""):
             continue
         if bundle_table_name(raw) and bundle_matches_table(raw, table_path):
             return raw
-        if isinstance(raw, dict) and is_legacy_bundle_step(raw.get("step_cmd")):
+        if isinstance(raw, dict) and not bundle_table_name(raw) and _uses_bundle_sidecar(raw.get("step_cmd")):
             return {"view_sidecar": "bundle_view.json", "path_column": raw.get("path_column", "structure_path")}
     return None
 

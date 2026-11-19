@@ -36,6 +36,17 @@ pp_help
 
 批处理应预览准确 A/B、使用每对唯一临时名称，并在长序列验证固定 reference 只读、输出坐标、源文件 hash、失败报告与停止边界。退出码不足以证明这些检查；在 `cmd.quit()` 前写最终 JSON。
 
+## 验收安装包中的 Bundle
+
+发布候选 ZIP 构建后，在 Windows 的交互式会话中运行以下命令。启动器为验收创建隐藏桌面。PyMOL Plugin Manager 将 ZIP 安装到临时目录，随后通过 Structure Annotator 的 Open data 导入隔离夹具。
+
+```powershell
+python scripts/package_plugin.py
+.\scripts\windows\run_bundle_package_smoke.ps1 -Package .\dist\PymolPlugins-0.19.0.zip -OutputPath .\output\bundle-install.json
+```
+
+将包名换成正在验收的版本。ZIP 安装或更新渲染逻辑后，发布前使用同一个候选 ZIP 运行回归。两种旧模板分别验证内置膜视图和旧覆盖文件。新版验证两个步骤继承共用 `step_cmd` 时，每次显示仅执行一次。三种配置都检查第 1、2、1 行的膜图层和上一行的清理。以 JSON 中的 `status` 和逐次 `calls` 为验收证据。
+
 ## 验收命令和科学输出
 
 | 领域 | 核对内容 |
