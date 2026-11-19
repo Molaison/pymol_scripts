@@ -284,7 +284,8 @@ def _csv_fields(panel, form):
 
 
 def _review_page(panel):
-    from .plugin import _DatasetTableModel
+    from .plugin import _DatasetTableModel, _get_bg_executor
+    from .score_headers import ScoreProfileHeader
     page = QtWidgets.QWidget()
     layout = QtWidgets.QVBoxLayout(page)
     layout.setContentsMargins(0, 0, 0, 0)
@@ -320,6 +321,7 @@ def _review_page(panel):
     panel.export_btn.hide()
     panel.dataset_table = QtWidgets.QTableView()
     panel._dataset_model = _DatasetTableModel(panel.dataset_table)
+    panel.dataset_table.setHorizontalHeader(ScoreProfileHeader(panel.dataset_table, panel._dataset_model, _get_bg_executor))
     panel.dataset_table.setModel(panel._dataset_model)
     panel.dataset_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
     panel.dataset_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
@@ -328,7 +330,7 @@ def _review_page(panel):
     panel.dataset_table.setWordWrap(False)
     panel.dataset_table.verticalHeader().hide()
     panel.dataset_table.verticalHeader().setDefaultSectionSize(36)
-    panel.dataset_table.horizontalHeader().setDefaultSectionSize(125)
+    panel.dataset_table.horizontalHeader().setDefaultSectionSize(150)
     panel.dataset_table.horizontalHeader().setDefaultAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
     panel.dataset_table.horizontalHeader().setTextElideMode(QtCore.Qt.ElideRight)
     panel.dataset_table.clicked.connect(panel._dataset_index_clicked)

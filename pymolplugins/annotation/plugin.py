@@ -5495,6 +5495,7 @@ class _DatasetTableModel(QtCore.QAbstractTableModel):
         self._rows: List[object] = []
         self._headers = ["Source row", "Status", "Structure"]
         self._display_columns: List[str] = []
+        self._column_kinds = {}
         self._source_mode = "directory"
         self._annotation_values: Dict[str, str] = {}
         self._entry_id_to_row: Dict[str, int] = {}
@@ -5508,6 +5509,10 @@ class _DatasetTableModel(QtCore.QAbstractTableModel):
         if parent is not None and parent.isValid():
             return 0
         return len(self._headers)
+
+    def profile_input(self):
+        """Return the row snapshot and metadata columns for the header worker."""
+        return self._rows, self._display_columns, self._column_kinds, self._mode == "preview"
 
     def _entry_id(self, row: int) -> str:
         if not 0 <= row < len(self._rows):
@@ -5608,12 +5613,14 @@ class _DatasetTableModel(QtCore.QAbstractTableModel):
         display_columns: Sequence[str],
         source_mode: str,
         annotation_values: Optional[Mapping[str, str]] = None,
+        column_kinds: Optional[Mapping[str, str]] = None,
     ) -> None:
         self.beginResetModel()
         self._mode = str(mode)
         self._rows = list(rows)
         self._headers = [str(value) for value in headers]
         self._display_columns = [str(value) for value in display_columns]
+        self._column_kinds = dict(column_kinds or {})
         self._source_mode = str(source_mode)
         self._annotation_values = {
             str(key): str(value)
@@ -5655,6 +5662,7 @@ class _DatasetTableModel(QtCore.QAbstractTableModel):
             display_columns=display_columns,
             source_mode=source_mode,
             annotation_values=annotation_values,
+            column_kinds={spec.name: spec.kind for spec in STATE.dataset.column_specs} if STATE.dataset else None,
         )
 
     def clear_rows(self) -> None:
@@ -7137,6 +7145,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         }
         display_columns = list(payload.get("display_columns") or [])
         self._dataset_model.set_preview(rows, display_columns)
+        self._display_source_columns()
         self.column_picker.set_columns(payload.get("columns", ()), display_columns)
         self.view_summary_label.setText(f"Preview: {payload.get('row_count', 0):,} rows · load this CSV to annotate")
         self.review.selection.clear()
@@ -7641,7 +7650,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         file_status = self.show_file_status_action.isChecked()
         self.dataset_table.setColumnHidden(0, not source_row)
         self.dataset_table.setColumnHidden(1, not file_status)
-        self.dataset_table.horizontalHeader().setVisible(bool(STATE.display_columns or STATE.reference_column) or source_row or file_status)
+        has_metadata = bool(self._dataset_model._display_columns)
+        self.dataset_table.horizontalHeader().setVisible(has_metadata or bool(STATE.reference_column) or source_row or file_status)
 
     def _refresh_dataset_table(self) -> None:
         display_columns = list(STATE.display_columns)

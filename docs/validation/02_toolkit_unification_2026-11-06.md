@@ -305,3 +305,9 @@ PPI 预设可限定两条链；新增 `Reference · align target, compare binder
 Filter 支持命名分组、用括号组合条件、按字段匹配文本、比较及空值判断。Enter 提交当前输入，Tab 或鼠标接受补全。CSV、结构目录和场景组保存各自的命名筛选。
 
 Windows PyMOL 3.1.3.1 / Qt 5.15.8 独立隐藏桌面验收通过。结果见 [文件夹与 Filter 验收结果](../../output/21_folder_filters/01_result.json)，截图及复现脚本在同目录。22 项相关单测通过。验收范围为本机文件和场景组，SSH 路径尚待实机验收。交付为开发工作树源码。
+
+## 2026-11-19 Scores 表头和 Filter 函数补全
+
+Scores 表头在后台计算当前表格行的类别占比、缺失、不同值数量及数值直方图。筛选及抽样使用各自的可见行统计。文本函数补全先选中字段占位符，选择列后选中文本参数。Enter 提交当前表达式。
+
+45 项相关测试通过。Windows PyMOL 3.1.3.1 / Qt 5.15.8 独立隐藏桌面验证了实际绘制、键盘及鼠标补全、筛选后计数更新。[验收结果](../../output/22_score_headers/01_result.json) · [本机安装记录](../../output/22_score_headers/local_install/01_install_result.json)
