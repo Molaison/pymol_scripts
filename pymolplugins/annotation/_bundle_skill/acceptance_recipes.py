@@ -12,7 +12,7 @@ import sys
 from typing import Dict
 
 from pymol import CmdException, cmd
-from pymol.cgo import ALPHA, BEGIN, COLOR, END, LINE_LOOP, TRIANGLE_STRIP, VERTEX
+from pymol.cgo import ALPHA, BEGIN, COLOR, END, LINES, NORMAL, TRIANGLES, VERTEX
 
 
 _SCRIPT_DIR = Path(inspect.currentframe().f_code.co_filename).absolute().parent
@@ -160,17 +160,25 @@ def membrane_surface_review(
         xyz = cmd.get_coords(protein)
         x0, y0 = xyz[:, :2].min(axis=0) - 4.0
         x1, y1 = xyz[:, :2].max(axis=0) + 4.0
+        # Keep alpha-blended triangles separate from opaque edges. Mixing both
+        # primitives in one CGO crashed PyMOL 3.1.3.1 on Intel OpenGL.
+        corners = [(float(x0), float(y0)), (float(x1), float(y0)),
+                   (float(x1), float(y1)), (float(x0), float(y1))]
         for side, z in (("lower", lower), ("upper", upper)):
             name = asset_name(identity, f"membrane_{side}")
-            panel = [COLOR, 0.43, 0.55, 0.69, ALPHA, 0.18, BEGIN, TRIANGLE_STRIP]
-            for x, y in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]:
-                panel.extend([VERTEX, float(x), float(y), z])
-            panel.extend([END, ALPHA, 0.74, BEGIN, LINE_LOOP])
-            for x, y in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]:
-                panel.extend([VERTEX, float(x), float(y), z])
+            panel = [COLOR, 0.43, 0.55, 0.69, ALPHA, 0.18, BEGIN, TRIANGLES, NORMAL, 0.0, 0.0, 1.0]
+            for index in (0, 1, 2, 0, 2, 3):
+                panel.extend([VERTEX, *corners[index], z])
             panel.append(END)
-            cmd.load_cgo(panel, name)
+            cmd.load_cgo(panel, name, zoom=0)
             planes.append(name)
+            rim = [COLOR, 0.43, 0.55, 0.69, BEGIN, LINES]
+            for start, end in zip(corners, corners[1:] + corners[:1]):
+                rim.extend([VERTEX, *start, z, VERTEX, *end, z])
+            rim.append(END)
+            marker = asset_name(identity, f"membrane_{side}_rim")
+            cmd.load_cgo(rim, marker, zoom=0)
+            markers.append(marker)
         if side_labels:
             for side, z, text in zip(("lower", "upper"), (lower, upper), side_labels):
                 marker = asset_name(identity, f"membrane_{side}_label")
@@ -183,14 +191,13 @@ def membrane_surface_review(
             core_lower, core_upper = map(float, core_bounds)
             if not lower < core_lower < core_upper < upper:
                 raise CmdException("Membrane core bounds must lie inside the membrane planes.")
-            rims = [COLOR, 0.43, 0.55, 0.69, ALPHA, 0.75]
+            rims = [COLOR, 0.43, 0.55, 0.69, BEGIN, LINES]
             for z in (core_lower, core_upper):
-                rims.extend([BEGIN, LINE_LOOP])
-                for x, y in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]:
-                    rims.extend([VERTEX, float(x), float(y), z])
-                rims.append(END)
+                for start, end in zip(corners, corners[1:] + corners[:1]):
+                    rims.extend([VERTEX, *start, z, VERTEX, *end, z])
+            rims.append(END)
             marker = asset_name(identity, "membrane_core")
-            cmd.load_cgo(rims, marker)
+            cmd.load_cgo(rims, marker, zoom=0)
             markers.append(marker)
     return {"planes": planes, "markers": markers, "bias_labels": labels}
 

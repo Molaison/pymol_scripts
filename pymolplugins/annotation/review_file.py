@@ -56,23 +56,30 @@ def review_table_layer(path, raw, table_path):
     """Read the table options of a PyMOL skill bundle alongside its declared table."""
     if not isinstance(raw, dict) or ntpath.basename(path) != "review.json":
         return raw
-    if raw.get("mode") != "bundle":
-        return {**raw, "step_cmd": ""} if _has_legacy_bundle_step(raw) else raw
-    if not bundle_matches_table(raw, table_path):
-        return {}
-    return {name: raw[name] for name in _BUNDLE_TABLE_FIELDS if name in raw}
+    if raw.get("mode") == "bundle":
+        if not bundle_matches_table(raw, table_path):
+            return {}
+        raw = {name: raw[name] for name in (*_BUNDLE_TABLE_FIELDS, "step_cmd") if name in raw}
+        raw.setdefault("step_cmd", "")
+    return {**raw, "step_cmd": ""} if is_legacy_bundle_step(raw.get("step_cmd")) else raw
 
 
-def _has_legacy_bundle_step(raw):
-    step_cmd = raw.get("step_cmd") if isinstance(raw, dict) else None
+def is_legacy_bundle_step(step_cmd):
     if not isinstance(step_cmd, str):
         return False
+    lines = tuple(line.strip() for line in step_cmd.splitlines() if line.strip())
+    return lines in _LEGACY_BUNDLE_STEPS
+
+
+def _uses_bundle_sidecar(step_cmd):
+    """Recognize a migrated sidecar when the shared command is disabled."""
+    if not isinstance(step_cmd, str):
+        return False
+    if is_legacy_bundle_step(step_cmd):
+        return True
     text_call = '/bundle_renderer("{object}", str(bundle_source))'
     path_call = '/bundle_renderer("{object}", bundle_source)'
-    lines = [line.strip() for line in step_cmd.splitlines() if line.strip()]
-    if lines and lines[-1] == text_call:
-        lines[-1] = path_call
-    return tuple(lines) in _LEGACY_BUNDLE_STEPS
+    return is_legacy_bundle_step(step_cmd.replace(text_call, path_call))
 
 
 def bundle_matches_table(raw, table_path):
@@ -81,14 +88,16 @@ def bundle_matches_table(raw, table_path):
     return compare(ntpath.basename(source)) == compare(bundle_table_name(raw))
 
 
-def bundle_view_config(review, table_path):
-    """Return the generated Bundle manifest for its own score table."""
+def bundle_view_config(review, table_path, *, step_cmd=""):
+    """Choose the built-in view after merging the effective shared command."""
+    if step_cmd.strip() and not is_legacy_bundle_step(step_cmd):
+        return None
     for path, raw in review.layers:
         if ntpath.basename(path) != "review.json":
             continue
         if bundle_table_name(raw) and bundle_matches_table(raw, table_path):
             return raw
-        if _has_legacy_bundle_step(raw):
+        if isinstance(raw, dict) and not bundle_table_name(raw) and _uses_bundle_sidecar(raw.get("step_cmd")):
             return {"view_sidecar": "bundle_view.json", "path_column": raw.get("path_column", "structure_path")}
     return None
 

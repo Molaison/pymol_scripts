@@ -92,7 +92,7 @@ Host my-lab
 
 ## 可配置审阅步骤
 
-review.json 的 steps 列表定义命名对象和命令的执行顺序。固定对象只加载一次，同一路径连续使用保持启用；对齐、配色和显示均由命令决定。Steps 编辑器可添加、编辑及上下移动动作；候选浏览顺序在 Filter 中设置。未配置 steps 的普通数据继续使用原 step_cmd。
+review.json 的 steps 列表定义命名对象和命令的执行顺序。固定对象只加载一次，同一路径连续使用保持启用；对齐、配色和显示均由命令决定。Steps 编辑器可添加、编辑及上下移动动作；候选浏览顺序在 Filter 中设置。未配置 steps 的普通数据继续使用原 step_cmd。旧 Bundle 命令模板由插件内置视图兼容。新版 Bundle 的共用 step_cmd 在每次显示候选时执行一次。切回候选时重新执行一次。
 
 ## 筛选分组
 
@@ -178,7 +178,11 @@ def _build(output_dir: Path = DIST) -> Path:
 
     required = {
         f"{PLUGIN_NAME}/{name}"
-        for name in ("__init__.py", "pymolplugins/__init__.py", "plugins/pymol_plugins.py")
+        for name in (
+            "__init__.py", "pymolplugins/__init__.py", "plugins/pymol_plugins.py",
+            "pymolplugins/annotation/review_file.py",
+            "pymolplugins/annotation/_bundle_skill/acceptance_recipes.py",
+        )
     }
     with ZipFile(destination) as archive:
         names = set(archive.namelist())
