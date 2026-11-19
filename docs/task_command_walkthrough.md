@@ -6,6 +6,8 @@
 
 已加载的分子可在 **Plugin → PymolPlugins → Show presets…** 设置显示。选择对象和预设即可应用。**Copy command** 可复制同一配置，例如 `pp_view interface, model, radius=6`。
 
+在 **Plugin → PymolPlugins → Compare & align…** 或输入 `pp_align` 打开独立的结构比较窗口。勾选至少两个对象，选定参考对象。**Overlay** 直接叠加当前帧，**Align** 按选定方法拟合。Mobiles 和 Reference 可分别选择原子类型、链和残基范围，例如 `40-80+105`。多个移动对象共用 Mobiles 范围。**Clear comparison** 或关闭窗口会移除比较副本并恢复源对象的可见性。
+
 | 任务 | 入口 |
 |---|---|
 | 显示预设、界面、膜和残基配色 | `pp_view` |
@@ -129,12 +131,12 @@ pp_style_revert
 `clean_outline` 是 0.17.0 候选样式。describe 显示全局与目标影响；apply 默认不渲染，revert 恢复最近的样式快照。可用 `pp_style_list` 查看已安装版本的样式。指定真实蛋白—配体对象后可预览和运行接触：
 
 ```pymol
-pp_contacts YOUR_COMPLEX, focus="YOUR_LIGAND_SELECTION", preview=1
-pp_contacts YOUR_COMPLEX, focus="YOUR_LIGAND_SELECTION"
+pp_contacts YOUR_COMPLEX, focus="YOUR_LIGAND_SELECTION", kind=polar, preview=1
+pp_contacts YOUR_COMPLEX, focus="YOUR_LIGAND_SELECTION", kind=polar
 pp_undo
 ```
 
-预览不创建接触结果；实际运行生成受管显示对象，可按输出提示撤销。canonical interaction 默认不新增 partner 命名 selection；几何接触不等同能量结论。PLIP 和 PyRosetta 是可选后端，[worker 指南](wsl_worker.md) 说明准备和取消边界。
+用 `kind=polar` 只画氢键候选线。两侧为蛋白链时可指定 `focus="chain A", partner="chain B"`。默认的 `ligand_contacts` 报告距离内的最近重原子接触，`polar_qc` 默认同时报告极性配对与同类极性冲突。新默认结果会隐藏同一来源之前的默认结果组。需要并排查看时，为每次计算指定不同的 `group=`。日常运行用 `pp_contacts`，脚本可以用 `pp_interact_run` 设置距离阈值、表面、标签或 JSON 输出。可选后端见 [worker 指南](wsl_worker.md)。
 
 ## 清理练习场景
 
