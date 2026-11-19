@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout, wait
 from dataclasses import dataclass
 import atexit
+import base64
 import glob
 import hashlib
 import json
@@ -393,7 +394,7 @@ class SshClient:
         if self.executable.lower().endswith((".cmd", ".bat")):
             raise SshError("Choose ssh.exe or the Python login script used by your SSH launcher.")
 
-    def command(self):
+    def command(self, *, worker_source=_REMOTE_SCRIPT):
         if self.executable.lower().endswith(".py"):
             interpreter = sys.executable
             if os.path.basename(interpreter).casefold() == "pythonw.exe":
@@ -414,7 +415,7 @@ class SshClient:
             command += ["-F", self.location.config]
         # Profiles are validated against option-like names. Keep the target
         # after all flags so login wrappers can insert their authentication flags.
-        command += [self.location.profile, "python3 -c " + shlex.quote(_REMOTE_SCRIPT)]
+        command += [self.location.profile, "python3 -c " + shlex.quote(worker_source)]
         return command
 
     def _stop_process(self, process, *, drain=True):
@@ -480,6 +481,27 @@ class SshClient:
         with self._response(request, cancel_event) as (value, _):
             return value
 
+    def cluster(self, options, *, cancel_event=None):
+        """Run on a dedicated channel using the same profile and authentication."""
+        engine = Path(__file__).parents[1] / "annotation" / "cluster_engine.py"
+        encoded = base64.b64encode(zlib.compress(engine.read_bytes())).decode("ascii")
+        bootstrap = (
+            "import base64, sys, types, zlib\n"
+            "_cluster_engine = types.ModuleType('_pp_cluster_engine')\n"
+            "sys.modules[_cluster_engine.__name__] = _cluster_engine\n"
+            f"exec(zlib.decompress(base64.b64decode({encoded!r})), vars(_cluster_engine))\n"
+            "run_cluster = _cluster_engine.run_cluster\n"
+        )
+        request = {"operation": "cluster", "options": options}
+        if len(json.dumps(request, ensure_ascii=True)) >= 4 * 1024 * 1024:
+            raise ValueError("This cluster request exceeds the SSH metadata limit. Narrow the active filter first.")
+        session = _SshSession(self, tuple(self.command(worker_source=bootstrap + _REMOTE_SCRIPT)))
+        try:
+            with tempfile.TemporaryFile() as output:
+                return session.request(request, output, cancel_event, self.timeout)
+        finally:
+            session.close()
+
     def download(self, destination, *, path=None, cancel_event=None):
         remote_path = path or self.location.path
         request = {"operation": "read", "path": remote_path, "maximum": MAX_TRANSFER_BYTES,
@@ -507,6 +529,9 @@ def local_source_file(path, *, cancel_event=None):
         return
     location = parse_ssh_path(path)
     with tempfile.TemporaryDirectory(prefix="pymol_ssh_source_") as directory:
-        destination = os.path.join(directory, "source" + posixpath.splitext(location.path)[1])
+        stem, suffix = posixpath.splitext(location.path)
+        if suffix.lower() == ".gz":
+            suffix = posixpath.splitext(stem)[1] + suffix
+        destination = os.path.join(directory, "source" + suffix)
         SshClient(location).download(destination, cancel_event=cancel_event)
         yield destination

@@ -483,6 +483,7 @@ class AnnotatorState:
     step_context: dict = field(default_factory=dict)
     filter_presets: List[Dict[str, object]] = field(default_factory=list)
     sampling: Dict[str, object] = field(default_factory=dict)
+    cluster_scope: Dict[str, object] = field(default_factory=dict)
     filtered_count: int = 0
     display_columns: List[str] = field(default_factory=list)
     csv_encoding: str = DEFAULT_ENCODING
@@ -829,7 +830,10 @@ def _table_view_entries(
         for entry in entries
         if predicate(entry)
     ]
-    if STATE.sampling.get("enabled"):
+    if STATE.cluster_scope:
+        by_id = {entry.id: entry for entry in filtered}
+        filtered = [by_id[key] for key in STATE.cluster_scope["ids"] if key in by_id]
+    elif STATE.sampling.get("enabled"):
         selected_ids = {entry.id for entry in STATE.entries}
         filtered = [entry for entry in filtered if entry.id in selected_ids]
     return _sort_entries(
@@ -889,7 +893,7 @@ def _runtime_snapshot() -> Dict[str, object]:
         "annotated_entry_ids", "row_annotation_store", "materialized_paths",
         "materialization_errors", "navigation_session", "managed_objects",
         "navigation_generation", "current_object", "state_path", "review_reference", "bundle_view",
-        "sampling", "filtered_count", "steps", "step_assets", "step_materialized", "step_context",
+        "sampling", "cluster_scope", "filtered_count", "steps", "step_assets", "step_materialized", "step_context",
     )
     snapshot: Dict[str, object] = {}
     for name in names:
@@ -3931,6 +3935,7 @@ def _commit_prepared_csv_load(plan: _PreparedCsvLoad) -> Dict[str, object]:
         STATE.sort_descending = plan.sort_descending
         STATE.dataset = dataset
         STATE.sampling = {}
+        STATE.cluster_scope = {}
         STATE.filtered_count = len(plan.active_entries)
         STATE.state_path = plan.state_path
         STATE.review_reference = {key: copy.deepcopy(getattr(STATE, key)) for key in REVIEW_KEYS}
@@ -4159,6 +4164,7 @@ def _commit_prepared_directory_load(plan):
         STATE.step_assets = {}
         STATE.step_materialized = {}
         STATE.sampling = {}
+        STATE.cluster_scope = {}
         STATE.filtered_count = len(plan.entries)
         STATE.display_columns = []
         STATE.csv_encoding = DEFAULT_ENCODING
@@ -4316,7 +4322,7 @@ def sa_load_groups(parent: str = "", review_path: str = "scene-review.json", res
         STATE.step_assets, STATE.step_materialized, STATE.materialized_paths = {}, {}, {}
         STATE.filter_text, STATE.sort_column = "", ""
         STATE.filter_presets = (saved or {}).get("config", {}).get("filter_presets", [])
-        STATE.sampling, STATE.display_columns = {}, []
+        STATE.sampling, STATE.cluster_scope, STATE.display_columns = {}, {}, []
         STATE.dataset = AnnotationDataset("groups", path, os.path.dirname(path), entries,
                                           columns=("group",))
         STATE.all_entries, STATE.filtered_count = list(entries), len(entries)
@@ -5005,6 +5011,7 @@ def sa_filter(
         STATE.sort_column = next_sort
         STATE.sort_descending = next_descending
         STATE.sampling = {}
+        STATE.cluster_scope = {}
         STATE.filtered_count = len(active_entries)
         _install_entries(STATE.all_entries, resume_entry_id=current_id)
         STATE.materialized_paths[selected_entry.id] = preflight_materialized
@@ -5039,7 +5046,7 @@ def sa_filter(
 
 
 def _prepare_view(entries, query, sort_column, descending, current_id,
-                  current_index, materialized, context, *, sampling=None, cancel_event=None,
+                  current_index, materialized, context, *, sampling=None, cluster_scope=None, cancel_event=None,
                   dataset=None, steps=None, step_cmd="", mapping=None, step_materialized=None):
     """Filter immutable rows and prepare the selected structure off the GUI thread."""
     _check_csv_preparation_cancelled(cancel_event)
@@ -5050,7 +5057,16 @@ def _prepare_view(entries, query, sort_column, descending, current_id,
                            sort_descending=bool(descending))
     filtered_count = len(active)
     sampling = dict(sampling or {})
-    if sampling.get("enabled"):
+    cluster_scope = dict(cluster_scope or {})
+    if cluster_scope:
+        ids = cluster_scope["ids"]
+        if sort_column:
+            selected_ids = set(ids)
+            active = [entry for entry in active if entry.id in selected_ids]
+        else:
+            by_id = {entry.id: entry for entry in active}
+            active = [by_id[key] for key in ids if key in by_id]
+    elif sampling.get("enabled"):
         from .sampling import stratified_sample
         active, _ = stratified_sample(active, **{key: sampling[key] for key in
             ("group_column", "metric_column", "per_stratum") if key in sampling})
@@ -5068,7 +5084,7 @@ def _prepare_view(entries, query, sort_column, descending, current_id,
                                               cancel_event=cancel_event)
     return {"entries": tuple(active), "selected": selected, "materialized": prepared,
             "step_assets": assets, "step_materialized": cached,
-            "sampling": sampling, "filtered_count": filtered_count,
+            "sampling": sampling, "cluster_scope": cluster_scope, "filtered_count": filtered_count,
             "query": query, "sort_column": sort_column, "descending": bool(descending),
             "navigation_session": _new_navigation_session(active, _resume_entry_index(active, selected.id, 0)) if selected is not None else None}
 
@@ -5082,6 +5098,7 @@ def _commit_prepared_view(plan):
         STATE.sort_column = plan["sort_column"]
         STATE.sort_descending = plan["descending"]
         STATE.sampling = plan["sampling"]
+        STATE.cluster_scope = plan["cluster_scope"]
         STATE.filtered_count = plan["filtered_count"]
         selected = plan["selected"]
         if selected is not None:
@@ -5928,6 +5945,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             event.ignore()
             return
         self._closed = True
+        if getattr(self, "_cluster_dialog", None) is not None:
+            self._cluster_dialog.dispose()
         self._view_jobs.close()
         self.comparison.clear()
         _review_objects.clear(cmd)
@@ -5966,6 +5985,40 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             STATE.dataset.columns, STATE.sampling, self)
         if dialog.exec_() == QtWidgets.QDialog.Accepted:
             self._apply_view(sampling=dialog.result_config)
+
+    def _show_clustering(self):
+        if self._csv_task_id or self._table_mode == "preview" or STATE.source_mode == "groups":
+            return
+        dialog = getattr(self, "_cluster_dialog", None)
+        if dialog is not None and dialog.is_current():
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            return
+        if dialog is not None:
+            dialog.dispose()
+            self._cluster_dialog = None
+        dataset, query = STATE.dataset, STATE.filter_text
+        rows = tuple(_view_entries(STATE.all_entries))
+        if dataset is None or not rows:
+            self._show_error("Load a structure dataset with candidates in the current filter first.")
+            return
+        from .cluster_widgets import ClusterDialog
+        source = _active_source_reference()
+        remote = parse_ssh_path(source) if is_ssh_path(source) else None
+
+        def current():
+            return not self._closed and STATE.dataset is dataset and STATE.filter_text == query
+
+        def show_view(ids, title):
+            if self._csv_task_id or self._table_mode == "preview":
+                return False
+            self._apply_view(cluster_scope={"ids": ids, "title": title} if title else {})
+            return bool(self._csv_task_id)
+
+        self._cluster_dialog = ClusterDialog(self, rows, dataset.columns, remote, current, show_view,
+                                             sort=STATE.sort_column, higher=STATE.sort_descending if STATE.sort_column else True)
+        self._cluster_dialog.show()
 
     def _edit_review_steps(self):
         if STATE.source_mode == "groups":
@@ -6964,6 +7017,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         busy = bool(self._csv_task_id)
         navigating = self._pending_navigation is not None
         self.overview_button.setEnabled(bool(STATE.all_entries) and not busy)
+        self.cluster_button.setEnabled(bool(STATE.all_entries) and STATE.source_mode != "groups"
+                                       and self._table_mode != "preview" and not busy)
         self.source_location.setEnabled(not busy)
         self.local_mapping_group.setVisible(not self.source_location.remote)
         self.source_path_edit.setEnabled(not busy)
@@ -7394,7 +7449,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.review.selection.clear()
         self.review.refresh()
 
-    def _apply_view(self, *, sampling=None) -> None:
+    def _apply_view(self, *, sampling=None, cluster_scope=None) -> None:
         if not STATE.all_entries or self._table_mode == "preview":
             self._show_error("Load the CSV before applying a filter.")
             return
@@ -7402,16 +7457,24 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             if self._csv_task_kind != "view":
                 return
             self._cancel_csv_task(announce=False)
-        query = self._filter_input()
         arguments = self._view_arguments()
+        if cluster_scope is not None:
+            query, sort, descending = STATE.filter_text, STATE.sort_column, STATE.sort_descending
+            sampling = {}
+        else:
+            query = self._filter_input()
+            arguments = self._view_arguments()
+            sort, descending = arguments["sort_column"], arguments["descending"]
+            cluster_scope = STATE.cluster_scope if sampling is None and query == STATE.filter_text else {}
         self._start_csv_task("view", _prepare_view, arguments, worker_arguments={
             "entries": tuple(STATE.all_entries), "query": query,
-            "sort_column": arguments["sort_column"], "descending": arguments["descending"],
+            "sort_column": sort, "descending": descending,
             "current_id": STATE.current_entry_id(), "current_index": STATE.index,
             "materialized": dict(STATE.materialized_paths), "context": _materialization_context(),
             "dataset": STATE.dataset, "steps": copy.deepcopy(_configured_steps()), "step_cmd": STATE.step_cmd,
             "mapping": _step_mapping(), "step_materialized": dict(STATE.step_materialized),
             "sampling": dict(STATE.sampling if sampling is None else sampling),
+            "cluster_scope": dict(cluster_scope),
         })
 
     def _view_arguments(self):
@@ -8158,17 +8221,19 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._table_annotation_revision = annotation_revision
         current_row = self._dataset_model.row_for_entry(STATE.current_entry_id())
         self.review.selection.ensure_current(current_row)
-        filtered = bool(STATE.filter_text or STATE.sort_column)
         sampled = bool(STATE.sampling.get("enabled"))
-        self.view_summary_label.setText("Sample" if sampled else "Candidates")
-        self.view_summary_label.setVisible(sampled)
+        cluster = STATE.cluster_scope.get("title", "")
+        self.view_summary_label.setText(cluster or ("Sample" if sampled else "Candidates"))
+        self.view_summary_label.setVisible(bool(cluster or sampled))
         self.view_scope_label.setText(
-            f"Sample {len(STATE.entries):,} · Filtered {STATE.filtered_count:,} · All {len(STATE.all_entries):,}"
-            if sampled else f"Filtered {len(STATE.entries):,} / {len(STATE.all_entries):,}")
-        self.view_scope_label.setVisible(sampled or len(STATE.entries) != len(STATE.all_entries))
-        self.view_scope_label.setToolTip("Sampling is a coverage-review subset, not the whole dataset. "
-            "Overview / sample shows the method and returns to the full filtered set.")
+            f"{len(STATE.entries):,} shown · {STATE.filtered_count:,} filtered · {len(STATE.all_entries):,} total"
+            if cluster or sampled else f"Filtered {len(STATE.entries):,} / {len(STATE.all_entries):,}")
+        self.view_scope_label.setVisible(bool(cluster or sampled or len(STATE.entries) != len(STATE.all_entries)))
+        self.view_scope_label.setToolTip(
+            "Cluster → Full filtered list restores all matches." if cluster else
+            "Overview shows the sampling method and returns to the full filtered list." if sampled else "")
         self.overview_button.setText("Overview •" if sampled else "Overview")
+        self.cluster_button.setText("Cluster •" if cluster else "Cluster…")
         self._refresh_filter_button()
 
     def _refresh_metadata_table(self) -> None:
