@@ -997,7 +997,7 @@ def _bind_keys(controller: NavigationController) -> None:
             api.set_key(key, callback)
             controller.installed_key_mappings[key] = mappings.get(key)
         from pymolplugins.navigation.qt_keys import install_qt_navigation_keys
-        install_qt_navigation_keys(sys.modules[__name__])
+        install_qt_navigation_keys()
     except Exception:
         _restore_keys(controller, preserve_external=False)
         raise
