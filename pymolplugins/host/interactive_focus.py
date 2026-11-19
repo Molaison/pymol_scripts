@@ -6,6 +6,7 @@ from uuid import uuid4
 from pymol import cmd
 from pymol.wizard import Wizard
 
+from .focus_pocket import close_pocket, pocket_for
 from .focus_view import RADIUS, draw_focus, focus_identity, picked_source
 
 
@@ -25,7 +26,6 @@ class InteractiveFocus(Wizard):
         self.camera = self.session.get("camera", "keep")
         self.contacts = self.session.get("contacts", "interface")
         self.surface_enabled = False
-        self.surface_note = ""
         self.error = ""
         self.closed = False
         self.handling_pick = False
@@ -56,11 +56,14 @@ class InteractiveFocus(Wizard):
             [3, f"Contacts: {_CONTACT_LEVELS[self.contacts][0]}", "contacts"],
             [2, "Pocket surface: " + ("On" if self.surface_enabled else "Off"),
              "cmd.get_wizard().toggle_surface()"],
+            [3, "Pocket options", "pocket"],
             [2, "Clear focus", "cmd.get_wizard().clear()"],
             [2, "Done", "cmd.set_wizard()"],
         ]
 
     def get_menu(self, tag):
+        if tag == "pocket":
+            return pocket_for(self).menu()
         if tag == "camera":
             return [[2, "Camera on click", ""]] + [
                 [1, label, f"cmd.get_wizard().set_camera({key!r})"] for key, label in _CAMERAS.items()
@@ -87,8 +90,10 @@ class InteractiveFocus(Wizard):
         prompt = [self.layer.label]
         if kinds:
             prompt.append("  |  ".join(label for kind, label in labels if kind in kinds))
-        if self.surface_note:
-            prompt.append(self.surface_note)
+        pocket = pocket_for(self)
+        prompt.extend(pocket.notes)
+        if pocket.cavity_note:
+            prompt.append(pocket.cavity_note)
         return prompt
 
     def set_camera(self, mode):
@@ -109,16 +114,14 @@ class InteractiveFocus(Wizard):
 
     def toggle_surface(self):
         self.surface_enabled = not self.surface_enabled
-        self._update_surface()
+        pocket_for(self).update(self.layer, self.surface_enabled)
         self.cmd.refresh_wizard()
 
-    def _update_surface(self):
-        self.surface_note = ""
-        if self.layer:
-            try:
-                self.layer.show_surface(self.cmd, self.surface_enabled)
-            except Exception as error:
-                self.surface_note = f"Pocket surface: {error}"
+    def set_pocket_option(self, key, value):
+        pocket = pocket_for(self)
+        pocket.set_option(key, value)
+        pocket.update(self.layer, self.surface_enabled)
+        self.cmd.refresh_wizard()
 
     def do_select(self, name):
         if self.closed or self.handling_pick or name != self.capture:
@@ -170,7 +173,7 @@ class InteractiveFocus(Wizard):
             if previous:
                 previous.delete(self.cmd)
             self.layer.show_contacts(self.cmd, _CONTACT_LEVELS[self.contacts][1])
-            self._update_surface()
+            pocket_for(self).update(self.layer, self.surface_enabled)
             self.layer.move_camera(self.cmd, self.camera)
             self.error = ""
         except Exception as error:
@@ -181,7 +184,7 @@ class InteractiveFocus(Wizard):
     def clear(self):
         layer, self.layer = self.layer, None
         self.error = ""
-        self.surface_note = ""
+        pocket_for(self).update(None, False)
         if layer:
             layer.delete(self.cmd)
         if not self.closed:
@@ -190,6 +193,7 @@ class InteractiveFocus(Wizard):
     def cleanup(self):
         self.closed = True
         self.clear()
+        close_pocket(self)
         self.cmd.delete(self.capture)
         existing = set(self.cmd.get_names("selections"))
         for name in self.enabled_selections:
