@@ -4,7 +4,7 @@ from dataclasses import replace
 import json
 
 from .command_templates import STEP_FIELDS, format_commands
-from .filtering import compile_filter, validate_filter_presets
+from .filtering import compile_view_filter, validate_filter_presets
 from .review_file import (
     read_review_file, check_review_unchanged, validate_review_config,
     validate_review_columns,
@@ -113,6 +113,7 @@ def check_bundle(csv_path, *, resolve_dataset, path_column=None, id_column="",
         if steps is not None:
             _check_row_commands(entry, steps, config.get("step_cmd", ""), issues)
     paths_checked = 0
+    candidates = dataset.entries
     path_columns = [selected_path] if selected_path in columns else []
     path_columns += [step["path_column"] for step in steps or []
                      if step["type"] == "object" and step["name"] != "candidate"]
@@ -124,6 +125,8 @@ def check_bundle(csv_path, *, resolve_dataset, path_column=None, id_column="",
                         for entry in dataset.entries
                         if column == selected_path or entry.metadata[column].strip())
         resolved = resolve_dataset(replace(dataset, entries=entries))
+        if column == selected_path:
+            candidates = resolved.entries
         paths_checked += len(resolved.entries)
         for entry in resolved.entries:
             if not entry.is_navigable:
@@ -135,11 +138,11 @@ def check_bundle(csv_path, *, resolve_dataset, path_column=None, id_column="",
     presets = _attempt(issues, "filter_presets", lambda: validate_filter_presets(
         config.get("filter_presets", []))) or []
     expressions = [("current filter", config.get("filter_text", ""))]
-    expressions += [(preset["name"], preset["expression"]) for preset in presets]
+    expressions += [(preset["name"], "where:" + preset["expression"]) for preset in presets]
     for name, expression in expressions:
-        predicate = _attempt(issues, "filter:" + name, lambda: compile_filter(expression, columns))
+        predicate = _attempt(issues, "filter:" + name, lambda: compile_view_filter(expression, columns))
         if predicate:
-            count = sum(predicate(entry.metadata) for entry in dataset.entries)
+            count = sum(predicate(entry) for entry in candidates)
             filters.append({"name": name, "matches": count, "total": len(dataset.entries)})
             if not count:
                 issues.append({"severity": "warning", "location": "filter:" + name,

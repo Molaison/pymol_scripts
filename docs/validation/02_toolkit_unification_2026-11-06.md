@@ -311,3 +311,9 @@ Windows PyMOL 3.1.3.1 / Qt 5.15.8 独立隐藏桌面验收通过。结果见 [�
 Scores 表头在后台计算当前表格行的类别占比、缺失、不同值数量及数值直方图。筛选及抽样使用各自的可见行统计。文本函数补全先选中字段占位符，选择列后选中文本参数。Enter 提交当前表达式。
 
 45 项相关测试通过。Windows PyMOL 3.1.3.1 / Qt 5.15.8 独立隐藏桌面验证了实际绘制、键盘及鼠标补全、筛选后计数更新。[验收结果](../../output/22_score_headers/01_result.json) · [本机安装记录](../../output/22_score_headers/local_install/01_install_result.json)
+
+## 2026-11-19 表头直接筛选和按列值补全
+
+点击 Scores 表头的类别、Other 或 Missing，或者拖选直方图，向当前 Filter 追加条件并应用。组合时保留原表达式优先级、Text search 和排序。数值范围取所选分箱中的实际边界，空分箱不会生成条件。字段比较、匹配函数参数和 Add condition… 的 Value 提供当前数据源的列值补全。
+
+47 项相关测试通过。Windows PyMOL 3.1.3.1 / Qt 5.15.8 在独立隐藏桌面验证真实点击、拖选、已有 OR 与 Text search 保留，以及类别和数值补全。[验收结果](../../output/23_header_filters/01_result.json) · [本机安装记录](../../output/23_header_filters/local_install/01_install_result.json)

@@ -41,12 +41,14 @@ class BundleCheckTests(unittest.TestCase):
         return check_bundle(str(self.table), id_column="id", resolve_dataset=resolve)
 
     def test_valid_bundle_reports_paths_filter_hits_without_writes(self):
+        self.config["filter_text"] = 'where:text_search("candidate.pdb") and score > 1'
         self.config["filter_presets"] = [{"name": "missing", "expression": "score is None"}]
         self.write()
         before = {path.name: path.read_bytes() for path in self.root.iterdir()}
         result = self.check()
         self.assertEqual(result["errors"], 0, result)
         self.assertEqual(result["paths_checked"], 4)
+        self.assertEqual(result["filters"][0]["matches"], 1)
         self.assertEqual(result["filters"][-1]["matches"], 1)
         self.assertEqual(before, {path.name: path.read_bytes() for path in self.root.iterdir()})
 

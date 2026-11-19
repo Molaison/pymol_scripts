@@ -96,6 +96,8 @@ review.json 的 steps 列表定义命名对象和命令的执行顺序。固定�
 
 用 Filter 旁的下拉箭头切换或新建命名组。在 Column conditions 中用 Add condition… 选择字段与条件，用 Group conditions 加括号。Enter 提交当前输入，Tab 或鼠标接受补全。Save group… 保存当前条件和排序，Delete 删除所选组。CSV 源的分组修改写入 review.override.json。分组允许重叠。
 
+点击 Scores 表头的类别，或在数值直方图上拖选，插件会把条件加到当前 Filter 并应用。输入条件参数时会建议该列中的实际取值。
+
 ## 其他入口
 
 - `pp_review_groups candidates, review_path=scene-review.json` 直接标注已加载父组的各子group；重开前先加载原PSE，标注另存JSONL。

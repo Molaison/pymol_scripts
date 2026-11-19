@@ -21,7 +21,7 @@ from dataclasses import dataclass, field, fields, replace
 from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 import traceback
 import sys
-from pymolplugins.annotation.filtering import compile_filter
+from pymolplugins.annotation.filtering import compile_filter, compile_view_filter
 from pymolplugins.annotation.persistence import pending_errors, submit_write
 from pymolplugins.annotation.sources.csv_source import CsvReadCancelled, CsvSourceError, read_csv_header
 from pymolplugins.annotation.review_config import default_fields, decode_value, field_key, missing_required, validate_fields, validate_score_config
@@ -754,15 +754,6 @@ def _csv_annotation_baseline(
     return baseline
 
 
-def _entry_filter_match(entry: AnnotationEntry, query: str) -> bool:
-    needle = str(query or "").strip().casefold()
-    if not needle:
-        return True
-    values = [entry.display_name, entry.source_path, entry.resolved_path]
-    values.extend(entry.metadata.values())
-    return any(needle in str(value).casefold() for value in values)
-
-
 def _view_entries(
     entries: Sequence[AnnotationEntry],
     *,
@@ -844,12 +835,7 @@ def _table_view_entries(
 
 
 def _filter_predicate(entries, query):
-    text = str(query or "")
-    if text.startswith("where:"):
-        columns = tuple(entries[0].metadata) if entries else ()
-        predicate = compile_filter(text[6:], columns)
-        return lambda entry: bool(predicate(entry.metadata))
-    return lambda entry: _entry_filter_match(entry, text)
+    return compile_view_filter(query, tuple(entries[0].metadata) if entries else ())
 
 
 def _resume_entry_index(
@@ -5893,7 +5879,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         if STATE.dataset is None or not STATE.dataset.columns:
             return
         edit = self.filter_edit
-        condition = filter_condition_dialog(self.filter_dialog, STATE.dataset.columns)
+        condition = filter_condition_dialog(self.filter_dialog, STATE.dataset.columns,
+                                            self._column_bindings["filter"].value_catalog)
         if not condition:
             return
         if not edit.hasSelectedText() and edit.cursorPosition() == len(edit.text()) and edit.text().strip():
@@ -5915,6 +5902,20 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         if not selected:
             edit.setCursorPosition(edit.cursorPosition() - 1)
         edit.setFocus()
+
+    def _append_header_filter(self, expression):
+        if self._table_mode != "active" or self._csv_task_id or STATE.dataset is None:
+            return
+        query = STATE.filter_text.strip()
+        if query.startswith("where:"):
+            previous = query[6:].strip()
+        else:
+            previous = f"text_search({query!r})" if query else ""
+        self.filter_mode_combo.setCurrentIndex(1)
+        self.filter_edit.setText(f"({previous}) and ({expression})" if previous else expression)
+        self.sort_column_combo.setCurrentText(STATE.sort_column)
+        self.sort_desc_cb.setChecked(STATE.sort_descending)
+        self._apply_view()
 
     def _apply_filters(self):
         try:
@@ -7693,6 +7694,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             columns = STATE.dataset.columns if STATE.dataset is not None else tuple(entries[0].metadata) if entries else ()
             self.column_picker.set_columns(columns, display_columns)
             self._column_bindings["filter"].set_columns(columns)
+            self._column_bindings["filter"].set_value_dataset(STATE.dataset)
             self._column_bindings["sort"].set_columns(columns)
             selected_sort = self.sort_column_combo.currentText()
             self.sort_column_combo.blockSignals(True)
