@@ -3,7 +3,7 @@
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from math import dist
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from uuid import uuid4
 
 from pymol import util
@@ -12,6 +12,9 @@ from pymolplugins.annotation.review_view_presets import (
     _capture_interactions, _compute_interface, _indices, draw_interface_contacts,
 )
 from pymolplugins.annotation.review_view_geometry import residue_key
+
+if TYPE_CHECKING:
+    from pymolplugins.annotation.bundle_view import CavityRender
 
 
 RADIUS = 5.0
@@ -34,8 +37,7 @@ class FocusLayer:
     surface: str = ""
     surface_shape: tuple = ()
     ligand_surface: str = ""
-    void_objects: Optional[dict] = None
-    void_status: str = ""
+    void_result: Optional["CavityRender"] = None
 
     @property
     def copies(self):
@@ -82,7 +84,7 @@ class FocusLayer:
         selection = self.pocket_selection(radius)
         if not api.count_atoms(selection, state=self.state):
             raise ValueError("No nearby polymer residues")
-        anchor = self._ensure_ligand_surface(api) if facing and self.ligand_selection else ""
+        anchor = self.copies[0] if facing and self.ligand_selection else ""
         shape = (radius, bool(anchor))
         if self.surface and self.surface_shape == shape:
             api.set("transparency", transparency, self.surface)

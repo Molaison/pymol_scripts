@@ -25,7 +25,6 @@ class InteractiveFocus(Wizard):
         self.layer = None
         self.camera = self.session.get("camera", "keep")
         self.contacts = self.session.get("contacts", "interface")
-        self.surface_enabled = False
         self.error = ""
         self.closed = False
         self.handling_pick = False
@@ -54,8 +53,7 @@ class InteractiveFocus(Wizard):
             [1, f"Interactive focus ({RADIUS:g} A)", ""],
             [3, f"Camera: {_CAMERAS[self.camera]}", "camera"],
             [3, f"Contacts: {_CONTACT_LEVELS[self.contacts][0]}", "contacts"],
-            [2, "Pocket surface: " + ("On" if self.surface_enabled else "Off"),
-             "cmd.get_wizard().toggle_surface()"],
+            [2, "Pocket layers…", "cmd.get_wizard().show_pocket_layers()"],
             [3, "Pocket options", "pocket"],
             [2, "Clear focus", "cmd.get_wizard().clear()"],
             [2, "Done", "cmd.set_wizard()"],
@@ -112,15 +110,13 @@ class InteractiveFocus(Wizard):
             self.layer.show_contacts(self.cmd, _CONTACT_LEVELS[level][1])
         self.cmd.refresh_wizard()
 
-    def toggle_surface(self):
-        self.surface_enabled = not self.surface_enabled
-        pocket_for(self).update(self.layer, self.surface_enabled)
-        self.cmd.refresh_wizard()
+    def show_pocket_layers(self):
+        pocket_for(self).show_layers()
 
     def set_pocket_option(self, key, value):
         pocket = pocket_for(self)
         pocket.set_option(key, value)
-        pocket.update(self.layer, self.surface_enabled)
+        pocket.update(self.layer)
         self.cmd.refresh_wizard()
 
     def do_select(self, name):
@@ -173,7 +169,7 @@ class InteractiveFocus(Wizard):
             if previous:
                 previous.delete(self.cmd)
             self.layer.show_contacts(self.cmd, _CONTACT_LEVELS[self.contacts][1])
-            pocket_for(self).update(self.layer, self.surface_enabled)
+            pocket_for(self).update(self.layer)
             self.layer.move_camera(self.cmd, self.camera)
             self.error = ""
         except Exception as error:
@@ -184,7 +180,7 @@ class InteractiveFocus(Wizard):
     def clear(self):
         layer, self.layer = self.layer, None
         self.error = ""
-        pocket_for(self).update(None, False)
+        pocket_for(self).update(None)
         if layer:
             layer.delete(self.cmd)
         if not self.closed:
