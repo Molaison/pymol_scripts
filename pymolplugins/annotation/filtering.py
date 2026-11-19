@@ -204,6 +204,9 @@ def _compile_node(node, columns, aliases):
             if isinstance(node.args[0].value, str):
                 return _text_search(node.args[0].value)
         raise FilterSyntaxError("Use text_search with one quoted text value")
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "header_filter"
+            and len(node.args) == 1 and not node.keywords):
+        return _compile_node(node.args[0], columns, aliases)
     if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
             and node.func.id in TEXT_OPERATORS and len(node.args) == 2 and not node.keywords):
         value, needle = [_compile_node(arg, columns, aliases) for arg in node.args]

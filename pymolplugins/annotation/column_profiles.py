@@ -4,6 +4,7 @@ from collections import Counter
 from dataclasses import dataclass
 import math
 
+from .filtering import compile_view_filter
 from .model import COLUMN_INTEGER, COLUMN_TEXT, display_value, infer_column_kind
 
 
@@ -23,6 +24,11 @@ class ColumnProfile:
         """Return the observed bounds in an inclusive selection of bins."""
         bounds = [pair for pair in self.bin_ranges[first:last + 1] if pair is not None]
         return (bounds[0][0], bounds[-1][1]) if bounds else None
+
+    def bins_overlapping(self, low, high):
+        indices = [index for index, bounds in enumerate(self.bin_ranges)
+                   if bounds is not None and bounds[1] >= low and bounds[0] <= high]
+        return (indices[0], indices[-1]) if indices else None
 
 
 def _histogram(values, minimum, maximum, integer, count=12):
@@ -47,22 +53,43 @@ def _histogram(values, minimum, maximum, integer, count=12):
     return tuple(bins), tuple(ranges)
 
 
-def build_column_profiles(rows, columns, kinds, *, preview=False, cancelled=None):
+def _categories(present, selected):
+    counts = Counter(present)
+    remainder = next((item.value for item in selected if item.kind == "other"), None)
+    pinned = [item.value for item in selected if item.kind == "category"]
+    if remainder is not None:
+        names = list(dict.fromkeys([*remainder, *pinned]))
+    else:
+        top = [value for value, _ in counts.most_common(3)]
+        names = list(dict.fromkeys([*top, *pinned]))
+        if len(names) > 3:
+            names = list(dict.fromkeys([*pinned, *top]))[:max(3, len(pinned))]
+    categories = tuple((name, counts[name]) for name in names)
+    other = len(present) - sum(count for _, count in categories)
+    return len(counts), categories, other
+
+
+def build_column_profiles(rows, columns, kinds, *, preview=False, cancelled=None, filters=None, source=()):
     """Compute exact proportions and histograms over the table's row snapshot."""
     metadata = [row.get("metadata") or {} for row in rows] if preview else [row.metadata for row in rows]
+    schema = tuple(source[0].metadata) if source else ()
     profiles = []
     for column in columns:
         if cancelled is not None and cancelled.is_set():
             break
-        cells = [row.get(column, "") for row in metadata]
+        selected = filters.selections.get(column, ()) if filters else ()
+        if selected and source and not preview:
+            predicate = compile_view_filter(filters.query(without=column), schema)
+            cells = [entry.metadata.get(column, "") for entry in source if predicate(entry)]
+        else:
+            cells = [row.get(column, "") for row in metadata]
         present = [value for value in cells if value.strip()]
         total, missing = len(cells), len(cells) - len(present)
-        kind = kinds.get(column) or infer_column_kind(present)
+        categorical = any(choice.kind in ("category", "other") for choice in selected)
+        kind = COLUMN_TEXT if categorical else kinds.get(column) or infer_column_kind(present)
         if not present or kind == COLUMN_TEXT:
-            counts = Counter(present)
-            categories = tuple(counts.most_common(3))
-            other = len(present) - sum(count for _, count in categories)
-            profiles.append(ColumnProfile(total, missing, len(counts), categories, other))
+            distinct, categories, other = _categories(present, selected)
+            profiles.append(ColumnProfile(total, missing, distinct, categories, other))
             continue
         values = [display_value(value, kind) for value in present]
         minimum, maximum = min(values), max(values)
