@@ -52,15 +52,17 @@ class ViewJobs:
         self.panel.quick_view_status.setText(message)
         self.panel.quick_view_status.setToolTip(tooltip or message)
 
-    def start_cavity(self, compute, draw):
-        self.cavity_job = (self.cavity_pool.submit(compute), draw)
+    def start_cavity(self, title, compute, draw):
+        if self.cavity_job is not None:
+            self.cavity_job[0].cancel()
+        self.cavity_job = (self.cavity_pool.submit(compute), draw, title)
         self.cavity_timer.start()
-        self._status("Pocket cavity · calculating…")
+        self._status(f"{title} · calculating…")
 
     def _advance_cavity(self):
         if self.cavity_job is None:
             return
-        future, draw = self.cavity_job
+        future, draw, title = self.cavity_job
         if not self.is_current(self.identity):
             self.cancel()
             return
@@ -72,7 +74,7 @@ class ViewJobs:
             self._status(*draw(future.result()))
         except Exception as exc:
             detail = str(exc).strip() or type(exc).__name__
-            message = f"Pocket cavity skipped · {detail.splitlines()[0]}"
+            message = f"{title} skipped · {detail.splitlines()[0]}"
             print(f"Structure Annotator: {message}")
             self._status(message)
 

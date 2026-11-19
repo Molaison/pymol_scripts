@@ -1,7 +1,6 @@
 """Local geometric estimates for the Structure Annotator viewing presets."""
 
 from collections import defaultdict
-from itertools import product
 
 import numpy as np
 
@@ -81,45 +80,6 @@ def stacking_pairs(first, second):
             offset = min(np.linalg.norm(delta - np.dot(delta, n) * n) for n in (na, nb))
             if offset <= 2.0 and (angle >= 0.866 or angle <= 0.5):
                 yield a, b, ia, ib
-
-
-def _distance_field(points, origin, shape, spacing):
-    distances = np.full(shape, np.inf, dtype=np.float32)
-    for xyz in points:
-        cell = (xyz - origin) / spacing
-        lo = np.maximum(0, np.ceil(cell - 4.5 / spacing).astype(int))
-        hi = np.minimum(shape, np.floor(cell + 4.5 / spacing).astype(int) + 1)
-        if np.any(lo >= hi):
-            continue
-        x, y, z = np.ogrid[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
-        squared = ((x - cell[0]) ** 2 + (y - cell[1]) ** 2 + (z - cell[2]) ** 2) * spacing ** 2
-        patch = distances[tuple(slice(a, b) for a, b in zip(lo, hi))]
-        np.minimum(patch, squared, out=patch)
-    return distances
-
-
-def interface_voids(first, second, other):
-    """Find locally enclosed empty grid cells near both partners."""
-    margin = 4.0
-    low = np.maximum(first.min(axis=0), second.min(axis=0)) - margin
-    high = np.minimum(first.max(axis=0), second.max(axis=0)) + margin
-    if np.any(low >= high):
-        return []
-    spacing = max(1.0, np.cbrt(np.prod(high - low + 1.0) / 150_000))
-    shape = tuple((np.floor((high - low) / spacing) + 1).astype(int))
-    a, b, c = (_distance_field(points, low, shape, spacing) for points in (first, second, other))
-    nearest = np.minimum(np.minimum(a, b), c)
-    occupied = np.pad(nearest < 1.75 ** 2, 3)
-    walls = np.zeros(shape, dtype=np.int8)
-    for axis, sign in product(range(3), (-1, 1)):
-        seen = np.zeros(shape, dtype=bool)
-        for step in (1, 2, 3):
-            offsets = [3, 3, 3]
-            offsets[axis] += sign * step
-            seen |= occupied[tuple(slice(n, n + dim) for n, dim in zip(offsets, shape))]
-        walls += seen
-    empty = (a <= 16) & (b <= 16) & (nearest >= 2.0 ** 2) & (walls >= 4)
-    return np.argwhere(empty) * spacing + low
 
 
 def _lipid_slab(points):

@@ -1,4 +1,4 @@
-"""Measure empty probe-center regions next to a ligand in a bound complex."""
+"""Measure empty probe-center regions in a pocket or at a molecular interface."""
 
 import json
 from pathlib import Path
@@ -8,7 +8,7 @@ import sys
 GRID = 0.5
 WATER = 1.4
 OUTER = 4.0
-LIGAND_MARGIN = 5.0
+REGION_MARGIN = 5.0
 PADDING = 9.0
 
 
@@ -46,20 +46,29 @@ def _regions(mask, origin, spacing, minimum_volume):
 
 def measure_pocket(atoms, ligand_indices, *, spacing=GRID, padding=PADDING):
     """Return accessible recesses and enclosed voids, with probe-center volumes."""
+    if not len(ligand_indices) or len(ligand_indices) >= len(atoms):
+        raise ValueError("Cavity needs separate protein and ligand heavy atoms.")
+    return _measure_regions(atoms, [(ligand_indices,)], spacing, padding)
+
+
+def measure_interface(atoms, interface_pairs, *, spacing=GRID, padding=PADDING):
+    """Keep points close to both sides of at least one contacting partner pair."""
+    return _measure_regions(atoms, interface_pairs, spacing, padding)
+
+
+def _measure_regions(atoms, selections, spacing, padding):
     import numpy as np
-    from scipy.ndimage import distance_transform_edt
 
     atoms = np.asarray(atoms, dtype=float)
-    ligand = atoms[ligand_indices, :3]
-    if not len(ligand) or len(ligand) >= len(atoms):
-        raise ValueError("Cavity needs separate protein and ligand heavy atoms.")
-    lower = np.floor((ligand.min(axis=0) - LIGAND_MARGIN - padding) / spacing) * spacing
-    upper = np.ceil((ligand.max(axis=0) + LIGAND_MARGIN + padding) / spacing) * spacing
+    sites = [[atoms[indices, :3] for indices in selection] for selection in selections]
+    centers = np.concatenate([side for site in sites for side in site])
+    extent = REGION_MARGIN + padding
+    lower = np.floor((centers.min(axis=0) - extent) / spacing) * spacing
+    upper = np.ceil((centers.max(axis=0) + extent) / spacing) * spacing
     shape = np.rint((upper - lower) / spacing).astype(int) + 1
     if np.prod(shape) > 8_000_000:
-        raise ValueError("Ligand selection spans too large a region for cavity analysis.")
+        raise ValueError("Selection spans too large a region for cavity analysis.")
     clearance = np.full(shape, OUTER + spacing, dtype=np.float32)
-    near_ligand = np.zeros(shape, dtype=bool)
     for x, y, z, radius in atoms:
         center = (np.asarray((x, y, z)) - lower) / spacing
         reach = (radius + OUTER + spacing) / spacing
@@ -67,10 +76,26 @@ def measure_pocket(atoms, ligand_indices, *, spacing=GRID, padding=PADDING):
         if distance is not None:
             target = clearance[box]
             np.minimum(target, distance - radius, out=target)
-    for xyz in ligand:
+    wanted = np.zeros(shape, dtype=bool)
+    for site in sites:
+        wanted |= np.logical_and.reduce([_near(side, lower, spacing, shape) for side in site])
+    return _classify(clearance, wanted, lower, spacing)
+
+
+def _near(side, lower, spacing, shape):
+    import numpy as np
+
+    near = np.zeros(shape, dtype=bool)
+    for xyz in side:
         center = (xyz - lower) / spacing
-        box, distance = _distance_box(center, LIGAND_MARGIN / spacing, shape, spacing)
-        near_ligand[box] |= distance <= LIGAND_MARGIN
+        box, distance = _distance_box(center, REGION_MARGIN / spacing, shape, spacing)
+        near[box] |= distance <= REGION_MARGIN
+    return near
+
+
+def _classify(clearance, wanted, lower, spacing):
+    from scipy.ndimage import distance_transform_edt
+    import numpy as np
 
     water_fits = clearance >= WATER
     # Leave connectivity that depends on a diagonal gap unclassified.
@@ -84,8 +109,8 @@ def measure_pocket(atoms, ligand_indices, *, spacing=GRID, padding=PADDING):
     # difference and half a cell diagonal to reject thin discretization rims.
     shielded = large_reach > OUTER - WATER + 3 ** 0.5 * spacing / 2
     return {
-        "recesses": _regions(near_ligand & water_bulk & shielded, lower, spacing, 6.0),
-        "enclosed": _regions(near_ligand & water_fits & ~water_possible, lower, spacing, 2.0),
+        "recesses": _regions(wanted & water_bulk & shielded, lower, spacing, 6.0),
+        "enclosed": _regions(wanted & water_fits & ~water_possible, lower, spacing, 2.0),
     }
 
 
@@ -114,5 +139,6 @@ if __name__ == "__main__":
         print(str(exc), file=sys.stderr)
         sys.exit(42)
     data = json.loads(Path(source).read_text(encoding="utf-8"))
-    result = measure_pocket(**data)
+    measure = measure_interface if "interface_pairs" in data else measure_pocket
+    result = measure(**data)
     Path(destination).write_text(json.dumps(result, allow_nan=False), encoding="utf-8")

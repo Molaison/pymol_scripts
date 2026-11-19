@@ -13,14 +13,27 @@ _LAYERS = {
 }
 
 
-def capture_cavity(api, protein, ligand):
-    protein_atoms = api.get_model(f"({protein}) and not elem H").atom
-    ligand_atoms = api.get_model(f"({ligand}) and not elem H").atom
+def _atom_rows(atoms):
+    return [[*(round(x, 3) for x in atom.coord), round(atom.vdw, 3)] for atom in atoms]
+
+
+def capture_cavity(api, protein, ligand, state=1):
+    protein_atoms = api.get_model(f"({protein}) and not elem H", state).atom
+    ligand_atoms = api.get_model(f"({ligand}) and not elem H", state).atom
     if not protein_atoms or not ligand_atoms:
         raise CmdException("Cavity needs protein and ligand heavy atoms.")
-    atoms = [[*(round(x, 3) for x in atom.coord), round(atom.vdw, 3)]
-             for atom in protein_atoms + ligand_atoms]
+    atoms = _atom_rows(protein_atoms + ligand_atoms)
     return {"atoms": atoms, "ligand_indices": list(range(len(protein_atoms), len(atoms)))}
+
+
+def capture_interface_cavity(api, source, pairs, state):
+    atoms = api.get_model(f"%{source} and not elem H", state).atom
+    indices = {atom.index: index for index, atom in enumerate(atoms)}
+    blocks = [
+        [sorted(indices[atom.index] for atom in api.get_model(side, state).atom) for side in pair]
+        for pair in pairs
+    ]
+    return {"atoms": _atom_rows(atoms), "interface_pairs": blocks}
 
 
 def draw_cavity(identity, result, *, api=cmd):

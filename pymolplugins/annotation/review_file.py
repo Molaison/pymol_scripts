@@ -67,7 +67,12 @@ def _has_legacy_bundle_step(raw):
     step_cmd = raw.get("step_cmd") if isinstance(raw, dict) else None
     if not isinstance(step_cmd, str):
         return False
-    return tuple(line.strip() for line in step_cmd.splitlines() if line.strip()) in _LEGACY_BUNDLE_STEPS
+    text_call = '/bundle_renderer("{object}", str(bundle_source))'
+    path_call = '/bundle_renderer("{object}", bundle_source)'
+    lines = [line.strip() for line in step_cmd.splitlines() if line.strip()]
+    if lines and lines[-1] == text_call:
+        lines[-1] = path_call
+    return tuple(lines) in _LEGACY_BUNDLE_STEPS
 
 
 def bundle_matches_table(raw, table_path):

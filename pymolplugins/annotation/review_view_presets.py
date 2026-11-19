@@ -6,6 +6,7 @@ from itertools import combinations
 from functools import partial
 from string import ascii_letters, digits
 from subprocess import SubprocessError
+from uuid import uuid4
 from weakref import WeakKeyDictionary
 from xml.etree.ElementTree import ParseError
 
@@ -109,16 +110,25 @@ def parse_review_command(line, api):
 
 
 def execute_review_command(line, api):
+    from .bundle_view import CandidateCavity, draw_candidate_cavity, prepare_candidate_cavity
+
     source, action, compute, draw = prepare_review_command(line, api)
-    draw_review_view(api, source, action, draw, compute() if compute else None)
+    followup = draw_review_view(api, source, action, draw, compute() if compute else None)
+    if isinstance(followup, CandidateCavity):
+        try:
+            compute, draw = prepare_candidate_cavity(api, followup)
+            status, _ = draw_review_view(api, source, draw_candidate_cavity, draw, compute())
+            print(status)
+        except Exception as error:
+            print(f"{followup.title} skipped · {error}")
 
 
 def prepare_review_command(line, api):
     """Capture PyMOL data on the UI thread and return separate compute and draw calls."""
     action, source, args = parse_review_command(line, api)
     if action is _draw_interface:
-        inputs, scene = _capture_interface(api, source, *args)
-        return source, action, partial(_compute_interface, *inputs), partial(_draw_interface, api, source, *scene)
+        snapshots, scene = _capture_interface(api, source, *args)
+        return source, action, partial(_compute_interface, snapshots), partial(_draw_interface, api, source, *scene)
     if action is _show_membrane:
         state, calpha, phosphorus, pdb = _capture_membrane(api, source, *args)
         return source, action, partial(_estimate_membrane, calpha, phosphorus, pdb), partial(action, api, source, *args, state, calpha)
@@ -194,45 +204,44 @@ def _dots(api, source, kind, points, color, radius):
 
 def _capture_interface(api, source, protein, partners, ligand, radius, scope):
     state = api.get_object_state(source)
-    obstacles = api.get_coords(f"%{source} and not elem H", state)
     proximity, snapshots = [], []
     for first, second in partners:
         left = f"(({first}) and not elem H) within {radius:g} of (({second}) and not elem H)"
         right = f"(({second}) and not elem H) within {radius:g} of (({first}) and not elem H)"
         if not api.count_atoms(left, state=state):
             continue
-        proximity.extend((left, right))
+        proximity.append((left, right))
         typed, models = _capture_interactions(api, f"byres ({left})", f"byres ({right})", state)
-        snapshots.append((typed, models, api.get_coords(left, state), api.get_coords(right, state)))
+        snapshots.append((typed, models))
     if not proximity:
         raise ValueError(f"No interface atoms found within {radius:g} Å")
-    focus = "byres (" + " or ".join(f"({part})" for part in proximity) + ")"
-    return (snapshots, obstacles), (protein, ligand, scope, state, focus)
+    focus = "byres (" + " or ".join(f"({part})" for pair in proximity for part in pair) + ")"
+    pocket = ligand is not None and partners[0][0] == protein
+    return snapshots, (protein, ligand, scope, state, focus, proximity, pocket)
 
 
-def _compute_interface(snapshots, obstacles):
-    import numpy as np
-    from .review_view_geometry import aromatic_rings, interface_voids, stacking_pairs
+def _compute_interface(snapshots):
+    from .review_view_geometry import aromatic_rings, stacking_pairs
 
-    coords, contacts, void_points = {}, set(), []
+    coords, contacts = {}, set()
     polar, salt, pi_pairs = set(), set(), []
-    for typed, models, left, right in snapshots:
+    for typed, models in snapshots:
         coords.update({atom.index: atom.coord for model in models for atom in model.atom})
         polar.update(typed["polar_contacts"])
         salt.update(typed["salt_bridges"])
         for start, end, ids1, ids2 in stacking_pairs(*(aromatic_rings(model) for model in models)):
             pi_pairs.append((start, end))
             contacts.update(ids1 + ids2)
-        void_points.extend(interface_voids(np.asarray(left), np.asarray(right), np.asarray(obstacles)))
     for a, b in polar | salt:
         contacts.update((a, b))
-    return coords, contacts, polar, salt, pi_pairs, void_points
+    return coords, contacts, polar, salt, pi_pairs
 
 
-def _draw_interface(api, source, protein, ligand, scope, state, focus, data):
+def _draw_interface(api, source, protein, ligand, scope, state, focus, proximity, pocket, data):
     from pymol import util
+    from .bundle_view import CandidateCavity
 
-    coords, contacts, polar, salt, pi_pairs, void_points = data
+    coords, contacts, polar, salt, pi_pairs = data
     residues = focus if scope == "nearby" else ("byres (" + _indices(source, contacts) + ")" if contacts else "none")
     sidechains = f"(({residues}) and polymer.protein) and not ({_BACKBONE})"
     api.show("cartoon", protein)
@@ -249,10 +258,15 @@ def _draw_interface(api, source, protein, ligand, scope, state, focus, data):
     _cylinders(api, source, "salt_bridges", ((coords[a], coords[b]) for a, b in salt), (0.91, 0.26, 0.62), 0.13, 1.1)
     _dots(api, source, "pi_stacks", (a + (b - a) * t for a, b in pi_pairs for t in (0, .25, .5, .75, 1)),
           (0.46, 0.51, 1.0), 0.19)
-    _dots(api, source, "interface_voids", void_points, (0.1, 0.59, 0.82), 0.22)
     api.zoom(focus, 5, state=state)
-    print(f"Interface: {len(polar)} polar contacts, {len(salt)} salt bridges, {len(pi_pairs)} π stacks, "
-          f"{len(void_points)} void points")
+    print(f"Interface: {len(polar)} polar contacts, {len(salt)} salt bridges, {len(pi_pairs)} π stacks")
+
+    def capture(renderer):
+        if pocket:
+            return renderer.capture_cavity(api, protein, ligand, state)
+        return renderer.capture_interface_cavity(api, source, proximity, state)
+
+    return CandidateCavity("Interface cavity", f"{source}_{uuid4().hex[:12]}", capture)
 
 
 def _tmdet_pdb(api, source, protein, state):
