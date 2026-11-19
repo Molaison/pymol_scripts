@@ -91,10 +91,12 @@ def _style_overlay(name, color):
 
 
 def _align_copy(overlay, target, method, mobile_filter, target_filter):
-    trial = cmd.get_unused_name("sa_compare_trial")
-    mobile_mask = cmd.get_unused_name("sa_compare_mobile")
-    target_mask = cmd.get_unused_name("sa_compare_reference")
-    pairs = cmd.get_unused_name("sa_compare_pairs")
+    token = uuid4().hex[:12]
+    trial = f"sa_compare_{token}"
+    mobile_mask = f"sa_compare_mobile_{token}"
+    target_mask = f"sa_compare_reference_{token}"
+    pairs = f"sa_compare_pairs_{token}"
+    fitted = False
     try:
         cmd.create(trial, f"%{overlay.name}", zoom=0)
         cmd.disable(trial)
@@ -120,21 +122,19 @@ def _align_copy(overlay, target, method, mobile_filter, target_filter):
         if not isfinite(rmsd) or rmsd < 0:
             raise ValueError("PyMOL could not align these selections.")
         _style_overlay(trial, overlay.color)
-        cmd.enable(trial)
-        backup = cmd.get_unused_name("sa_compare_before_fit")
-        cmd.set_name(overlay.name, backup)
-        try:
-            cmd.set_name(trial, overlay.name)
-        except Exception:
-            cmd.set_name(backup, overlay.name)
-            raise
-        cmd.delete(backup)
-        return rmsd
+        fitted = True
     finally:
         cmd.delete(mobile_mask)
         cmd.delete(target_mask)
         cmd.delete(pairs)
-        cmd.delete(trial)
+        if not fitted:
+            cmd.delete(trial)
+    # PyMOL can retain selection references after deleting an aligned object.
+    # Keep fresh native names while the list retains the same candidate ID.
+    cmd.delete(overlay.name)
+    overlay.name = trial
+    cmd.enable(trial)
+    return rmsd
 
 
 def _alignment_dialog(parent, overlays, references):
