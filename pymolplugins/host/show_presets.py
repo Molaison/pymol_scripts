@@ -191,6 +191,8 @@ class ShowPresetsDialog(QtWidgets.QDialog):
 def show_presets():
     from pymol.gui import get_qtwindow
 
+    if not isinstance(QtWidgets.QApplication.instance(), QtWidgets.QApplication):
+        raise RuntimeError("Open the PyMOL Qt window, or pass a preset and object to pp_view.")
     global _dialog
     if _dialog is None:
         _dialog = ShowPresetsDialog(get_qtwindow())
