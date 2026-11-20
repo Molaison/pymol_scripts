@@ -16,6 +16,7 @@ collections_panel
 保留脚本与同仓库的核心模块路径。
 
 界面沿用当前仓库 Structure Annotator 的原生 Qt 分组框和系统样式。
+macOS 下可从任意工作目录通过脚本绝对路径执行 `run`，随后使用 `collections_panel`。
 左侧直接显示数据、采样和朝向设置，右侧始终显示样本；不使用二级标签页。
 设置较多时左侧可滚动，预览区域保持可见。
 
@@ -80,7 +81,7 @@ pose 模式中 target 无法充分对应会拒绝该候选并记录原因。
 
 ## 整理展示样本
 
-样本页支持 Ctrl / Shift 多选：
+样本页支持 Ctrl / Shift 多选，macOS 使用 Command / Shift：
 
 - **固定 / 解除固定**：固定状态保存在 collection，固定样本不能直接删除或替换。
 - **删除选中**：移出 collection，不删除输入结构；至少保留一个样本。

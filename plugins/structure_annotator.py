@@ -1086,9 +1086,21 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
 
     def _build_ui(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
+        groups_layout = layout
+        if sys.platform == "darwin":
+            scroll = QtWidgets.QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+            groups = QtWidgets.QWidget()
+            groups_layout = QtWidgets.QVBoxLayout(groups)
+            groups_layout.setContentsMargins(0, 0, 0, 0)
+            scroll.setWidget(groups)
+            layout.addWidget(scroll, 1)
 
         dataset_box = QtWidgets.QGroupBox("Dataset")
         dataset_layout = QtWidgets.QGridLayout(dataset_box)
+        if sys.platform == "darwin":
+            dataset_layout.setVerticalSpacing(6)
 
         self.dir_edit = QtWidgets.QLineEdit()
         self.dir_browse = QtWidgets.QPushButton("Browse…")
@@ -1106,10 +1118,12 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         dataset_layout.addWidget(self.pattern_edit, 1, 1, 1, 2)
         dataset_layout.addWidget(self.load_btn, 2, 2)
 
-        layout.addWidget(dataset_box)
+        groups_layout.addWidget(dataset_box)
 
         config_box = QtWidgets.QGroupBox("Annotation")
         config_layout = QtWidgets.QGridLayout(config_box)
+        if sys.platform == "darwin":
+            config_layout.setVerticalSpacing(6)
 
         self.label_edit = QtWidgets.QLineEdit()
         self.label_edit.editingFinished.connect(self._on_label_changed)
@@ -1145,6 +1159,7 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         config_layout.addWidget(self.skip_annotated_cb, 5, 1)
         config_layout.addWidget(self.preload_enabled_cb, 6, 1)
         preload_row = QtWidgets.QHBoxLayout()
+        preload_row.setContentsMargins(0, 0, 0, 0)
         preload_row.addWidget(QtWidgets.QLabel("Preload ahead:"))
         preload_row.addWidget(self.preload_ahead_spin)
         preload_row.addSpacing(12)
@@ -1159,17 +1174,19 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         config_layout.addWidget(QtWidgets.QLabel("On step (after load):"), 9, 0)
         config_layout.addWidget(self.step_cmd_edit, 9, 1)
 
-        layout.addWidget(config_box)
+        groups_layout.addWidget(config_box)
 
         self.values_box = QtWidgets.QGroupBox("Buckets")
         self.values_layout = QtWidgets.QVBoxLayout(self.values_box)
-        layout.addWidget(self.values_box)
+        groups_layout.addWidget(self.values_box)
 
         nav_row = QtWidgets.QHBoxLayout()
-        self.prev_btn = QtWidgets.QPushButton("Prev (Alt+Left)")
-        self.next_btn = QtWidgets.QPushButton("Next (Alt+Right)")
+        keys = ("⌥←", "⌥→", "⌥Z") if sys.platform == "darwin" else ("Alt+Left", "Alt+Right", "Alt+Z")
+        previous_key, next_key, undo_key = keys
+        self.prev_btn = QtWidgets.QPushButton(f"Prev ({previous_key})")
+        self.next_btn = QtWidgets.QPushButton(f"Next ({next_key})")
         self.next_unann_btn = QtWidgets.QPushButton("Next Unannotated")
-        self.undo_btn = QtWidgets.QPushButton("Undo (Alt+Z)")
+        self.undo_btn = QtWidgets.QPushButton(f"Undo ({undo_key})")
         self.reload_btn = QtWidgets.QPushButton("Reload")
 
         self.prev_btn.clicked.connect(self._prev)
@@ -1354,6 +1371,7 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
             self.values_layout.addWidget(btn_widget)
 
         form = QtWidgets.QFormLayout()
+        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.ExpandingFieldsGrow)
         for value in values:
             edit = QtWidgets.QLineEdit()
             edit.setPlaceholderText("On bucket cmd (optional); e.g. set_name {object}, good_{object}")
@@ -1421,7 +1439,7 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         for btn in self._value_buttons:
             label = btn.text().split(" (")[0]
             if current_value is not None and label == current_value:
-                btn.setStyleSheet("font-weight: bold; background-color: #cdebc5;")
+                btn.setStyleSheet("font-weight: bold; background-color: #cdebc5; color: #173421;")
             else:
                 btn.setStyleSheet("")
 
@@ -1441,12 +1459,17 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
 
 def show_structure_annotator_panel() -> QtWidgets.QDialog:
     global _panel
-    if _panel is not None:
-        _panel.raise_()
-        _panel.activateWindow()
-        return _panel
-    _panel = StructureAnnotatorPanel(parent=QtWidgets.QApplication.activeWindow())
+    if _panel is None:
+        parent = QtWidgets.QApplication.activeWindow()
+        _panel = StructureAnnotatorPanel(parent=parent)
+        if sys.platform == "darwin":
+            handle = parent.windowHandle() if parent is not None else None
+            screen = handle.screen() if handle is not None else QtWidgets.QApplication.primaryScreen()
+            available = screen.availableGeometry().size() - QtCore.QSize(32, 48)
+            _panel.resize(QtCore.QSize(680, 820).boundedTo(available))
     _panel.show()
+    _panel.raise_()
+    _panel.activateWindow()
     return _panel
 
 

@@ -9,7 +9,8 @@ import sys
 import traceback
 from concurrent.futures import CancelledError, ThreadPoolExecutor
 
-_repository = str(Path(__file__).resolve().parents[1])
+# PyMOL run executes in its own globals, where __file__ can belong to PyMOL.
+_repository = str(Path(sys._getframe().f_code.co_filename).resolve().parents[1])
 if _repository not in sys.path:
     sys.path.insert(0, _repository)
 from workflows.dataset_navigation import collections_core as core
@@ -97,6 +98,7 @@ class SamplingForm(QtWidgets.QGroupBox):
         super().__init__("数据与采样")
         layout = QtWidgets.QVBoxLayout(self)
         form = QtWidgets.QFormLayout()
+        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.ExpandingFieldsGrow)
         score_widget, self.scores = file_field(self)
         root_widget, self.root = file_field(self, directory=True)
         output_widget, self.output = file_field(self, directory=True)
@@ -117,6 +119,7 @@ class SamplingForm(QtWidgets.QGroupBox):
         help_text.setWordWrap(True)
         layout.addWidget(help_text)
         options = QtWidgets.QFormLayout()
+        options.setFieldGrowthPolicy(QtWidgets.QFormLayout.ExpandingFieldsGrow)
         self.count, self.seed = QtWidgets.QSpinBox(), QtWidgets.QSpinBox()
         self.count.setRange(1, 10000)
         self.count.setValue(24)
@@ -194,6 +197,7 @@ class RenderForm(QtWidgets.QGroupBox):
     def __init__(self):
         super().__init__("朝向与导出")
         form = QtWidgets.QFormLayout(self)
+        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.ExpandingFieldsGrow)
         self.target, self.binder = QtWidgets.QLineEdit("chain A"), QtWidgets.QLineEdit("chain B")
         self.orientation = QtWidgets.QComboBox()
         for label, value in (("统一 target", "target"), ("统一 binder", "binder"),
@@ -485,7 +489,8 @@ class CollectionDialog(QtWidgets.QDialog):
         self.settings_scroll.setWidget(settings)
         sample_box = QtWidgets.QGroupBox("样本预览")
         sample_layout = QtWidgets.QVBoxLayout(sample_box)
-        note = QtWidgets.QLabel("双击载入 PyMOL；Ctrl / Shift 多选。")
+        modifier = "Command" if sys.platform == "darwin" else "Ctrl"
+        note = QtWidgets.QLabel(f"双击载入 PyMOL；{modifier} / Shift 多选。")
         note.setWordWrap(True)
         sample_layout.addWidget(note)
         self.samples = QtWidgets.QListWidget()
