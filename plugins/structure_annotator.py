@@ -1077,6 +1077,11 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Structure Annotator")
         self.setMinimumWidth(520)
+        font = self.font()
+        font.setPixelSize(14)
+        self.setFont(font)
+        if sys.platform == "darwin":
+            self.setAttribute(QtCore.Qt.WA_MacSmallSize)
         self._bucket_inputs: Dict[str, QtWidgets.QLineEdit] = {}
         self._value_buttons: List[QtWidgets.QPushButton] = []
         self._build_ui()
@@ -1086,21 +1091,24 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
 
     def _build_ui(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
-        groups_layout = layout
-        if sys.platform == "darwin":
-            scroll = QtWidgets.QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-            groups = QtWidgets.QWidget()
-            groups_layout = QtWidgets.QVBoxLayout(groups)
-            groups_layout.setContentsMargins(0, 0, 0, 0)
-            scroll.setWidget(groups)
-            layout.addWidget(scroll, 1)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        groups = QtWidgets.QWidget()
+        groups_layout = QtWidgets.QVBoxLayout(groups)
+        groups_layout.setContentsMargins(0, 0, 0, 0)
+        groups_layout.setSpacing(8)
+        scroll.setWidget(groups)
+        layout.addWidget(scroll, 1)
 
         dataset_box = QtWidgets.QGroupBox("Dataset")
         dataset_layout = QtWidgets.QGridLayout(dataset_box)
-        if sys.platform == "darwin":
-            dataset_layout.setVerticalSpacing(6)
+        dataset_layout.setContentsMargins(10, 10, 10, 10)
+        dataset_layout.setHorizontalSpacing(10)
+        dataset_layout.setVerticalSpacing(6)
+        dataset_layout.setColumnStretch(1, 1)
 
         self.dir_edit = QtWidgets.QLineEdit()
         self.dir_browse = QtWidgets.QPushButton("Browse…")
@@ -1122,8 +1130,10 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
 
         config_box = QtWidgets.QGroupBox("Annotation")
         config_layout = QtWidgets.QGridLayout(config_box)
-        if sys.platform == "darwin":
-            config_layout.setVerticalSpacing(6)
+        config_layout.setContentsMargins(10, 10, 10, 10)
+        config_layout.setHorizontalSpacing(10)
+        config_layout.setVerticalSpacing(6)
+        config_layout.setColumnStretch(1, 1)
 
         self.label_edit = QtWidgets.QLineEdit()
         self.label_edit.editingFinished.connect(self._on_label_changed)
@@ -1147,7 +1157,7 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         self.step_cmd_edit = QtWidgets.QPlainTextEdit()
         self.step_cmd_edit.setPlaceholderText("PyMOL commands; use {object}, {file}, {index}, {count}")
         self.step_cmd_edit.setMaximumBlockCount(200)
-        self.step_cmd_edit.setFixedHeight(80)
+        self.step_cmd_edit.setFixedHeight(64)
 
         config_layout.addWidget(QtWidgets.QLabel("Label name:"), 0, 0)
         config_layout.addWidget(self.label_edit, 0, 1)
@@ -1178,7 +1188,10 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
 
         self.values_box = QtWidgets.QGroupBox("Buckets")
         self.values_layout = QtWidgets.QVBoxLayout(self.values_box)
+        self.values_layout.setContentsMargins(10, 10, 10, 10)
+        self.values_layout.setSpacing(6)
         groups_layout.addWidget(self.values_box)
+        groups_layout.addStretch(1)
 
         nav_row = QtWidgets.QHBoxLayout()
         keys = ("⌥←", "⌥→", "⌥Z") if sys.platform == "darwin" else ("Alt+Left", "Alt+Right", "Alt+Z")
@@ -1220,6 +1233,7 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
 
         self.status_label = QtWidgets.QLabel("")
         self.status_label.setWordWrap(True)
+        self.status_label.setTextFormat(QtCore.Qt.PlainText)
         layout.addWidget(self.status_label)
 
         footer_row = QtWidgets.QHBoxLayout()
@@ -1359,6 +1373,7 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
 
         if len(values) < 5:
             btn_row = QtWidgets.QHBoxLayout()
+            btn_row.setContentsMargins(0, 0, 0, 0)
             for i, value in enumerate(values):
                 hint = f" ({i + 1})" if i < 9 else ""
                 btn = QtWidgets.QPushButton(f"{value}{hint}")
@@ -1372,6 +1387,11 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
 
         form = QtWidgets.QFormLayout()
         form.setFieldGrowthPolicy(QtWidgets.QFormLayout.ExpandingFieldsGrow)
+        form.setFormAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        form.setLabelAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(6)
+        form.setContentsMargins(0, 0, 0, 0)
         for value in values:
             edit = QtWidgets.QLineEdit()
             edit.setPlaceholderText("On bucket cmd (optional); e.g. set_name {object}, good_{object}")
@@ -1394,6 +1414,7 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
     def _refresh_status(self) -> None:
         if not STATE.files:
             self.status_label.setText("No dataset loaded.")
+            self.status_label.setToolTip("")
             self.goto_spin.setRange(1, 1)
             self.undo_btn.setEnabled(False)
             return
@@ -1433,7 +1454,7 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         if current_value:
             status_text += f"\nThis file: {label_key} = {current_value}"
 
-        status_text += f"\n{path}"
+        self.status_label.setToolTip(path)
 
         # Highlight the bucket button matching the current file's annotation.
         for btn in self._value_buttons:
@@ -1462,11 +1483,10 @@ def show_structure_annotator_panel() -> QtWidgets.QDialog:
     if _panel is None:
         parent = QtWidgets.QApplication.activeWindow()
         _panel = StructureAnnotatorPanel(parent=parent)
-        if sys.platform == "darwin":
-            handle = parent.windowHandle() if parent is not None else None
-            screen = handle.screen() if handle is not None else QtWidgets.QApplication.primaryScreen()
-            available = screen.availableGeometry().size() - QtCore.QSize(32, 48)
-            _panel.resize(QtCore.QSize(680, 820).boundedTo(available))
+        handle = parent.windowHandle() if parent is not None else None
+        screen = handle.screen() if handle is not None else QtWidgets.QApplication.primaryScreen()
+        available = screen.availableGeometry().size() - QtCore.QSize(32, 48)
+        _panel.resize(QtCore.QSize(690, 800).boundedTo(available))
     _panel.show()
     _panel.raise_()
     _panel.activateWindow()

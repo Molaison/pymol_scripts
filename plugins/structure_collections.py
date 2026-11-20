@@ -40,11 +40,22 @@ def file_field(parent, directory=False, save=False):
     return widget, edit
 
 
+def _form_layout(parent=None):
+    form = QtWidgets.QFormLayout(parent)
+    form.setFieldGrowthPolicy(QtWidgets.QFormLayout.ExpandingFieldsGrow)
+    form.setFormAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+    form.setLabelAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+    form.setHorizontalSpacing(10)
+    form.setVerticalSpacing(6)
+    return form
+
+
 class ScoreTable(QtWidgets.QTableWidget):
     def __init__(self):
         super().__init__(0, 5)
         self.setHorizontalHeaderLabels(["采用 / 打分列", "层数", "最低值（可空）", "最高值（可空）", "数值示例"])
         self.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        self.verticalHeader().setDefaultSectionSize(26)
         self.setMinimumHeight(190)
 
     def populate(self, rows):
@@ -97,8 +108,9 @@ class SamplingForm(QtWidgets.QGroupBox):
     def __init__(self):
         super().__init__("数据与采样")
         layout = QtWidgets.QVBoxLayout(self)
-        form = QtWidgets.QFormLayout()
-        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.ExpandingFieldsGrow)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+        form = _form_layout()
         score_widget, self.scores = file_field(self)
         root_widget, self.root = file_field(self, directory=True)
         output_widget, self.output = file_field(self, directory=True)
@@ -118,8 +130,7 @@ class SamplingForm(QtWidgets.QGroupBox):
                                     "相同分数不拆层；逐层轮询，所有已选样本之间执行结构去重。")
         help_text.setWordWrap(True)
         layout.addWidget(help_text)
-        options = QtWidgets.QFormLayout()
-        options.setFieldGrowthPolicy(QtWidgets.QFormLayout.ExpandingFieldsGrow)
+        options = _form_layout()
         self.count, self.seed = QtWidgets.QSpinBox(), QtWidgets.QSpinBox()
         self.count.setRange(1, 10000)
         self.count.setValue(24)
@@ -196,8 +207,8 @@ class SamplingForm(QtWidgets.QGroupBox):
 class RenderForm(QtWidgets.QGroupBox):
     def __init__(self):
         super().__init__("朝向与导出")
-        form = QtWidgets.QFormLayout(self)
-        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.ExpandingFieldsGrow)
+        form = _form_layout(self)
+        form.setContentsMargins(10, 10, 10, 10)
         self.target, self.binder = QtWidgets.QLineEdit("chain A"), QtWidgets.QLineEdit("chain B")
         self.orientation = QtWidgets.QComboBox()
         for label, value in (("统一 target", "target"), ("统一 binder", "binder"),
@@ -449,10 +460,20 @@ class CollectionDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Structure Collections")
         self.setMinimumWidth(920)
-        self.resize(1200, 850)
+        font = self.font()
+        font.setPixelSize(14)
+        self.setFont(font)
+        if sys.platform == "darwin":
+            self.setAttribute(QtCore.Qt.WA_MacSmallSize)
+        handle = parent.windowHandle() if parent is not None else None
+        screen = handle.screen() if handle is not None else QtWidgets.QApplication.primaryScreen()
+        available = screen.availableGeometry().size() - QtCore.QSize(32, 48)
+        self.resize(QtCore.QSize(1200, 850).boundedTo(available))
         self.manifest_path, self.manifest, self.previous_scene, self.pending_path = None, None, None, None
         self.task, self.actions, self.scene = CollectionTask(self), CollectionActions(self), CollectionPreview(self)
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
         self.buttons = []
         self.build_content(layout)
         self.cancel_button = QtWidgets.QPushButton("取消任务")
@@ -476,6 +497,7 @@ class CollectionDialog(QtWidgets.QDialog):
         settings = QtWidgets.QWidget()
         settings_layout = QtWidgets.QVBoxLayout(settings)
         settings_layout.setContentsMargins(0, 0, 0, 0)
+        settings_layout.setSpacing(6)
         self.sampling, self.rendering = SamplingForm(), RenderForm()
         settings_layout.addWidget(self.sampling)
         self.add_buttons(settings_layout, (("生成 Collection", self.actions.generate),
@@ -489,6 +511,8 @@ class CollectionDialog(QtWidgets.QDialog):
         self.settings_scroll.setWidget(settings)
         sample_box = QtWidgets.QGroupBox("样本预览")
         sample_layout = QtWidgets.QVBoxLayout(sample_box)
+        sample_layout.setContentsMargins(10, 10, 10, 10)
+        sample_layout.setSpacing(6)
         modifier = "Command" if sys.platform == "darwin" else "Ctrl"
         note = QtWidgets.QLabel(f"双击载入 PyMOL；{modifier} / Shift 多选。")
         note.setWordWrap(True)
@@ -509,6 +533,7 @@ class CollectionDialog(QtWidgets.QDialog):
 
     def add_buttons(self, layout, items):
         row = QtWidgets.QHBoxLayout()
+        row.setSpacing(6)
         for label, callback in items:
             button = QtWidgets.QPushButton(label)
             button.clicked.connect(lambda checked=False, action=callback: self.guarded(action))
@@ -546,8 +571,7 @@ class CollectionDialog(QtWidgets.QDialog):
         self.status.setText(f"{action}。样本 {len(manifest['samples'])} / {manifest['config']['count']}；"
                             f"无效 {len(manifest['invalid_structures'])}；"
                             f"未验证而暂不纳入 {len(manifest.get('unverified_candidates', []))}；"
-                            f"图像成功 {succeeded} / {len(export['results'])}，复用 {export.get('reused', 0)}。"
-                            f"详情：{path}")
+                            f"图像成功 {succeeded} / {len(export['results'])}，复用 {export.get('reused', 0)}。")
 
     def open_manifest(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "打开 Collection", "", "Collection (*.json)")
@@ -565,6 +589,7 @@ class CollectionDialog(QtWidgets.QDialog):
         self.sampling.restore_config(manifest["config"], self.manifest_path.parent)
         self.rendering.restore_config(manifest["config"])
         self.scene.populate()
+        self.status.setToolTip(str(self.manifest_path))
         self.status.setText(f"已打开 {len(manifest['samples'])} 个样本，并恢复采样与朝向设置。")
 
     def recover_current(self):
