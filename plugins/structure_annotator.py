@@ -1486,7 +1486,7 @@ def show_structure_annotator_panel() -> QtWidgets.QDialog:
         handle = parent.windowHandle() if parent is not None else None
         screen = handle.screen() if handle is not None else QtWidgets.QApplication.primaryScreen()
         available = screen.availableGeometry().size() - QtCore.QSize(32, 48)
-        _panel.resize(QtCore.QSize(690, 800).boundedTo(available))
+        _panel.resize(QtCore.QSize(690, 865).boundedTo(available))
     _panel.show()
     _panel.raise_()
     _panel.activateWindow()
