@@ -366,6 +366,10 @@ if args.stage in ("qt", "all") and (args.hidden_qt_child or os.name != "nt"):
     assert panel.rendering.orientation.currentData() == panel.manifest["config"]["orientation"]
     assert panel.sampling.count.value() == panel.manifest["config"]["count"]
     from pymol import cmd
+    if sys.platform == "darwin":
+        from pymol2 import SingletonPyMOL
+        pymol_instance = SingletonPyMOL()
+        pymol_instance.start()
     cmd.run(str(repository / "plugins/structure_collections.py"))
     cmd.fragment("ala", "col_original_scene")
     original_view = tuple(cmd.get_view())
