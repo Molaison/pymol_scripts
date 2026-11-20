@@ -10,6 +10,7 @@
 | Binding / Interaction | `analysis/interactions/draw_hydrogen_bonds.py` | `draw_interactions` visualizes inter-chain hydrogen bonds and salt bridges with cyan/magenta dashes. |
 | Binding / Interaction | `analysis/interactions/ligand_surrounding.py` | `show_ligand_env`, `preset_binding`, etc., reveal ligand environments (sticks, surfaces, properties, distances). |
 | Binding / Interaction | `analysis/interactions/show_contacts.py` | Legacy `contacts` plugin that classifies good/bad polar contacts plus Tk/Qt GUI entry points. |
+| Binding / Interaction | `analysis/interactions/plip_interactions.py` | `plip_interface` + Qt dialog to run pharmai/plip and visualize protein–ligand interactions (H-bonds, hydrophobic, salt bridges, π-stacking, etc.) while optionally hiding non-interface residues. Supports external Python via `plip_python` / `PYMOL_PLIP_PYTHON` (see `analysis/interactions/plip_runner.py`). |
 | Cavities | `analysis/cavities/identify_backbone_cavity.py` | Full-feature cavity finder with alphashape grid search, CGO output, and optional Qt dialog. |
 | Cavities | `analysis/cavities/identify_backbone_cavity_gemini.py` | Variant of the backbone cavity finder tuned for Gemini-style workflows. |
 | Geometry | `analysis/geometry/measure_inertia.py` | Computes inertia tensors, draws ellipsoids, exports MSMS surfaces, and exposes `calculate_inertia`. |
@@ -24,6 +25,7 @@
 | Workflows | `workflows/dataset_navigation/file_management.py` | Modular loader with pinning, batch navigation, and switch-command registration (`load_structures`). |
 | Workflows | `workflows/dataset_navigation/load_into_single_object.py` | Loads a directory of files into a single multi-state object for movie-style review. |
 | Workflows | `plugins/structure_annotator.py` | Qt panel for fast structure annotation that writes labels back into PDB `REMARK` or a mmCIF save frame; provides `show_structure_annotator_panel`, `sa_load_dir`, `sa_annotate`. |
+| Workflows | `plugins/structure_collections.py` | `collections_panel`: joint score-stratified sampling, CA shape/pose RMSD diversity, target/binder/PCA/symmetry frames, saved collections and parallel headless ray export. See `docs/01_structure_collections.md`. |
 | Workflows | `workflows/grouping/load_into_groups.py` | Groups aligned models by parsed prefixes and aligns each group before merging. |
 | Examples | `examples/pymol_wiki/color_by_mutation.py` | PyMOL Wiki script for visualizing mutations via BLOSUM90-based coloring. |
 | Archive / Specialized | `archive/specialized/align_ligand.py` | CLI helper for transferring ligands between reference/destination structures. |

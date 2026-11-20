@@ -10,11 +10,27 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 import traceback
+import sys
 
 STRUCTURE_PATTERN = r"^.+\.(?:pdb|cif)(?:\.gz)?$"
 OBJECT_PREFIX = "sa"
 REMARK_PREFIX = "REMARK 950 PYMOL_ANNOTATOR"
-SAVE_FRAME_PREFIX = "save_pymol_annotator_"
+
+
+def _long_path(path: str) -> str:
+    """
+    Convert path to Windows long path format if needed.
+    Windows has a 260 character path limit unless using \\?\ prefix.
+    """
+    if sys.platform != "win32":
+        return path
+    if not path or path.startswith("\\\\?\\"):
+        return path
+    # Convert to absolute path and add long path prefix
+    abs_path = os.path.abspath(path)
+    if len(abs_path) >= 240:  # Add prefix for long paths
+        return "\\\\?\\" + abs_path
+    return path
 
 
 def _split_values(values_text: str) -> List[str]:
@@ -68,6 +84,7 @@ def derive_object_name(filename: str) -> str:
 
 
 def _read_text_file(path: str) -> str:
+    path = _long_path(path)
     if path.lower().endswith(".gz"):
         with gzip.open(path, "rt", encoding="utf-8", errors="replace", newline="") as fh:
             return fh.read()
@@ -76,6 +93,7 @@ def _read_text_file(path: str) -> str:
 
 
 def _write_text_file(path: str, text: str) -> None:
+    path = _long_path(path)
     if path.lower().endswith(".gz"):
         with gzip.open(path, "wt", encoding="utf-8", newline="") as fh:
             fh.write(text)
@@ -92,6 +110,95 @@ def _strip_existing_pdb_remark(lines: List[str], label_key: str) -> List[str]:
             continue
         filtered.append(line)
     return filtered
+
+
+def read_pdb_annotations(path: str) -> Dict[str, str]:
+    """Read all PYMOL_ANNOTATOR remarks from a PDB file."""
+    result = {}
+    try:
+        text = _read_text_file(path)
+        pattern = re.compile(rf"^{re.escape(REMARK_PREFIX)}\s+(\S+)=(\S+)")
+        for line in text.splitlines():
+            m = pattern.match(line)
+            if m:
+                key, value = m.group(1), m.group(2)
+                result[key] = value
+    except Exception:
+        pass
+    return result
+
+
+def read_cif_annotations(path: str) -> Dict[str, str]:
+    """Read all PYMOL_ANNOTATOR comments from a CIF file."""
+    result = {}
+    try:
+        text = _read_text_file(path)
+        # Pattern: # PYMOL_ANNOTATOR key=value ts=...
+        pattern = re.compile(rf"^#\s*{re.escape(REMARK_PREFIX.split()[-1])}\s+(\S+)=(\S+)")
+        for line in text.splitlines():
+            m = pattern.match(line)
+            if m:
+                key, value = m.group(1), m.group(2)
+                result[key] = value
+    except Exception:
+        pass
+    return result
+
+
+def read_structure_annotations(path: str) -> Dict[str, str]:
+    """Read existing annotations from a structure file."""
+    path = _resolve_annotation_path(path)
+    lower = path.lower()
+    if lower.endswith(".pdb") or lower.endswith(".pdb.gz"):
+        return read_pdb_annotations(path)
+    if lower.endswith(".cif") or lower.endswith(".cif.gz"):
+        return read_cif_annotations(path)
+    return {}
+
+
+def has_annotation_fast(path: str, label_key: str) -> bool:
+    """
+    Fast check if a structure file has a specific annotation.
+    Uses simple string matching instead of full parsing.
+    For PDB files, only reads the header portion since REMARK lines are at the top.
+    """
+    try:
+        path = _long_path(path)
+        lower = path.lower()
+        pdb_marker = f"{REMARK_PREFIX} {label_key}="
+        # CIF uses comment format: # PYMOL_ANNOTATOR key=value
+        cif_marker = f"# PYMOL_ANNOTATOR {label_key}="
+
+        if lower.endswith(".gz"):
+            # For gzip, read in chunks to avoid loading entire file
+            with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
+                # Read up to 512KB for header check
+                content = fh.read(512 * 1024)
+                if pdb_marker in content:
+                    return True
+                if lower.endswith(".cif.gz") and cif_marker in content:
+                    return True
+                # CIF annotations may be at end, need to read more
+                if lower.endswith(".cif.gz"):
+                    rest = fh.read()
+                    if cif_marker in rest:
+                        return True
+        else:
+            # For non-gzip PDB, REMARK is at top, read limited portion
+            if lower.endswith(".pdb"):
+                with open(path, "rt", encoding="utf-8", errors="replace") as fh:
+                    # REMARKs are at file start, 256KB should be enough
+                    content = fh.read(256 * 1024)
+                    return pdb_marker in content
+            else:
+                # CIF: annotations may be at end, read full file
+                with open(path, "rt", encoding="utf-8", errors="replace") as fh:
+                    content = fh.read()
+                    return cif_marker in content
+
+        return False
+    except Exception:
+        return False
 
 
 def write_pdb_annotation(path: str, label_key: str, label_value: str) -> None:
@@ -118,62 +225,24 @@ def write_pdb_annotation(path: str, label_key: str, label_value: str) -> None:
     _write_text_file(path, out)
 
 
-def _cif_quote_value(value: str) -> List[str]:
-    if value is None:
-        return ["."]
-    value = str(value)
-    if "\n" in value or "\r" in value:
-        return [";", value.rstrip("\n\r"), ";"]
-    if not value or re.search(r"\s|['\"]|;", value):
-        # Use semicolon quoting to avoid CIF quoting edge-cases.
-        return [";", value, ";"]
-    return [value]
-
-
-def _strip_existing_cif_save_frame(lines: List[str], save_name: str) -> List[str]:
-    stripped = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if line.strip() == save_name:
-            i += 1
-            while i < len(lines):
-                if lines[i].strip() == "save_":
-                    i += 1
-                    break
-                i += 1
-            continue
-        stripped.append(line)
-        i += 1
-    return stripped
+def _strip_existing_cif_comment(lines: List[str], label_key: str) -> List[str]:
+    """Remove existing PYMOL_ANNOTATOR comment for the given label_key."""
+    prefix = f"# PYMOL_ANNOTATOR {label_key}="
+    return [line for line in lines if not line.startswith(prefix)]
 
 
 def write_cif_annotation(path: str, label_key: str, label_value: str) -> None:
+    """Write annotation as a CIF comment to avoid breaking strict parsers like Rosetta."""
     text = _read_text_file(path)
     has_trailing_newline = text.endswith("\n")
     lines = text.splitlines(keepends=True)
 
-    save_name = f"{SAVE_FRAME_PREFIX}{_sanitize_token(label_key, 'label')}"
-    lines = _strip_existing_cif_save_frame(lines, save_name)
+    lines = _strip_existing_cif_comment(lines, label_key)
 
     timestamp = datetime.datetime.now().isoformat(timespec="seconds")
-    frame_lines = [f"\n{save_name}\n"]
-
-    for tag, value in (
-        ("_pymol_annotator.label_name", label_key),
-        ("_pymol_annotator.label_value", label_value),
-        ("_pymol_annotator.timestamp", timestamp),
-    ):
-        quoted = _cif_quote_value(value)
-        if len(quoted) == 1:
-            frame_lines.append(f"{tag} {quoted[0]}\n")
-        else:
-            frame_lines.append(f"{tag}\n")
-            for entry in quoted:
-                frame_lines.append(f"{entry}\n")
-
-    frame_lines.append("save_\n")
-    lines.extend(frame_lines)
+    # Use comment format similar to PDB REMARK
+    comment = f"# PYMOL_ANNOTATOR {label_key}={label_value} ts={timestamp}\n"
+    lines.append(comment)
 
     out = "".join(lines)
     if has_trailing_newline and not out.endswith("\n"):
@@ -192,6 +261,24 @@ def annotate_structure_file(path: str, label_key: str, label_value: str) -> None
     raise ValueError(f"Unsupported file type: {path}")
 
 
+def remove_structure_annotation(path: str, label_key: str) -> None:
+    """Delete a single PYMOL_ANNOTATOR entry from a structure file (used for undo)."""
+    text = _read_text_file(path)
+    has_trailing_newline = text.endswith("\n")
+    lines = text.splitlines(keepends=True)
+    lower = path.lower()
+    if lower.endswith(".pdb") or lower.endswith(".pdb.gz"):
+        lines = _strip_existing_pdb_remark(lines, label_key)
+    elif lower.endswith(".cif") or lower.endswith(".cif.gz"):
+        lines = _strip_existing_cif_comment(lines, label_key)
+    else:
+        raise ValueError(f"Unsupported file type: {path}")
+    out = "".join(lines)
+    if has_trailing_newline and not out.endswith("\n"):
+        out += "\n"
+    _write_text_file(path, out)
+
+
 @dataclass
 class AnnotatorState:
     dataset_dir: str = "."
@@ -205,12 +292,15 @@ class AnnotatorState:
     auto_advance: bool = True
     keep_previous: bool = False
     prefer_gz: bool = True
+    skip_annotated: bool = False  # Skip files that already have the current label
     preload_enabled: bool = True
     preload_ahead: int = 2
     preload_interval_ms: int = 250
     background_decompress_gz: bool = True
     managed_objects: List[str] = field(default_factory=list)
     current_object: Optional[str] = None
+    undo_history: List[dict] = field(default_factory=list)
+    annotated_indices: set = field(default_factory=set)
 
     def values(self) -> List[str]:
         return _split_values(self.values_text) or ["Good", "Bad"]
@@ -222,6 +312,12 @@ class AnnotatorState:
 
 
 STATE = globals().get("STATE", AnnotatorState())
+
+# Back-fill fields added in newer versions when reusing a STATE from a prior load.
+if not hasattr(STATE, "undo_history"):
+    STATE.undo_history = []
+if not hasattr(STATE, "annotated_indices"):
+    STATE.annotated_indices = set()
 
 
 def _structure_dedupe_key(file_path: str) -> str:
@@ -235,7 +331,10 @@ def _structure_dedupe_key(file_path: str) -> str:
     return name
 
 
-def _list_structure_files(path: str, pattern: str, prefer_gz: bool) -> List[str]:
+def _list_structure_files(
+    path: str, pattern: str, prefer_gz: bool,
+    skip_annotated: bool = False, label_key: str = None
+) -> List[str]:
     compiled = re.compile(pattern)
     selected: Dict[str, str] = {}
     for entry in os.listdir(path):
@@ -257,6 +356,20 @@ def _list_structure_files(path: str, pattern: str, prefer_gz: bool) -> List[str]
                     selected[key] = full_path
 
     files = sorted(selected.values())
+
+    # Filter out files that already have the specified label
+    if skip_annotated and label_key:
+        filtered = []
+        skipped = 0
+        for f in files:
+            if has_annotation_fast(f, label_key):
+                skipped += 1
+            else:
+                filtered.append(f)
+        if skipped > 0:
+            print(f"Structure Annotator: skipped {skipped} already-annotated files")
+        files = filtered
+
     return files
 
 
@@ -288,6 +401,40 @@ def _object_exists(object_name: str) -> bool:
         return object_name in set(cmd.get_object_list())
     except Exception:
         return False
+
+
+def _get_enabled_managed_object() -> Optional[str]:
+    """Get the currently enabled managed object in PyMOL, if any."""
+    try:
+        enabled = cmd.get_names("objects", enabled_only=1)
+        for obj in enabled:
+            if obj in STATE.managed_objects:
+                return obj
+        return None
+    except Exception:
+        return None
+
+
+def _verify_current_object_enabled() -> bool:
+    """
+    Verify that STATE.current_object is actually enabled in PyMOL.
+    Returns True if matched, False if mismatch detected.
+    """
+    if not STATE.current_object:
+        return False
+    try:
+        enabled = cmd.get_names("objects", enabled_only=1)
+        return STATE.current_object in enabled
+    except Exception:
+        return False
+
+
+def _get_index_for_object(obj_name: str) -> Optional[int]:
+    """Extract the index from an object name like 'sa_00001_filename'."""
+    m = re.match(rf"^{re.escape(OBJECT_PREFIX)}_(\d+)_", obj_name)
+    if m:
+        return int(m.group(1)) - 1
+    return None
 
 
 _bg_executor = globals().get("_bg_executor", None)
@@ -331,6 +478,8 @@ def _is_gz_path(path: str) -> bool:
 
 
 def _decompress_gz_to_cache(src_path: str, dst_path: str) -> str:
+    src_path = _long_path(src_path)
+    dst_path = _long_path(dst_path)
     tmp_path = dst_path + ".tmp"
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)
     with gzip.open(src_path, "rb") as fin, open(tmp_path, "wb") as fout:
@@ -488,11 +637,18 @@ def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> O
         load_path = path
         if _is_gz_path(path) and STATE.background_decompress_gz:
             requested = _request_decompressed_path(index)
-            if requested and os.path.exists(requested):
+            if requested and os.path.exists(_long_path(requested)):
                 load_path = requested
             elif not allow_gz_fallback:
                 return None
-        cmd.load(load_path, obj_name, quiet=1)
+        # Use long path for Windows compatibility
+        load_path_resolved = _long_path(load_path)
+        if not os.path.exists(load_path_resolved):
+            print(f"Structure Annotator: file not found: {load_path}")
+            return None
+        cmd.load(load_path_resolved, obj_name, quiet=1)
+        cmd.sync()  # Wait for all async operations to complete
+        cmd.refresh()  # Then refresh display state
     if obj_name not in STATE.managed_objects:
         STATE.managed_objects.append(obj_name)
 
@@ -515,6 +671,13 @@ def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> O
         pass
 
     STATE.current_object = obj_name
+
+    # Extra safety check: ensure object is truly available before step_cmd
+    if not _object_exists(obj_name):
+        print(f"Structure Annotator: waiting for object {obj_name} to be ready...")
+        cmd.sync()
+        cmd.refresh()
+
     context = {
         "object": obj_name,
         "file": path,
@@ -606,6 +769,20 @@ def _load_current_structure() -> None:
     _kick_preload()
 
 
+def _rescan_annotated_indices() -> None:
+    """Populate STATE.annotated_indices for progress tracking under the current label."""
+    STATE.annotated_indices = set()
+    if not STATE.files:
+        return
+    label_key = normalize_label_key(STATE.label_name)
+    for idx, path in enumerate(STATE.files):
+        try:
+            if has_annotation_fast(_resolve_annotation_path(path), label_key):
+                STATE.annotated_indices.add(idx)
+        except Exception:
+            pass
+
+
 def sa_load_dir(path: str = ".", pattern: str = STRUCTURE_PATTERN) -> None:
     """
     Load a directory of structures for annotation.
@@ -618,15 +795,25 @@ def sa_load_dir(path: str = ".", pattern: str = STRUCTURE_PATTERN) -> None:
         STATE.dataset_dir = path
         STATE.pattern = pattern
         _reset_bg_cache()
-        STATE.files = _list_structure_files(path, pattern, STATE.prefer_gz)
+        label_key = normalize_label_key(STATE.label_name) if STATE.skip_annotated else None
+        STATE.files = _list_structure_files(
+            path, pattern, STATE.prefer_gz,
+            skip_annotated=STATE.skip_annotated, label_key=label_key
+        )
         STATE.index = 0
         STATE.managed_objects.clear()
         STATE.current_object = None
+        STATE.undo_history.clear()
         if not STATE.files:
             print(f"Structure Annotator: no files matched in {path}")
             return
+        _rescan_annotated_indices()
         _load_current_structure()
-        print(f"Structure Annotator: loaded {len(STATE.files)} files from {path}")
+        annotated = len(STATE.annotated_indices)
+        print(
+            f"Structure Annotator: loaded {len(STATE.files)} files from {path} "
+            f"({annotated} already annotated for '{normalize_label_key(STATE.label_name)}')"
+        )
     except Exception as e:
         print(f"Structure Annotator load error: {e}")
         traceback.print_exc()
@@ -670,8 +857,38 @@ def sa_annotate(value: str) -> None:
             print("Structure Annotator: nothing to annotate")
             return
 
+        # Verify the displayed object matches STATE before annotating
+        if not _verify_current_object_enabled():
+            actual_enabled = _get_enabled_managed_object()
+            if actual_enabled and actual_enabled != obj_name:
+                actual_idx = _get_index_for_object(actual_enabled)
+                print(f"Structure Annotator: MISMATCH DETECTED!")
+                print(f"  Widget shows: {obj_name} (index {STATE.index})")
+                print(f"  PyMOL shows:  {actual_enabled} (index {actual_idx})")
+                print(f"  Annotation ABORTED to prevent labeling wrong file.")
+                print(f"  Please click Reload or use navigation to sync state.")
+                return
+            elif not actual_enabled:
+                print("Structure Annotator: WARNING - expected object not enabled in PyMOL")
+                print(f"  Expected: {obj_name}")
+                print(f"  Continuing with annotation based on widget state...")
+
         label_key = normalize_label_key(STATE.label_name)
-        annotate_structure_file(_resolve_annotation_path(path), label_key, value)
+        anno_path = _resolve_annotation_path(path)
+        prev_value = read_structure_annotations(anno_path).get(label_key)
+        annotate_structure_file(anno_path, label_key, value)
+
+        # Record for undo (bounded stack).
+        STATE.undo_history.append({
+            "index": STATE.index,
+            "path": anno_path,
+            "label_key": label_key,
+            "prev_value": prev_value,
+            "value": value,
+        })
+        if len(STATE.undo_history) > 100:
+            STATE.undo_history.pop(0)
+        STATE.annotated_indices.add(STATE.index)
 
         context = {
             "object": obj_name,
@@ -691,6 +908,119 @@ def sa_annotate(value: str) -> None:
         traceback.print_exc()
 
 
+def sa_undo() -> None:
+    """Undo the most recent annotation, restoring the file's prior state."""
+    try:
+        if not STATE.undo_history:
+            print("Structure Annotator: nothing to undo")
+            return
+        entry = STATE.undo_history.pop()
+        path = entry["path"]
+        label_key = entry["label_key"]
+        prev_value = entry["prev_value"]
+        index = entry["index"]
+
+        if prev_value is None:
+            remove_structure_annotation(path, label_key)
+            STATE.annotated_indices.discard(index)
+            restored = "(none)"
+        else:
+            annotate_structure_file(path, label_key, prev_value)
+            STATE.annotated_indices.add(index)
+            restored = prev_value
+
+        print(f"Undo: {os.path.basename(path)} {label_key} -> {restored}")
+        # Return to the file we just changed so the user can see the result.
+        if 0 <= index < len(STATE.files):
+            STATE.index = index
+            _load_current_structure()
+    except Exception as e:
+        print(f"Structure Annotator undo error: {e}")
+        traceback.print_exc()
+
+
+def sa_goto(position: int) -> None:
+    """
+    Jump to a 1-based position in the dataset.
+
+    Args:
+        position: 1-based index of the structure to display.
+    """
+    try:
+        if not STATE.files:
+            print("Structure Annotator: no dataset loaded (use sa_load_dir)")
+            return
+        target = int(position) - 1
+        if target < 0 or target >= len(STATE.files):
+            print(f"Structure Annotator: position must be 1..{len(STATE.files)}")
+            return
+        STATE.index = target
+        _load_current_structure()
+    except Exception as e:
+        print(f"Structure Annotator goto error: {e}")
+        traceback.print_exc()
+
+
+def sa_next_unannotated() -> None:
+    """Advance to the next structure that has no annotation for the current label."""
+    try:
+        if not STATE.files:
+            print("Structure Annotator: no dataset loaded (use sa_load_dir)")
+            return
+        total = len(STATE.files)
+        for offset in range(1, total + 1):
+            candidate = (STATE.index + offset) % total
+            if candidate not in STATE.annotated_indices:
+                STATE.index = candidate
+                _load_current_structure()
+                return
+        print("Structure Annotator: all files are annotated for this label")
+    except Exception as e:
+        print(f"Structure Annotator next-unannotated error: {e}")
+        traceback.print_exc()
+
+
+def sa_export_csv(out_path: str = "") -> Optional[str]:
+    """
+    Export all annotations in the current dataset to a CSV file.
+
+    Args:
+        out_path: Destination CSV. Defaults to 'annotations_<label>.csv' in the dataset dir.
+
+    Returns the written path, or None on failure.
+    """
+    try:
+        import csv
+        if not STATE.files:
+            print("Structure Annotator: no dataset loaded (use sa_load_dir)")
+            return None
+        label_key = normalize_label_key(STATE.label_name)
+        if not out_path:
+            out_path = os.path.join(
+                STATE.dataset_dir or ".", f"annotations_{label_key}.csv"
+            )
+        rows = []
+        for path in STATE.files:
+            annotations = read_structure_annotations(_resolve_annotation_path(path))
+            rows.append((os.path.basename(path), annotations.get(label_key, ""), path))
+
+        with open(_long_path(out_path), "w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["filename", label_key, "path"])
+            writer.writerows(rows)
+
+        annotated = sum(1 for r in rows if r[1])
+        print(
+            f"Structure Annotator: exported {len(rows)} rows "
+            f"({annotated} annotated) to {out_path}"
+        )
+        return out_path
+    except Exception as e:
+        print(f"Structure Annotator export error: {e}")
+        traceback.print_exc()
+        return None
+
+
 @cmd.set_key("ALT-right")
 def _sa_key_next():
     sa_next()
@@ -699,6 +1029,44 @@ def _sa_key_next():
 @cmd.set_key("ALT-left")
 def _sa_key_prev():
     sa_prev()
+
+
+def _sa_annotate_nth(n: int) -> None:
+    """Annotate with the n-th (1-based) configured bucket value."""
+    values = STATE.values()
+    if 1 <= n <= len(values):
+        sa_annotate(values[n - 1])
+        if _panel is not None:
+            try:
+                _panel._refresh_status()
+            except Exception:
+                pass
+
+
+def _register_number_key_bindings() -> None:
+    """Bind digit keys 1..9 to the corresponding bucket. Best-effort; ignore failures."""
+    for digit in range(1, 10):
+        def _handler(d=digit):
+            _sa_annotate_nth(d)
+        try:
+            cmd.set_key(str(digit), _handler)
+        except Exception:
+            pass
+
+
+try:
+    @cmd.set_key("ALT-z")
+    def _sa_key_undo():
+        sa_undo()
+        if _panel is not None:
+            try:
+                _panel._refresh_status()
+            except Exception:
+                pass
+except Exception:
+    pass
+
+_register_number_key_bindings()
 
 
 _panel = globals().get("_panel", None)
@@ -744,12 +1112,14 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         config_layout = QtWidgets.QGridLayout(config_box)
 
         self.label_edit = QtWidgets.QLineEdit()
+        self.label_edit.editingFinished.connect(self._on_label_changed)
         self.values_edit = QtWidgets.QLineEdit()
         self.values_edit.editingFinished.connect(self._rebuild_value_controls)
 
         self.auto_advance_cb = QtWidgets.QCheckBox("Auto-advance after annotate")
         self.keep_previous_cb = QtWidgets.QCheckBox("Keep previous loaded objects")
         self.prefer_gz_cb = QtWidgets.QCheckBox("Prefer .gz when both exist")
+        self.skip_annotated_cb = QtWidgets.QCheckBox("Skip already-annotated files on load")
         self.preload_enabled_cb = QtWidgets.QCheckBox("Preload next structures silently")
         self.preload_ahead_spin = QtWidgets.QSpinBox()
         self.preload_ahead_spin.setRange(0, 20)
@@ -772,7 +1142,8 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         config_layout.addWidget(self.auto_advance_cb, 2, 1)
         config_layout.addWidget(self.keep_previous_cb, 3, 1)
         config_layout.addWidget(self.prefer_gz_cb, 4, 1)
-        config_layout.addWidget(self.preload_enabled_cb, 5, 1)
+        config_layout.addWidget(self.skip_annotated_cb, 5, 1)
+        config_layout.addWidget(self.preload_enabled_cb, 6, 1)
         preload_row = QtWidgets.QHBoxLayout()
         preload_row.addWidget(QtWidgets.QLabel("Preload ahead:"))
         preload_row.addWidget(self.preload_ahead_spin)
@@ -782,11 +1153,11 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         preload_row.addStretch()
         preload_row_widget = QtWidgets.QWidget()
         preload_row_widget.setLayout(preload_row)
-        config_layout.addWidget(preload_row_widget, 6, 1)
-        config_layout.addWidget(self.bg_decompress_cb, 7, 1)
+        config_layout.addWidget(preload_row_widget, 7, 1)
+        config_layout.addWidget(self.bg_decompress_cb, 8, 1)
 
-        config_layout.addWidget(QtWidgets.QLabel("On step (after load):"), 8, 0)
-        config_layout.addWidget(self.step_cmd_edit, 8, 1)
+        config_layout.addWidget(QtWidgets.QLabel("On step (after load):"), 9, 0)
+        config_layout.addWidget(self.step_cmd_edit, 9, 1)
 
         layout.addWidget(config_box)
 
@@ -797,17 +1168,38 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         nav_row = QtWidgets.QHBoxLayout()
         self.prev_btn = QtWidgets.QPushButton("Prev (Alt+Left)")
         self.next_btn = QtWidgets.QPushButton("Next (Alt+Right)")
+        self.next_unann_btn = QtWidgets.QPushButton("Next Unannotated")
+        self.undo_btn = QtWidgets.QPushButton("Undo (Alt+Z)")
         self.reload_btn = QtWidgets.QPushButton("Reload")
 
         self.prev_btn.clicked.connect(self._prev)
         self.next_btn.clicked.connect(self._next)
+        self.next_unann_btn.clicked.connect(self._next_unannotated)
+        self.undo_btn.clicked.connect(self._undo)
         self.reload_btn.clicked.connect(self._reload)
 
         nav_row.addWidget(self.prev_btn)
         nav_row.addWidget(self.next_btn)
+        nav_row.addWidget(self.next_unann_btn)
+        nav_row.addWidget(self.undo_btn)
         nav_row.addWidget(self.reload_btn)
         nav_row.addStretch()
         layout.addLayout(nav_row)
+
+        goto_row = QtWidgets.QHBoxLayout()
+        goto_row.addWidget(QtWidgets.QLabel("Go to #:"))
+        self.goto_spin = QtWidgets.QSpinBox()
+        self.goto_spin.setRange(1, 1)
+        self.goto_btn = QtWidgets.QPushButton("Go")
+        self.goto_btn.clicked.connect(self._goto)
+        self.export_btn = QtWidgets.QPushButton("Export CSV…")
+        self.export_btn.clicked.connect(self._export_csv)
+        goto_row.addWidget(self.goto_spin)
+        goto_row.addWidget(self.goto_btn)
+        goto_row.addSpacing(16)
+        goto_row.addWidget(self.export_btn)
+        goto_row.addStretch()
+        layout.addLayout(goto_row)
 
         self.status_label = QtWidgets.QLabel("")
         self.status_label.setWordWrap(True)
@@ -838,6 +1230,7 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         STATE.auto_advance = bool(self.auto_advance_cb.isChecked())
         STATE.keep_previous = bool(self.keep_previous_cb.isChecked())
         STATE.prefer_gz = bool(self.prefer_gz_cb.isChecked())
+        STATE.skip_annotated = bool(self.skip_annotated_cb.isChecked())
         STATE.preload_enabled = bool(self.preload_enabled_cb.isChecked())
         STATE.preload_ahead = int(self.preload_ahead_spin.value())
         STATE.preload_interval_ms = int(self.preload_interval_spin.value())
@@ -854,6 +1247,7 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         self.auto_advance_cb.setChecked(bool(STATE.auto_advance))
         self.keep_previous_cb.setChecked(bool(STATE.keep_previous))
         self.prefer_gz_cb.setChecked(bool(STATE.prefer_gz))
+        self.skip_annotated_cb.setChecked(bool(STATE.skip_annotated))
         self.preload_enabled_cb.setChecked(bool(STATE.preload_enabled))
         self.preload_ahead_spin.setValue(int(STATE.preload_ahead or 0))
         self.preload_interval_spin.setValue(int(STATE.preload_interval_ms or 250))
@@ -877,6 +1271,15 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
 
     def _reload(self) -> None:
         self._sync_to_state()
+        # If there's a mismatch, sync STATE to match PyMOL's actual enabled object
+        if STATE.current_object and not _verify_current_object_enabled():
+            actual_enabled = _get_enabled_managed_object()
+            if actual_enabled and actual_enabled != STATE.current_object:
+                actual_idx = _get_index_for_object(actual_enabled)
+                if actual_idx is not None and 0 <= actual_idx < len(STATE.files):
+                    print(f"Structure Annotator: syncing to PyMOL state (index {actual_idx})")
+                    STATE.index = actual_idx
+                    STATE.current_object = actual_enabled
         _load_current_structure()
         self._refresh_status()
 
@@ -886,6 +1289,42 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         if not value:
             return
         sa_annotate(value)
+        self._refresh_status()
+
+    def _next_unannotated(self) -> None:
+        self._sync_to_state()
+        sa_next_unannotated()
+        self._refresh_status()
+
+    def _undo(self) -> None:
+        self._sync_to_state()
+        sa_undo()
+        self._refresh_status()
+
+    def _goto(self) -> None:
+        self._sync_to_state()
+        sa_goto(int(self.goto_spin.value()))
+        self._refresh_status()
+
+    def _export_csv(self) -> None:
+        self._sync_to_state()
+        label_key = normalize_label_key(STATE.label_name)
+        default = os.path.join(STATE.dataset_dir or ".", f"annotations_{label_key}.csv")
+        out_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Export Annotations", default, "CSV Files (*.csv)"
+        )
+        if not out_path:
+            return
+        written = sa_export_csv(out_path)
+        if written:
+            self.status_label.setText(f"Exported annotations to {written}")
+
+    def _on_label_changed(self) -> None:
+        # Rescan progress against the new label so counts/highlighting stay accurate.
+        self._sync_to_state()
+        if STATE.files:
+            _rescan_annotated_indices()
+            STATE.undo_history.clear()
         self._refresh_status()
 
     def _rebuild_value_controls(self) -> None:
@@ -903,8 +1342,9 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
 
         if len(values) < 5:
             btn_row = QtWidgets.QHBoxLayout()
-            for value in values:
-                btn = QtWidgets.QPushButton(value)
+            for i, value in enumerate(values):
+                hint = f" ({i + 1})" if i < 9 else ""
+                btn = QtWidgets.QPushButton(f"{value}{hint}")
                 btn.clicked.connect(lambda checked=False, v=value: self._annotate(v))
                 self._value_buttons.append(btn)
                 btn_row.addWidget(btn)
@@ -936,12 +1376,67 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
     def _refresh_status(self) -> None:
         if not STATE.files:
             self.status_label.setText("No dataset loaded.")
+            self.goto_spin.setRange(1, 1)
+            self.undo_btn.setEnabled(False)
             return
+
+        # Keep the go-to control in range with the loaded dataset.
+        self.goto_spin.setRange(1, len(STATE.files))
+        self.goto_spin.blockSignals(True)
+        self.goto_spin.setValue(STATE.index + 1)
+        self.goto_spin.blockSignals(False)
+        self.undo_btn.setEnabled(bool(STATE.undo_history))
+
         path = STATE.current_file() or ""
         basename = os.path.basename(path)
-        self.status_label.setText(
-            f"{STATE.index + 1}/{len(STATE.files)}: {basename}\n{path}"
+        annotated = len(STATE.annotated_indices)
+        total = len(STATE.files)
+        remaining = total - annotated
+        status_text = (
+            f"{STATE.index + 1}/{total}: {basename}\n"
+            f"Progress: {annotated} annotated, {remaining} remaining "
+            f"(label '{normalize_label_key(STATE.label_name)}')"
         )
+
+        # Show existing annotations for current file, emphasizing the active label.
+        label_key = normalize_label_key(STATE.label_name)
+        current_value = None
+        try:
+            annotations = read_structure_annotations(path)
+            current_value = annotations.get(label_key)
+            if annotations:
+                anno_str = ", ".join(f"{k}={v}" for k, v in annotations.items())
+                status_text += f"\nAnnotations: {anno_str}"
+            else:
+                status_text += "\nAnnotations: (none)"
+        except Exception:
+            pass
+
+        if current_value:
+            status_text += f"\nThis file: {label_key} = {current_value}"
+
+        status_text += f"\n{path}"
+
+        # Highlight the bucket button matching the current file's annotation.
+        for btn in self._value_buttons:
+            label = btn.text().split(" (")[0]
+            if current_value is not None and label == current_value:
+                btn.setStyleSheet("font-weight: bold; background-color: #cdebc5;")
+            else:
+                btn.setStyleSheet("")
+
+        # Check for mismatch between widget state and PyMOL state
+        if STATE.current_object:
+            if not _verify_current_object_enabled():
+                actual_enabled = _get_enabled_managed_object()
+                if actual_enabled and actual_enabled != STATE.current_object:
+                    actual_idx = _get_index_for_object(actual_enabled)
+                    status_text += f"\n\nWARNING: PyMOL shows different object!"
+                    status_text += f"\nWidget: {STATE.current_object}"
+                    status_text += f"\nPyMOL:  {actual_enabled} (idx {actual_idx})"
+                    status_text += f"\nClick Reload to sync."
+
+        self.status_label.setText(status_text)
 
 
 def show_structure_annotator_panel() -> QtWidgets.QDialog:
@@ -965,4 +1460,8 @@ cmd.extend("sa_load_dir", sa_load_dir)
 cmd.extend("sa_next", sa_next)
 cmd.extend("sa_prev", sa_prev)
 cmd.extend("sa_annotate", sa_annotate)
+cmd.extend("sa_undo", sa_undo)
+cmd.extend("sa_goto", sa_goto)
+cmd.extend("sa_next_unannotated", sa_next_unannotated)
+cmd.extend("sa_export_csv", sa_export_csv)
 cmd.extend("show_structure_annotator_panel", show_structure_annotator_panel)

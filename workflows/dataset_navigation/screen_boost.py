@@ -48,6 +48,7 @@ pinned_objects = set()  # 固定的对象集合
 auto_bucket_mode = True  # 自动bucket模式
 switch_commands = []  # 切换object时要执行的命令列表
 step_objects_per_step = 1  # 每次step同时显示的object数量（非固定对象）
+exclude_selected_mode = False  # 是否排除已selected的文件
 
 
 def load_by_bucket(path="."):
@@ -59,10 +60,26 @@ def load_by_bucket(path="."):
     bucket_size: int - The number of files to load in each group (default: 10).
     pattern: str - The regex pattern to match PDB files (default: match all PDB files).
     """
-    global bucket_index, current_path, current_index, bucket_size, reg_pattern, pinned_objects, step_objects_per_step
+    global bucket_index, current_path, current_index, bucket_size, reg_pattern, pinned_objects, step_objects_per_step, exclude_selected_mode
     files = os.listdir(path)
     pattern = re.compile(reg_pattern)
     pdb_files = [file for file in files if pattern.match(file)]
+
+    # 如果启用了排除已selected模式，过滤掉已在selected目录中的文件
+    if exclude_selected_mode:
+        selected_dir = os.path.join(path, "selected")
+        if os.path.exists(selected_dir):
+            selected_files = set(os.listdir(selected_dir))
+            # 根据文件名匹配（selected目录中存的是 {object_name}.pdb）
+            pdb_files_filtered = []
+            for file in pdb_files:
+                obj_name = derive_object_name(file)
+                if f"{obj_name}.pdb" not in selected_files:
+                    pdb_files_filtered.append(file)
+            excluded_count = len(pdb_files) - len(pdb_files_filtered)
+            if excluded_count > 0:
+                print(f"Excluded {excluded_count} already-selected files")
+            pdb_files = pdb_files_filtered
 
     pdb_files.sort()
 
@@ -103,12 +120,12 @@ def load_by_bucket(path="."):
 
 
 def setup_loader(
-    path=None, pattern=STRUCTURE_PATTERN, group_size: int = None, objects_per_step: int = None
+    path=None, pattern=STRUCTURE_PATTERN, group_size: int = None, objects_per_step: int = None, exclude_selected: bool = None
 ):
     """
     DESCRIPTION
     """
-    global current_path, bucket_loader, bucket_size, reg_pattern, step_objects_per_step
+    global current_path, bucket_loader, bucket_size, reg_pattern, step_objects_per_step, exclude_selected_mode
     if path is not None:
         current_path = path
 
@@ -117,6 +134,9 @@ def setup_loader(
 
     if objects_per_step is not None:
         step_objects_per_step = max(1, int(objects_per_step))
+
+    if exclude_selected is not None:
+        exclude_selected_mode = bool(exclude_selected)
 
     if pattern is not None and pattern != reg_pattern:
         reg_pattern = pattern
@@ -329,6 +349,26 @@ def toggle_auto_bucket(enable=None):
     print(f"Auto bucket mode {status}")
 
 
+def toggle_exclude_selected(enable=None):
+    """
+    DESCRIPTION
+    Toggle or set exclude selected mode. When enabled, already-selected files
+    will be excluded when loading buckets.
+    PARAMETERS
+    enable: bool - True to enable, False to disable, None to toggle
+    """
+    global exclude_selected_mode
+    if enable is None:
+        exclude_selected_mode = not exclude_selected_mode
+    else:
+        exclude_selected_mode = bool(enable)
+
+    status = "enabled" if exclude_selected_mode else "disabled"
+    print(f"Exclude selected mode {status}")
+    if exclude_selected_mode:
+        print("Note: Reload buckets (next_bucket/prev_bucket) to apply the change")
+
+
 def register_switch_command(command, offset=0):
     """
     DESCRIPTION
@@ -492,7 +532,7 @@ def register_hide_all():
     register_switch_command("hide everything, {object}")
 
 
-def load_by_path(path=".", pattern=STRUCTURE_PATTERN, bucket_size=10, objects_per_step=None):
+def load_by_path(path=".", pattern=STRUCTURE_PATTERN, bucket_size=10, objects_per_step=None, exclude_selected=False):
     """
     DESCRIPTION
     Load PDB files in the specified directory using bucket mode by default.
@@ -501,18 +541,24 @@ def load_by_path(path=".", pattern=STRUCTURE_PATTERN, bucket_size=10, objects_pe
     pattern: str - The regex pattern to match PDB files (default: match all PDB files).
     bucket_size: int - The number of files to load in each bucket (default: 10).
     objects_per_step: int|None - Number of objects to show per step (default: keep current).
+    exclude_selected: bool - If True, exclude files already in the 'selected' subdirectory (default: False).
     """
-    global current_index, current_path, loaded_steps, reg_pattern, bucket_loader, step_objects_per_step
+    global current_index, current_path, loaded_steps, reg_pattern, bucket_loader, step_objects_per_step, exclude_selected_mode
     current_path = path
 
+    # 设置排除已selected模式
+    exclude_selected_mode = bool(exclude_selected)
+
     # 更新bucket_size参数
-    setup_loader(path=path, pattern=pattern, group_size=bucket_size)
+    setup_loader(path=path, pattern=pattern, group_size=bucket_size, exclude_selected=exclude_selected)
 
     if objects_per_step is not None:
         step_objects_per_step = max(1, int(objects_per_step))
 
     print(f"Loading files from {path} in bucket mode (bucket_size={bucket_size})")
     print(f"Objects per step = {step_objects_per_step}")
+    if exclude_selected_mode:
+        print("Excluding already-selected files")
 
     # 使用bucket模式加载
     bucket_loader = load_by_bucket(current_path)
@@ -771,6 +817,7 @@ cmd.extend("unpin", unpin_current)
 cmd.extend("list_pins", list_pinned)
 cmd.extend("clear_pins", clear_all_pins)
 cmd.extend("auto_bucket", toggle_auto_bucket)
+cmd.extend("exclude_selected", toggle_exclude_selected)
 cmd.extend("register_switch_cmd", register_switch_command)
 cmd.extend("unregister_switch_cmd", unregister_switch_command)
 cmd.extend("list_switch_cmds", list_switch_commands)

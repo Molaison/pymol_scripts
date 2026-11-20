@@ -2,6 +2,13 @@
 
 PyMOL helper scripts, plugins, and presets are now grouped by what they do so it is easier to find (and contribute) focused utilities.
 
+## Structure Collections
+
+`plugins/structure_collections.py` adds a Qt panel for score-stratified sampling,
+structural diversity, target/binder/PCA/symmetry orientation, and parallel headless
+PNG rendering. Load the script in PyMOL and run `collections_panel`.
+See [usage and validation](docs/01_structure_collections.md).
+
 ## Repository Layout
 
 - `analysis/`
