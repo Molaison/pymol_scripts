@@ -1,6 +1,6 @@
 """Build the annotation workspace around the existing controller callbacks."""
 
-from pymol.Qt import QtCore, QtWidgets
+from pymol.Qt import QtCore, QtGui, QtWidgets
 
 from .qt_widgets import CollapsibleSection, ColumnPicker, qt_enum
 from .review_widgets import ScoreFooter
@@ -168,6 +168,7 @@ def _source_page(panel):
     panel.source_browse_button.setMenu(browse_menu)
     panel.dir_browse = panel.csv_browse = panel.source_browse_button
     path_form = QtWidgets.QFormLayout()
+    path_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.ExpandingFieldsGrow)
     path_form.addRow("Path", _row(panel.source_path_edit, panel.source_browse_button))
     layout.addLayout(path_form)
     panel.source_options_section = CollapsibleSection("Import options")
@@ -661,9 +662,11 @@ def _navigation(panel, layout):
     panel.next_unann_btn = _button("Next unannotated", panel._next_unannotated)
     panel.undo_btn = _button("Undo", panel._undo)
     panel.reload_btn = _button("Reload", panel._reload)
-    panel.prev_btn.setToolTip("Previous structure (Alt+Left)")
-    panel.next_btn.setToolTip("Next structure (Alt+Right)")
-    panel.undo_btn.setToolTip("Alt+Z")
+    previous_key = QtGui.QKeySequence("Alt+Left").toString()
+    next_key = QtGui.QKeySequence("Alt+Right").toString()
+    panel.prev_btn.setToolTip(f"Previous structure ({previous_key})")
+    panel.next_btn.setToolTip(f"Next structure ({next_key})")
+    panel.undo_btn.setToolTip(QtGui.QKeySequence("Alt+Z").toString())
     panel.goto_spin = QtWidgets.QSpinBox()
     panel.goto_spin.setRange(1, 1)
     panel.goto_btn = _button("Go", panel._goto)

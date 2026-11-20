@@ -67,7 +67,7 @@ design_a,structures/model_a.pdb,0.82,典型模式
 
 ## 配置标注、恢复和导出
 
-在 **Settings → Annotations** 设置单选、多选或文本字段及必填条件。普通选择是草稿；**Save and next** 保存并前进。单个候选 Ctrl+click 可保存并前进；多选字段的普通点击仍是草稿。选择多行后显式保存；**More actions → Undo last save** 撤销上一次完整保存。失败时草稿和当前位置保留。评分卡的相对排名针对当前筛选集合；绝对方向和阈值需由用户配置。
+在 **Settings → Annotations** 设置单选、多选或文本字段及必填条件。普通选择是草稿；**Save and next** 保存并前进。单个候选 Ctrl+点击可保存并前进（macOS 用 Command+点击）；多选字段的普通点击仍是草稿。选择多行后显式保存；**More actions → Undo last save** 撤销上一次完整保存。失败时草稿和当前位置保留。评分卡的相对排名针对当前筛选集合；绝对方向和阈值需由用户配置。
 
 暂时不能判断时选择 **More → Mark current for later**；**Next marked for later** 用于回看。下次主动选择 **Data → Continue last review** 恢复最近的数据源、筛选和位置；打开面板不会自动连接历史 SSH 源。首次导入后的历史记录可能仍在后台写入，暂不可用时等保存完成再试。
 

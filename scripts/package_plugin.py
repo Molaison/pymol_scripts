@@ -31,7 +31,7 @@ INSTALL_TEXT = """# 安装 PymolPlugins（{version}）
    选择包含 PDB/CIF 文件路径的列，不是分数或名称列。
 7. 在 **Review** 查看结构和分数，选择标签，再点 **Save and next**。
 
-保存后进入下一条。普通点选只修改草稿，不会立即保存。快捷键、Alt+数字和 Ctrl+click 是可选的加速方式，不是开始审阅的前提。相对结构路径默认相对于表格目录；CSV 和结构源文件不会被标注流程改写。
+保存后进入下一条。普通点选只修改草稿，不会立即保存。可用 Alt+数字或 Ctrl+点击加快审阅，macOS 分别使用 Option+数字和 Command+点击。相对结构路径默认相对于表格目录；CSV 和结构源文件不会被标注流程改写。
 
 直接打开含 `sum_scores.csv` 的文件夹时，插件会使用该表及同目录的 `review.json`。没有这个文件时，插件会打开唯一带结构路径列的表，或按目录导入结构文件。`display_columns` 必须使用表中实际存在的字段，`label` 是描述性名称，人工标签另存。修改配置写入 `review.override.json`。
 

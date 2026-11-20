@@ -1,6 +1,6 @@
 # 切换和维护工作区窗口
 
-Structure Annotator 和 Batch Processing 可以嵌入 PyMOL，也可以作为浮动窗口。打开任一工具，在右上角窗口模式菜单选择 **Embedded in PyMOL** 或 **Floating window**；切换后原草稿、候选、批处理预览和运行中的工作应保留。窗口模式与位置按工具分别记住。
+Structure Annotator 和 Batch Processing 可以嵌入 PyMOL，也可以作为浮动窗口。打开任一工具，在右上角窗口模式菜单选择 **Embedded in PyMOL** 或 **Floating window**；切换后原草稿、候选、批处理预览和运行中的工作应保留。窗口模式与位置按工具分别记住。 macOS 第一次打开时，如果当前 PyMOL 窗口无法同时容纳面板和视图区，工作区会以浮动窗口打开。放大 PyMOL 后可从窗口模式菜单切回嵌入。
 
 ## 切换、关闭和恢复
 

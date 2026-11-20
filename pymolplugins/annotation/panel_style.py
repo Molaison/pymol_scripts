@@ -1,11 +1,14 @@
 """Shared visual hierarchy for annotation and batch workspaces."""
 
+import re
+import sys
+
 from pymol.Qt import QtCore, QtGui, QtWidgets
 
 
-STYLE = """
+_LIGHT_STYLE = """
 QWidget { font-family: 'Segoe UI'; font-size: 10pt; color: #292d32; }
-QDialog, QWidget#annotationWorkspace, QWidget#batchWorkspace { background: white; }
+QDialog, QWizard, QWidget#annotationWorkspace, QWidget#batchWorkspace { background: white; }
 QLabel { background: transparent; }
 QLabel[role='muted'] { color: #687078; font-size: 9pt; }
 QLabel#datasetTitle { font-size: 12pt; font-weight: 600; }
@@ -76,6 +79,60 @@ QTabBar::tab:selected { border-bottom-color: #356ae6; color: #292d32; }
 """
 
 
+_MAC_DARK_COLORS = {
+    "white": "#25272a",
+    "#fff": "#2e3034",
+    "#292d32": "#ecedf0",
+    "#687078": "#bfc5ce",
+    "#2854ab": "#aec8ff",
+    "#f6f7f8": "#303338",
+    "#d8dce0": "#60656e",
+    "#f0f4fc": "#3b465a",
+    "#aabddd": "#7b91b8",
+    "#9ba1a8": "#a3a9b1",
+    "#f5f6f7": "#303236",
+    "#e5e7e9": "#4b4f55",
+    "#dce5f7": "#35415a",
+    "#849bc6": "#acb8d2",
+    "#eaf0ff": "#303f5a",
+    "#626a73": "#bfc5ce",
+    "#eaf0fa": "#33435c",
+    "#274a8b": "#c1d3ff",
+    "#4d5968": "#c9d0db",
+    "#edf2fa": "#353c47",
+    "#9db4e5": "#7d99c7",
+    "#eef1f4": "#363940",
+    "#dbe6fc": "#3b5685",
+    "#203456": "#f0f4ff",
+    "#6c91e8": "#8aaafb",
+    "#f5f7fa": "#303236",
+    "#9ba6b6": "#a3a9b1",
+    "#982e36": "#ffb9bd",
+    "#fff0f1": "#502e32",
+    "#f7f8f9": "#2c2e32",
+    "#eaedef": "#42464e",
+    "#23488d": "#c7d8ff",
+    "#f3f6fc": "#383d47",
+    "#e3e6e8": "#454952",
+    "#cdd2d7": "#767d87",
+    "#e8edf7": "#343e52",
+    "#dce3ee": "#535b68",
+}
+_STYLE_COLORS = re.compile(r"#[0-9a-f]{6}\b|#fff\b|\bwhite\b")
+
+
+def workspace_style():
+    if sys.platform != "darwin":
+        return _LIGHT_STYLE
+    style = _LIGHT_STYLE.replace("font-family: 'Segoe UI'; ", "").replace("Consolas", "Menlo")
+    palette = QtWidgets.QApplication.palette()
+    if palette.color(QtGui.QPalette.Window).lightness() < 128:
+        style = _STYLE_COLORS.sub(lambda match: _MAC_DARK_COLORS.get(match[0], match[0]), style)
+        # Keep white text on the blue primary buttons.
+        style += "QPushButton[role='primary']:enabled { color: white; }"
+    return style
+
+
 class StatusLabel(QtWidgets.QLabel):
     """Show operation feedback only while it contains a message."""
 
@@ -103,7 +160,7 @@ class ElidedLabel(QtWidgets.QLabel):
 def apply_style(panel, name="annotationWorkspace"):
     panel.setObjectName(name)
     panel.setAttribute(QtCore.Qt.WA_StyledBackground, True)
-    panel.setStyleSheet(STYLE)
+    panel.setStyleSheet(workspace_style())
 
 
 def card(name):

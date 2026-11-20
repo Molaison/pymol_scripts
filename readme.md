@@ -20,6 +20,8 @@
 
 0.17.1 起，遇到 GitHub API 匿名限流时，更新器会尝试公开 Release 页面并继续校验，无需 GitHub token；其他网络错误仍会报告。如果旧版更新器因 API 限流无法检查，可在 [最新正式 Release](https://github.com/Molaison/pymol_scripts/releases/latest) 提供 0.17.1 或更新版本后下载插件 ZIP，并按上述步骤安装。
 
+macOS 下，审阅快捷键使用 Option，审阅标签的保存并前进使用 Command+点击。AI 命令草稿可在 **AI settings…** 配置 **Custom API**。
+
 ## 第一次审阅
 
 1. 打开 **Plugin → PymolPlugins: Structure Annotator**。

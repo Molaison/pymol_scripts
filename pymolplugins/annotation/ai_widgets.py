@@ -11,7 +11,7 @@ from pymol.Qt import QtCore, QtWidgets
 
 from .ai_commands import build_prompt, output_schema, parse_draft
 from .command_templates import VIEW_PRESETS, viewing_preset
-from .panel_style import STYLE
+from .panel_style import workspace_style
 from ..host.workspace import window_settings
 from ..remote.client import _strict_json_loads
 
@@ -31,8 +31,11 @@ def custom_provider_process():
 def connection_settings():
     settings = window_settings()
     settings.beginGroup("ai_commands")
+    default_mode = "codex" if os.name == "nt" else "custom"
     connection = {name: str(settings.value(name, default)) for name, default in
-                  (("mode", "codex"), ("base_url", ""), ("model", ""), ("api", "responses"))}
+                  (("mode", default_mode), ("base_url", ""), ("model", ""), ("api", "responses"))}
+    if os.name != "nt" and connection["mode"] == "codex":
+        connection["mode"] = default_mode
     key = _SESSION_API_KEY
     protected = settings.value("protected_key", "")
     if protected:
@@ -46,14 +49,15 @@ class AIConnectionDialog(QtWidgets.QDialog):
     def __init__(self, parent):
         super().__init__(parent)
         self.setWindowTitle("AI connection")
-        self.setStyleSheet(STYLE)
+        self.setStyleSheet(workspace_style())
         self.process = None
         self.saved = False
         self.connection = connection_settings()
         layout = QtWidgets.QVBoxLayout(self)
         layout.setSizeConstraint(QtWidgets.QLayout.SetFixedSize)
         self.mode = QtWidgets.QComboBox()
-        self.mode.addItem("Codex (Debian WSL)", "codex")
+        if os.name == "nt":
+            self.mode.addItem("Codex (Debian WSL)", "codex")
         self.mode.addItem("Custom API", "custom")
         self.mode.setCurrentIndex(self.mode.findData(self.connection["mode"]))
         layout.addWidget(self.mode)
@@ -236,7 +240,7 @@ class AICommandDialog(QtWidgets.QDialog):
         self.draft_context = None
         self.draft_steps = {}
         self.setWindowTitle("Command drafts")
-        self.setStyleSheet(STYLE)
+        self.setStyleSheet(workspace_style())
         self.resize(720, 700)
         self.setMinimumSize(520, 480)
         self._build()
