@@ -1,6 +1,7 @@
 """Native PyMOL hosts for persistent, dockable plugin workspaces."""
 
 import os
+import sys
 import traceback
 
 from pymol.Qt import QtCore, QtGui, QtWidgets
@@ -53,6 +54,22 @@ def _reserve_viewport(main_window):
     elif previous is not None:
         viewport.setMinimumSize(previous)
         del main_window._pymolplugins_viewport_minimum
+
+
+def _default_mode(main_window, area):
+    if sys.platform != "darwin":
+        return "docked"
+    # A workspace can share an existing dock's tab without using more viewport width.
+    for dock in main_window.findChildren(PanelWindow):
+        if (not dock._closed and not dock.isFloating()
+                and main_window.dockWidgetArea(dock) == area):
+            return "docked"
+    viewport = main_window.centralWidget()
+    if viewport is not None:
+        width = _MINIMUM_DOCK_WIDTH + max(_MINIMUM_VIEWPORT_WIDTH, viewport.minimumWidth())
+        if viewport.width() < width:
+            return "floating"
+    return "docked"
 
 
 class WindowModeButton(QtWidgets.QToolButton):
@@ -112,14 +129,15 @@ class PanelWindow(QtWidgets.QDockWidget):
         self.content, self.main_window, self.key = content, main_window, key
         self.settings = window_settings()
         self.settings.beginGroup(key)
-        saved_mode = self.settings.value("mode", "docked")
-        selected_mode = saved_mode if mode is None else mode
-        if selected_mode not in _MODES:
-            raise ValueError("Invalid workspace mode: %r" % selected_mode)
         area = int(self.settings.value("dock_area", int(QtCore.Qt.LeftDockWidgetArea)))
         if area not in (int(QtCore.Qt.LeftDockWidgetArea), int(QtCore.Qt.RightDockWidgetArea)):
             raise ValueError("Invalid workspace dock area: %r" % area)
         self._dock_area = QtCore.Qt.DockWidgetArea(area)
+        selected_mode = mode if mode is not None else self.settings.value("mode")
+        if selected_mode is None:
+            selected_mode = _default_mode(main_window, self._dock_area)
+        if selected_mode not in _MODES:
+            raise ValueError("Invalid workspace mode: %r" % selected_mode)
         self._dock_width = int(self.settings.value("dock_width", content.minimumWidth()))
         if self._dock_width <= 0:
             raise ValueError("Workspace dock width must be positive")

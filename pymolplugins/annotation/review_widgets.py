@@ -1,6 +1,7 @@
 """Annotation forms and compact candidate score guidance for the Qt workspace."""
 
 import html
+import sys
 
 from pymol.Qt import QtCore, QtWidgets
 
@@ -9,18 +10,23 @@ from .panel_style import ElidedLabel
 from .review_config import decode_value, encode_value, validate_fields, validate_score_config
 
 
+_SAVE_CLICK = "Command+click" if sys.platform == "darwin" else "Ctrl+click"
+_SHORTCUT_MODIFIER = "Option" if sys.platform == "darwin" else "Alt"
+_RELATIVE_SCORE_STYLE = "" if sys.platform == "darwin" else "color: #46515c;"
+
+
 class ChoicePicker(ColumnPicker):
     advanceRequested = QtCore.Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.search.setPlaceholderText("Search choices")
-        self.setToolTip("Select choices; Ctrl+click a choice to save and go to the next candidate.")
+        self.setToolTip(f"Select choices; {_SAVE_CLICK} a choice to save and go to the next candidate.")
         self._pressed_choice = None
         self._apply_next = False
         self.items.viewport().installEventFilter(self)
         self.apply_button.installEventFilter(self)
-        self.apply_button.setToolTip("Apply choices; Ctrl+click to save and go to the next candidate.")
+        self.apply_button.setToolTip(f"Apply choices; {_SAVE_CLICK} to save and go to the next candidate.")
 
     def set_columns(self, columns, selected=()):
         super().set_columns(columns, selected)
@@ -188,7 +194,7 @@ class AnnotationForm(QtWidgets.QWidget):
             for index, value in enumerate(field["values"], 1):
                 button = QtWidgets.QPushButton(value)
                 button.setProperty("role", "choice")
-                button.setToolTip(f"Alt+{index}: save {value}. Ctrl+click: save and next.")
+                button.setToolTip(f"{_SHORTCUT_MODIFIER}+{index}: save {value}. {_SAVE_CLICK}: save and next.")
                 button.setAutoDefault(False)
                 button.setCheckable(True)
                 button.clicked.connect(lambda checked=False, value=value: self.primaryChosen.emit(value))
@@ -511,7 +517,7 @@ class ScoreFooter(QtWidgets.QWidget):
             for label, key in ((labels[2], "absolute_tone"), (labels[3], "relative_tone")):
                 background, foreground = self.COLORS[card[key]]
                 style = (f"color: {foreground}; background: {background}; padding: 2px 4px; border-radius: 3px;"
-                         if label is labels[2] else "color: #46515c;")
+                         if label is labels[2] else _RELATIVE_SCORE_STYLE)
                 if label.styleSheet() != style:
                     label.setStyleSheet(style)
             labels[2].setVisible(card["absolute"] != "No absolute rule")

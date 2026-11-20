@@ -31,7 +31,7 @@ INSTALL_TEXT = """# 安装 PymolPlugins（{version}）
    选择包含 PDB/CIF 文件路径的列，不是分数或名称列。
 7. 在 **Review** 查看结构和分数，选择标签，再点 **Save and next**。
 
-保存后进入下一条。普通点选只修改草稿，不会立即保存。快捷键、Alt+数字和 Ctrl+click 是可选的加速方式，不是开始审阅的前提。相对结构路径默认相对于表格目录；CSV 和结构源文件不会被标注流程改写。
+保存后进入下一条。普通点选只修改草稿，不会立即保存。可用 Alt+数字或 Ctrl+点击加快审阅，macOS 对应 Option+数字和 Command+点击。相对结构路径默认相对于表格目录；CSV 和结构源文件不会被标注流程改写。
 
 直接打开含 `sum_scores.csv` 的文件夹时，插件会使用该表及同目录的 `review.json`。没有这个文件时，插件会打开唯一带结构路径列的表，或按目录导入结构文件。`display_columns` 必须使用表中实际存在的字段，`label` 是描述性名称，人工标签另存。修改配置写入 `review.override.json`。
 
@@ -112,7 +112,7 @@ review.json 的 steps 列表定义命名对象和命令的执行顺序。固定�
 - 在 PyMOL 控制台运行 `pp_help` 查看常用命令。
 - **Plugin > PymolPlugins > Pair and export files…**（或 `pp_batch`）用于批量结构处理。
 - **Settings > Automation > Viewing presets…** 提供保持相机、界面表面、固定参考叠合、候选 Cα 对齐，以及PPI、PLI、寡聚体、膜蛋白、DNA/RNA、cartoon和surface草稿；不需要API。参考预设需选择已加载的固定 Review steps 对象。原生 align 会创建或更新 _align1/_align2；对齐只移动候选，需检查复合物的链对应。
-- **AI command drafts… > AI settings…** 可选择原Codex或自定义API地址/Key/模型及Responses/Chat Completions格式。Remember key使用Windows账户加密，否则Key仅保留到PyMOL退出。
+- **AI command drafts… > AI settings…** 可配置自定义 API 地址、Key、模型及 Responses 或 Chat Completions 格式。Windows 还可使用 Codex (Debian WSL)。Remember key使用Windows账户加密，否则Key仅保留到PyMOL退出。
 - 预设和AI都先预览、编辑、确认插入，再点 **Save commands**；生成不执行。
 - 可选 PLIP/PyRosetta workers 和 ANVIL 不包含在 ZIP 中。
 """

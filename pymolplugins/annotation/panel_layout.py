@@ -182,6 +182,7 @@ def _source_page(panel):
     panel.source_browse_button.setMenu(browse_menu)
     panel.dir_browse = panel.csv_browse = panel.source_browse_button
     path_form = QtWidgets.QFormLayout()
+    path_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.ExpandingFieldsGrow)
     path_form.addRow("File or folder", _row(panel.source_path_edit, panel.source_browse_button))
     layout.addLayout(path_form)
     panel.source_options_section = CollapsibleSection("Import options")
