@@ -60,6 +60,18 @@ def _help_entry(
 _TASKS = (
     _help_entry(
         "task",
+        "view",
+        "Open Structure views or turn on click-to-focus for loaded structures.",
+        "pp_view [PRESET, OBJECT]",
+        "pp_view",
+        True,
+        "Apply Cartoon to clear preset overlays for the selected object and return to a basic view.",
+        ("pp_view focus", "pp_view interface, model", "pp_help pp_view"),
+        ("display", "view", "show presets", "cartoon", "interface", "MASS", "显示预设", "聚焦"),
+        "toolkit",
+    ),
+    _help_entry(
+        "task",
         "diagnose",
         "Check the Host PyMOL API, command ownership, paths, and optional worker.",
         "pp_doctor check_worker=0",
@@ -87,7 +99,7 @@ _TASKS = (
     _help_entry(
         "task",
         "navigate",
-        "Browse objects or groups: Left/Right step, Ctrl+Left/Right page; an empty command line handles navigation, while text keeps cursor editing. Use keys=0 to disable bindings and pp_nav stop to restore shortcuts and visibility.",
+        "Browse objects or groups with Left/Right and Ctrl+Left/Right after clicking the viewport. Click a populated command line to edit its text. Use keys=0 to disable bindings and pp_nav stop to restore shortcuts and visibility.",
         "pp_nav TARGET",
         'pp_nav groups, "walk_root_*"',
         True,
@@ -145,11 +157,11 @@ _TASKS = (
     _help_entry(
         "task",
         "align",
-        "Align an explicit payload from selection, motif, or ligand anchors.",
-        "pp_align MOBILE, REFERENCE",
-        "pp_align mobile, target, motif=GGH",
+        "Compare loaded objects in a standalone window or align explicit anchors in scripts.",
+        "pp_align [MOBILE, REFERENCE]",
+        "pp_align",
         True,
-        "pp_undo",
+        "Clear comparison in the window, or pp_undo for scripted alignment",
         (
             "pp_align mobile, target, motif=GGH, preview=1",
             "pp_align apply, ALIGNMENT_ID",
@@ -236,9 +248,9 @@ _TASKS = (
     _help_entry(
         "task",
         "interactions",
-        "Render a manifest-owned ligand, chain, polar, or PLIP interaction result.",
+        "Show ligand or chain contacts, with kind=polar for hydrogen-bond lines.",
         "pp_contacts SOURCE",
-        "pp_contacts complex, focus=organic",
+        "pp_contacts complex, focus=organic, kind=polar",
         True,
         "pp_undo [OPERATION_ID] after any local or async result completes",
         (
@@ -317,8 +329,8 @@ _TASKS = (
         "task",
         "annotation",
         "Review directories, CSV rows or existing scene groups; candidate outputs switch as one bundle.",
-        "Plugin > PymolPlugins: Structure Annotator",
-        "Plugin > PymolPlugins: Structure Annotator",
+        "Plugin > PymolPlugins > Structure Annotator",
+        "Plugin > PymolPlugins > Structure Annotator",
         True,
         "Use the annotator's row-level Undo action.",
         ("Load a directory or CSV in the Source tab", "pp_review_groups parent=candidates"),
@@ -356,6 +368,16 @@ _CATEGORY_PURPOSE = {
 # Curated command rows use:
 # purpose, minimal usage, example, mutates, undo, next, keywords.
 _COMMAND_ROWS = {
+    "pp_view": (
+        "Open Structure views, toggle Interactive focus, or apply overview, interface, membrane or mass to a loaded object.",
+        "pp_view [PRESET, OBJECT [, mode=auto|protein|ligand] [, radius=4|6] "
+        "[, scope=nearby|interacting] [, target_chain=ID] [, binder_chain=ID]]",
+        "pp_view interface, model, radius=6, target_chain=A, binder_chain=B",
+        True,
+        "Apply pp_view cartoon, OBJECT to clear preset overlays and show a basic view.",
+        ("pp_view focus", "pp_view", "pp_help surface", "pp_help publication"),
+        ("view", "preset", "interface", "membrane", "mass", "display", "显示预设", "interactive focus"),
+    ),
     "pp_review_groups": (
         "Open Structure Annotator on direct child groups, preserving external scene objects.",
         "pp_review_groups [PARENT] [, review_path=PATH] [, restore_saved=1]",
@@ -393,7 +415,7 @@ _COMMAND_ROWS = {
         ("surface", "display", "group", "表面"),
     ),
     "pp_nav": (
-        "Start object/group navigation with Left/Right and Ctrl+Left/Right; an empty command line navigates, while text keeps cursor editing. Set keys=0 to disable bindings; pp_nav stop restores shortcuts and visibility. Control actions reject start-only options.",
+        "Start object/group navigation with Left/Right and Ctrl+Left/Right after clicking the viewport or from an empty command line. Click a populated command line to edit its text. Set keys=0 to disable bindings; pp_nav stop restores shortcuts and visibility. Control actions reject start-only options.",
         "pp_nav [ACTION|TARGET]",
         'pp_nav groups, "walk_root_*"',
         True,
@@ -402,11 +424,11 @@ _COMMAND_ROWS = {
         ("browse", "group batch", "arrows", "keyboard", "导航", "方向键", "快捷键"),
     ),
     "pp_align": (
-        "Align objects, anchors, one motif, or one ligand and journal the mutation.",
-        "pp_align MOBILE, REFERENCE",
-        "pp_align mobile, reference, motif=GGH",
+        "Open Compare & align for loaded objects, or align and journal explicit anchors.",
+        "pp_align [MOBILE, REFERENCE]",
+        "pp_align",
         True,
-        "pp_undo",
+        "Clear comparison in the window, or pp_undo for scripted alignment",
         (
             "pp_align mobile, reference, preview=1",
             "pp_align apply, ALIGNMENT_ID",
@@ -423,9 +445,9 @@ _COMMAND_ROWS = {
         ("pca", "symmetry axis", "定向"),
     ),
     "pp_contacts": (
-        "Render a safely inferred local contact result or one explicit preset.",
+        "Show ligand or chain contacts, optionally limited to one interaction kind.",
         "pp_contacts SOURCE",
-        "pp_contacts complex, focus=organic",
+        "pp_contacts complex, focus=organic, kind=polar",
         True,
         "pp_undo [OPERATION_ID] after any local or async result completes",
         (
@@ -759,8 +781,8 @@ _COMMAND_ROWS = {
         ("presets", "palette"),
     ),
     "pp_style_apply": (
-        "Apply a style preset and create a revert snapshot by default.",
-        "pp_style_apply PRESET [, selection=SELECTION]",
+        "Apply a color palette or scene lighting with a revert snapshot. Use variant=warm or cool with macaron_palette.",
+        "pp_style_apply PRESET [, selection=SELECTION] [, variant=TONE]",
         "pp_style_apply publication_light, selection=all",
         True,
         "pp_style_revert",
@@ -795,9 +817,9 @@ _COMMAND_ROWS = {
         ("contacts", "presets"),
     ),
     "pp_interact_run": (
-        "Compute and render one manifest-owned interaction result.",
-        "pp_interact_run [PRESET] [, source=SELECTION]",
-        "pp_interact_run",
+        "Advanced interaction settings for scripts: cutoffs, labels, surfaces, or JSON export.",
+        "pp_interact_run [PRESET] [, source=SELECTION] [, kind=TYPE]",
+        "pp_interact_run ligand_site, source=complex, hbond_cutoff=3.2, kind=polar",
         True,
         "pp_interact_clear GENERATED_GROUP",
         ("pp_interact_export GENERATED_GROUP, interactions.json",),
@@ -985,6 +1007,14 @@ _FALLBACK_USAGE_EXAMPLES = {
 
 _PRESET_ROWS = (
     (
+        "overview",
+        ("structure overview", "cartoon", "molecular surface", "dna/rna"),
+        "Chain-colored overview with ligand sticks, optional surface and DNA/RNA sticks.",
+        "pp_view overview, model, surface=1, transparency=0.6",
+        None,
+        ("view", "display"),
+    ),
+    (
         "publication_light",
         ("publication", "pbs"),
         "Clean shadow-free publication lighting.",
@@ -1001,8 +1031,24 @@ _PRESET_ROWS = (
         ("lighting", "style"),
     ),
     (
-        "macaron_default",
+        "mass",
+        ("paper palette", "residue-number color"),
+        "Apply the paper palette by residue number, independently for each protein chain.",
+        "pp_style_apply mass, selection=polymer.protein",
+        "pp_style_revert",
+        ("palette", "protein", "color"),
+    ),
+    (
+        "macaron_palette",
         ("macaron",),
+        "Apply Macaron colors with one of three tones: default, warm or cool.",
+        "pp_style_apply macaron_palette, selection=polymer, variant=warm",
+        "pp_style_revert",
+        ("palette", "color"),
+    ),
+    (
+        "macaron_default",
+        (),
         "Pastel macaron spectrum with soft lighting.",
         "pp_style_apply macaron_default, selection=polymer",
         "pp_style_revert",
@@ -1034,7 +1080,7 @@ _PRESET_ROWS = (
     ),
     (
         "high_contrast_outline",
-        ("cartoon", "high_contrast"),
+        ("high_contrast",),
         "Flat high-contrast cartoon lighting.",
         "pp_style_apply high_contrast_outline, selection=all",
         "pp_style_revert",
@@ -1075,8 +1121,8 @@ _PRESET_ROWS = (
     (
         "ligand_contacts",
         (),
-        "Fast local heavy-atom ligand contacts with one closest residue pair.",
-        "pp_interact_run ligand_contacts, source=complex",
+        "Distance-only ligand contacts with one closest heavy-atom pair per residue pair.",
+        "pp_contacts complex, preset=ligand_contacts",
         "pp_interact_clear GENERATED_GROUP",
         ("contacts", "interaction", "ligand"),
     ),
@@ -1084,7 +1130,7 @@ _PRESET_ROWS = (
         "ligand_quick",
         ("ligand",),
         "Focused local ligand-site hydrogen bonds.",
-        "pp_interact_run ligand_quick, source=complex",
+        "pp_contacts complex, kind=polar",
         "pp_interact_clear GENERATED_GROUP",
         ("contacts", "interaction"),
     ),
@@ -1092,7 +1138,7 @@ _PRESET_ROWS = (
         "ligand_site",
         ("binding_site",),
         "Ligand site with hydrogen bonds, salt bridges, and property colors.",
-        "pp_interact_run ligand_site, source=complex",
+        "pp_contacts complex, preset=ligand_site",
         "pp_interact_clear GENERATED_GROUP",
         ("contacts", "interaction"),
     ),
@@ -1100,7 +1146,7 @@ _PRESET_ROWS = (
         "interchain_basic",
         ("interchain",),
         "Local chain-chain hydrogen bonds and salt bridges.",
-        "pp_interact_run interchain_basic, source=complex",
+        'pp_contacts complex, focus="chain A", partner="chain B"',
         "pp_interact_clear GENERATED_GROUP",
         ("contacts", "interaction", "chains"),
     ),
@@ -1108,7 +1154,7 @@ _PRESET_ROWS = (
         "polar_qc",
         (),
         "Classify good/weak polar pairs and like-polar clashes.",
-        'pp_interact_run polar_qc, source=complex, partner1="chain A", partner2="chain B"',
+        'pp_contacts complex, preset=polar_qc, focus="chain A", partner="chain B"',
         "pp_interact_clear GENERATED_GROUP",
         ("contacts", "interaction", "clash"),
     ),
@@ -1116,7 +1162,7 @@ _PRESET_ROWS = (
         "plip_overview",
         (),
         "Complete PLIP interaction categories through the WSL worker.",
-        "pp_interact_run plip_overview, source=complex",
+        "pp_contacts complex, preset=plip_overview",
         "pp_interact_clear GENERATED_GROUP",
         ("contacts", "interaction", "wsl"),
     ),
@@ -1124,7 +1170,7 @@ _PRESET_ROWS = (
         "plip_publication",
         (),
         "Focused publication-oriented PLIP result.",
-        "pp_interact_run plip_publication, source=complex",
+        "pp_contacts complex, preset=plip_publication",
         "pp_interact_clear GENERATED_GROUP",
         ("contacts", "interaction", "wsl"),
     ),
@@ -1134,7 +1180,10 @@ _PRESET_ROWS = (
 def default_tasks():
     """Return detached task-first help entries (always at most twelve)."""
 
-    return [deepcopy(value) for value in _TASKS]
+    by_name = {task["name"]: task for task in _TASKS}
+    keys = ("view", "annotation", "navigate", "align", "interactions",
+            "style", "surface", "orient", "worker metrics", "diagnose")
+    return [deepcopy(by_name[key]) for key in keys]
 
 
 def help_topics():
@@ -1166,13 +1215,15 @@ def category_help(category):
         commands = AUTOLOADED_COMPAT_COMMANDS.get(name)
     if commands is None:
         return None
+    if name == "interactions":
+        commands = ("pp_contacts",)
     return {
         "kind": "category",
         "tier": "compat" if name.endswith("_compat") else "canonical",
         "name": name,
         "purpose": _CATEGORY_PURPOSE[name],
         "minimal_usage": "pp_help %s" % name,
-        "example": "pp_help %s" % name,
+        "example": "pp_contacts complex, focus=\"resn LIG\"" if name == "interactions" else "pp_help %s" % name,
         "mutates": False,
         "undo": None,
         "next": ["pp_help %s" % command for command in commands[:3]],
@@ -1230,7 +1281,8 @@ def _preset_entries():
                  "pp_style_revert", (item.category, "figure", "style"))
                 for item in PRESETS if item.name not in curated)
     for name, aliases, purpose, example, undo, keywords in rows:
-        command = "pp_style_apply" if example.startswith("pp_style") else "pp_interact_run"
+        command = example.split(None, 1)[0]
+        category = {"pp_style_apply": "styles", "pp_contacts": "interactions", "pp_view": "toolkit"}[command]
         values.append(
             _help_entry(
                 "preset",
@@ -1242,7 +1294,7 @@ def _preset_entries():
                 undo,
                 ("pp_help %s" % command,),
                 keywords,
-                "styles" if command == "pp_style_apply" else "interactions",
+                category,
                 aliases,
             )
         )
@@ -1376,7 +1428,7 @@ def search_help(query, limit=5):
     entries.extend(
         value
         for category in CANONICAL_COMMANDS.values()
-        for value in (command_help(name) for name in category)
+        for value in (command_help(name) for name in category if name != "pp_interact_run")
         if value is not None
     )
     entries.extend(
@@ -1385,7 +1437,11 @@ def search_help(query, limit=5):
         for value in (command_help(name) for name in category)
         if value is not None
     )
-    entries.extend(_preset_entries())
+    from pymolplugins.styles.presets import COLOR_CHOICES, LIGHTING_CHOICES
+
+    appearance = {name for _, name in COLOR_CHOICES + LIGHTING_CHOICES}
+    entries.extend(entry for entry in _preset_entries()
+                   if entry["category"] != "styles" or entry["name"] in appearance)
     ranked = []
     for entry in entries:
         score = _score(requested, entry)

@@ -15,6 +15,7 @@ except ImportError:
 
 from pymolplugins.core.parameters import as_bool, as_float, as_int, extend_command
 from pymolplugins.interactions.presets import PRESETS as INTERACTION_PRESETS
+from pymolplugins.interactions.presets import ligand_preset_for_kind
 from pymolplugins.targets.resolver import expand_targets, resolve_targets
 from pymolplugins.tasks import journal
 
@@ -84,6 +85,7 @@ def _contacts_apply_hint(
     preset: str,
     group: str,
     state: int,
+    kind: str = "all",
 ) -> str:
     values = {
         "source": _copyable_console_token(source),
@@ -91,11 +93,12 @@ def _contacts_apply_hint(
         "partner": _copyable_console_token(partner) if partner else "",
         "preset": _copyable_console_token(preset) if preset != "auto" else "",
         "group": _copyable_console_token(group) if group else "",
+        "kind": _copyable_console_token(kind) if kind != "all" else "",
     }
     if any(value is None for value in values.values()):
         return "repeat the same pp_contacts command without preview=1"
     parts = ["pp_contacts %s" % values["source"]]
-    for name in ("focus", "partner", "preset", "group"):
+    for name in ("focus", "partner", "preset", "group", "kind"):
         if values[name]:
             parts.append("%s=%s" % (name, values[name]))
     if state != 1:
@@ -544,7 +547,7 @@ def _alignment_status(result: Mapping[str, object]) -> str:
 
 
 def pp_align(
-    mobile,
+    mobile="",
     reference="",
     motif="",
     ligand="",
@@ -561,6 +564,10 @@ def pp_align(
         ligand_value = str(ligand).strip()
         move_value = str(move).strip()
         preview_value = as_bool(preview)
+        if not any((mobile_value, reference_value, motif_value, ligand_value, move_value,
+                    preview_value)) and as_int(state, minimum=1, name="state") == 1:
+            _load("pymolplugins.host.compare_structures").show_compare()
+            return _response("pp_align", "opened", "show_compare", {"window": "Compare & align"})
         if motif_value and ligand_value:
             raise ValueError("motif and ligand are mutually exclusive")
         action_mode = mobile_value.lower() in {"apply", "commit"}
@@ -785,16 +792,19 @@ def _ligand_residue_choices(interactions, source: str, state: int):
 
 
 def _contact_plan(
-    interactions, source: str, focus: str, partner: str, preset: str, state: int
+    interactions, source: str, focus: str, partner: str, preset: str, state: int, kind: str
 ):
     controller = interactions.get_controller()
     source_value = interactions._resolve_public_source(controller, source, state)
     canonical = str(preset).strip().lower() or "auto"
     partner1, partner2 = "", ""
+    if canonical == "auto" and kind in {"pi", "hydrophobic"}:
+        raise ValueError(f"kind={kind} requires preset=plip_overview and a PLIP worker")
     if canonical == "auto" and focus and partner:
-        canonical, partner1, partner2 = "interchain_basic", focus, partner
+        canonical = "polar_qc" if kind == "clash" else "interchain_basic"
+        partner1, partner2 = focus, partner
     elif canonical == "auto" and focus:
-        canonical, partner2 = "ligand_contacts", focus
+        canonical, partner2 = ligand_preset_for_kind(kind), focus
     elif canonical == "auto" and partner:
         raise ValueError("partner requires focus for a two-sided contact analysis")
     elif canonical == "auto":
@@ -805,7 +815,7 @@ def _contact_plan(
                 "preset=auto requires exactly one organic ligand; found %d%s"
                 % (len(choices), ": " + ", ".join(labels) if labels else "")
             )
-        canonical = "ligand_contacts"
+        canonical = ligand_preset_for_kind(kind)
     else:
         canonical = INTERACTION_PRESETS.resolve(canonical).name
         ligand_presets = {
@@ -914,6 +924,7 @@ def pp_contacts(
     group="",
     wait=0,
     state=1,
+    kind="all",
 ) -> Dict[str, object]:
     """Run one local/explicit interaction preset with safe partner inference."""
 
@@ -924,6 +935,8 @@ def pp_contacts(
         if preview_value and wait_value:
             raise ValueError("wait is not applicable to a contacts preview")
         interactions = _load("pymolplugins.interactions.controller")
+        kind_value = str(kind).strip().lower() or "all"
+        kind_options = {"kind": kind_value} if kind_value != "all" else {}
         source_value, canonical, partner1, partner2 = _contact_plan(
             interactions,
             str(source).strip(),
@@ -931,6 +944,7 @@ def pp_contacts(
             str(partner).strip(),
             str(preset),
             parsed_state,
+            kind_value,
         )
         plan = {
             "source": source_value,
@@ -938,6 +952,7 @@ def pp_contacts(
             "partner1": partner1,
             "partner2": partner2,
             "group": str(group).strip(),
+            **kind_options,
         }
         if preview_value:
             preview_api = getattr(interactions, "preview_interaction", None)
@@ -949,6 +964,7 @@ def pp_contacts(
                     partner2=partner2,
                     state=parsed_state,
                     group=str(group).strip(),
+                    **kind_options,
                 )
                 result = dict(validation)
                 result["partner1"] = partner1
@@ -969,6 +985,7 @@ def pp_contacts(
                     str(preset).strip().lower() or "auto",
                     str(group).strip(),
                     parsed_state,
+                    kind_value,
                 )
             )
             return _response(
@@ -982,6 +999,7 @@ def pp_contacts(
             state=parsed_state,
             group=group,
             async_mode=int(not wait_value),
+            **kind_options,
         )
         operation = None
         if isinstance(result, str):

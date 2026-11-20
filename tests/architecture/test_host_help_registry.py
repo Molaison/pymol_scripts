@@ -85,7 +85,7 @@ class HostManifestTests(unittest.TestCase):
         compat = {
             name for values in AUTOLOADED_COMPAT_COMMANDS.values() for name in values
         }
-        self.assertEqual(len(canonical), 77)
+        self.assertEqual(len(canonical), 78)
         self.assertEqual(
             compat,
             {
@@ -99,8 +99,8 @@ class HostManifestTests(unittest.TestCase):
                 "seq_select",
             },
         )
-        self.assertEqual(len(declared_command_names()), 85)
-        self.assertEqual(len(set(declared_command_names())), 85)
+        self.assertEqual(len(declared_command_names()), 86)
+        self.assertEqual(len(set(declared_command_names())), 86)
         self.assertEqual(set(COMMAND_TARGETS), canonical | compat)
 
 
@@ -165,11 +165,11 @@ class HelpCatalogTests(unittest.TestCase):
                 'pp_nav groups, "walk_root_*"',
             ),
             "pp_align": (
-                "pp_align MOBILE, REFERENCE",
-                "pp_align mobile, reference, motif=GGH",
+                "pp_align [MOBILE, REFERENCE]",
+                "pp_align",
             ),
             "pp_orient": ("pp_orient TARGET", "pp_orient oligomer, axis=cyclic"),
-            "pp_contacts": ("pp_contacts SOURCE", "pp_contacts complex, focus=organic"),
+            "pp_contacts": ("pp_contacts SOURCE", "pp_contacts complex, focus=organic, kind=polar"),
             "pp_metrics": (
                 "pp_metrics SOURCE, target=CHAINS, binder=CHAINS",
                 "pp_metrics complex, target=A, binder=B",
@@ -189,7 +189,8 @@ class HelpCatalogTests(unittest.TestCase):
                 self.assertTrue(example.startswith(name))
 
         self.assertEqual(command_help("pp_show")["undo"], "pp_undo")
-        self.assertEqual(command_help("pp_align")["undo"], "pp_undo")
+        self.assertIn("Clear comparison", command_help("pp_align")["undo"])
+        self.assertIn("pp_undo for scripted alignment", command_help("pp_align")["undo"])
         self.assertEqual(command_help("pp_orient")["undo"], "pp_undo")
         self.assertIn("async result completes", command_help("pp_contacts")["undo"])
         self.assertIsNone(command_help("pp_metrics")["undo"])

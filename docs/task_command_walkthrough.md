@@ -2,6 +2,36 @@
 
 本指南让你在 PyMOL 控制台练习显示、对象和 group 导航、对齐、方向、样式和接触。先安装插件；使用一次性场景，避免示例对象名与现有对象冲突。命令中的 `walk_*` 在下方创建，`YOUR_*` 是必须替换成真实数据的占位符。
 
+## 常用入口
+
+PyMOL 主窗口的 **PymolPlugins** 工具栏直接打开 Annotator、Views、Focus、Compare、Batch 和 RFD4。
+
+点 **Views** 或输入 `pp_view` 打开 **Structure views**。**Structure overview** 将 cartoon、小分子 sticks、可选分子表面和 DNA/RNA sticks 放在一起。**Interface & pocket** 的伙伴类型可选蛋白–蛋白或蛋白–配体，并可叠加独立计算的局部表面。**Copy command** 可复制当前配置，例如 `pp_view interface, model, radius=6, surface=1, transparency=0.6`。
+
+**Color** 为选中的对象配色。**MASS · Paper by residue number** 按各蛋白链的残基编号独立着色，**Macaron** 提供 Default、Warm、Cool 三个色调。**Lighting** 单独调整整场景的光照与渲染风格。RFD4 的 **配色…** 和 **光照…** 打开同一个窗口，并预选当前设计对象。命令行可用 `pp_style_apply mass, model` 或 `pp_style_apply macaron_palette, model, variant=warm`。旧 Macaron 命令保留其配色加柔光的效果。
+
+**Membrane topology** 优先使用结构中可辨认的脂质磷叶层，否则使用本机 TmDet 4.1.9。结果显示定位来源、膜厚和逐链跨膜区段。橙色 Tyr/Trp 位于膜水界面，青色 Arg/Lys 标识近膜碱性残基。只有出现明确的 positive-inside 偏向时，才标为推断的胞质侧。计算在后台运行，无法放置时会给出原因，结构继续可见。TmDet 属于可选本机依赖，Windows 支持已配置的 Debian WSL 运行时。校准 Bundle 自带的膜数据由 Bundle 视图使用。
+
+在 **Plugin → PymolPlugins → Compare & align…** 或输入 `pp_align` 打开独立的结构比较窗口。勾选至少两个对象，选定参考对象。**Overlay** 直接叠加当前帧，**Align** 按选定方法拟合。Mobiles 和 Reference 可分别选择原子类型、链和残基范围，例如 `40-80+105`。多个移动对象共用 Mobiles 范围。**Clear comparison** 或关闭窗口会移除比较副本并恢复源对象的可见性。
+
+从 **Plugin → PymolPlugins → Interactive focus** 或输入 `pp_view focus` 进入点击聚焦。左键点残基或配体，显示同一对象内 5 Å 的邻域。**Camera** 默认保留当前角度、缩放和位置，可改用平滑居中、自动取景或单次取景。**Contacts** 可以关闭，或只显示极性候选、极性加盐桥、完整 Interface。**Pocket surface** 只用独立副本中的邻域聚合物残基计算半透明表面。再次点同一残基或点空白可清除聚焦，**Done** 退出。清除和退出都保留当前视角。
+
+Focus 的右侧控件可独立开关口袋表面、珊瑚色配体表面和空腔点。每次开启空腔点时，青点和紫点的复选框都默认勾选。青点表示探针可从体相进入的凹入区域，紫点表示探针可容纳的封闭区域。计算在后台运行并复用缓存。**Pocket options** 可设置口袋表面的半径和透明度，并在朝向配体的内壁与完整局部表面之间切换。
+
+| 任务 | 入口 |
+|---|---|
+| 显示预设、界面、膜和残基配色 | `pp_view` |
+| 只显示或隐藏某种表示 | `pp_show` |
+| 浏览结构与 group | `pp_nav` |
+| 对齐与定向 | `pp_align`、`pp_orient` |
+| 计算接触与指标 | `pp_contacts`、`pp_metrics` |
+| 查看后台任务、撤销受支持的操作 | `pp_jobs`、`pp_undo` |
+| 切换出图样式 | `pp_style_apply` |
+| 审阅评分表与批处理 | **Structure Annotator**、**Batch Processing** |
+| 查用法与排查安装 | `pp_help`、`pp_doctor` |
+
+在 **Plugin → PymolPlugins** 可找到面板入口。用 `pp_help 命令名` 查询具体参数。
+
 ## 加载工具并创建练习对象
 
 ```pymol
@@ -54,7 +84,7 @@ pp_nav stop
 
 开始后每个 group 作为一个候选，`window=2` 显示两个，`page=2` 每页移动两个，`wrap=0` 到边界停止。`pp_nav objects, "walk_*"` 可按对象浏览；名称和 glob 均可用。`window`、`page` 等是启动选项，不能附在 `next` 上。
 
-默认 Left/Right 前后切换，Ctrl+Left/Right 翻页；点击视图区后命令行为空时仍可使用，有文字时方向键用于编辑文本。启动命令加 `keys=0` 可关闭绑定。`pp_nav stop` 恢复原快捷键和原可见性；Annotator 的 Alt+Left/Right 独立切换审阅条目。组内原本关闭的子对象保持关闭；开启隐藏祖先时不会意外显示祖先下的外部兄弟对象。
+点击视图区后，Left/Right 前后切换，Ctrl+Left/Right 翻页。命令框里的草稿会保留。空命令框也支持导航，点击有文字的命令框可以继续用方向键编辑。启动命令加 `keys=0` 可关闭绑定。`pp_nav stop` 恢复原快捷键和原可见性。Annotator 的 Alt+Left/Right 切换审阅条目。组内原本关闭的子对象保持关闭；开启隐藏祖先时不会意外显示祖先下的外部兄弟对象。
 
 ## 选择序列并对齐
 
@@ -111,12 +141,12 @@ pp_style_revert
 `clean_outline` 是 0.17.0 候选样式。describe 显示全局与目标影响；apply 默认不渲染，revert 恢复最近的样式快照。可用 `pp_style_list` 查看已安装版本的样式。指定真实蛋白—配体对象后可预览和运行接触：
 
 ```pymol
-pp_contacts YOUR_COMPLEX, focus="YOUR_LIGAND_SELECTION", preview=1
-pp_contacts YOUR_COMPLEX, focus="YOUR_LIGAND_SELECTION"
+pp_contacts YOUR_COMPLEX, focus="YOUR_LIGAND_SELECTION", kind=polar, preview=1
+pp_contacts YOUR_COMPLEX, focus="YOUR_LIGAND_SELECTION", kind=polar
 pp_undo
 ```
 
-预览不创建接触结果；实际运行生成受管显示对象，可按输出提示撤销。canonical interaction 默认不新增 partner 命名 selection；几何接触不等同能量结论。PLIP 和 PyRosetta 是可选后端，[worker 指南](wsl_worker.md) 说明准备和取消边界。
+用 `kind=polar` 只画氢键候选线。两侧为蛋白链时可指定 `focus="chain A", partner="chain B"`。默认的 `ligand_contacts` 报告距离内的最近重原子接触，`polar_qc` 默认同时报告极性配对与同类极性冲突。π 堆叠等 PLIP 分类可以用 `pp_contacts complex, focus="resn LIG", preset=plip_overview, kind=pi`。新默认结果会隐藏同一来源之前的默认结果组。需要并排查看时，为每次计算指定不同的 `group=`。可选后端见 [worker 指南](wsl_worker.md)。
 
 ## 清理练习场景
 

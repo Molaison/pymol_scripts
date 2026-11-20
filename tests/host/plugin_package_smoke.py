@@ -34,7 +34,7 @@ def _check_onboarding(annotation, directory, menu, output):
     from pymolplugins.annotation.persistence import flush_writes
 
     app = QtWidgets.QApplication.instance()
-    action = next(action for action in menu.actions() if action.text() == "PymolPlugins: Structure Annotator")
+    action = next(action for action in menu.actions() if action.text() == "Structure Annotator")
     action.trigger()
     app.processEvents()
     panel = annotation._panel
@@ -330,6 +330,11 @@ def _check_install(package, directory, parent, menu, *, onboarding=False, bundle
     for name, module in list(sys.modules.items()):
         if name == "pymolplugins" or name.startswith("pymolplugins."):
             Path(module.__file__).resolve().relative_to(installed.resolve())
+    menu = next(action.menu() for action in menu.actions() if action.text() == "PymolPlugins")
+    labels = [action.text() for action in menu.actions()]
+    assert {"Show presets…", "Structure Annotator", "Batch Processing", "Maintenance"} <= set(labels), labels
+    maintenance = next(action.menu() for action in menu.actions() if action.text() == "Maintenance")
+    assert "Updates" in {action.text() for action in maintenance.actions()}
     annotation = importlib.import_module("pymolplugins.annotation.plugin")
     assert callable(annotation.show_structure_annotator_panel)
     assert Path(annotation.__file__).resolve().is_relative_to(installed.resolve())
@@ -339,17 +344,13 @@ def _check_install(package, directory, parent, menu, *, onboarding=False, bundle
         return {"status": "passed", "plugin_version": info.get_version(),
                 "pymol_version": cmd.get_version()[0], "renderer": cmd.get_renderer(),
                 "installed_entry": info.filename, "bundle": result}
-    labels = [action.text() for action in menu.actions()]
-    assert len(labels) == 7 and "PymolPlugins: Structure Annotator" in labels, labels
-    assert "PymolPlugins: Batch Processing" in labels, labels
-    assert "PymolPlugins: Updates" in labels, labels
     if onboarding:
         result = _check_onboarding(annotation, directory, menu, output)
         return {"status": "passed", "plugin_version": info.get_version(),
                 "pymol_version": cmd.get_version()[0], "installed_entry": info.filename,
                 "onboarding": result}
     batch = importlib.import_module("pymolplugins.targets.batch_widgets")
-    batch_action = next(action for action in menu.actions() if action.text() == "PymolPlugins: Batch Processing")
+    batch_action = next(action for action in menu.actions() if action.text() == "Batch Processing")
     batch_action.trigger()
     from pymol.Qt import QtGui, QtWidgets
     QtWidgets.QApplication.processEvents()
@@ -367,7 +368,7 @@ def _check_install(package, directory, parent, menu, *, onboarding=False, bundle
     host.set_mode("floating")
     assert host.isFloating() and batch._DIALOG.window_mode_button.isEnabled()
     host.set_mode("docked")
-    annotation_action = next(action for action in menu.actions() if action.text() == "PymolPlugins: Structure Annotator")
+    annotation_action = next(action for action in menu.actions() if action.text() == "Structure Annotator")
     annotation_action.trigger()
     QtWidgets.QApplication.processEvents()
     annotation_host = annotation._panel.workspace_window

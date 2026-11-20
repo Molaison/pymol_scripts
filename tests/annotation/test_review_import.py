@@ -1,12 +1,15 @@
 import csv
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from pymolplugins.annotation import review_file
 from pymolplugins.annotation.review_file import read_review_file, write_review_override
 from pymolplugins.annotation.sources.csv_source import CsvDatasetSource, CsvSourceError, read_csv_header
 from pymolplugins.annotation.path_resolver import PathMappingRule, PathResolver
@@ -75,6 +78,39 @@ class ReviewImportTests(unittest.TestCase):
             self.assertEqual(len(self.module.STATE.entries), 2)
             self.assertEqual(manifest.read_bytes(), before)
             self.assertFalse((folder / "review.override.json").exists())
+
+    def test_generated_interface_bridge_leaves_custom_edits_in_charge(self):
+        step = "\n".join((
+            "/from pathlib import Path",
+            "/from runpy import run_path",
+            '/bundle_source = Path(r"{file}").absolute()',
+            '/bundle_script = bundle_source.parent.parent / "pymol" / "acceptance_collection.py"',
+            '/bundle_renderer = run_path(str(bundle_script))["acc_bundle_step"]',
+            '/bundle_renderer("{object}", str(bundle_source), "bind_interface.py")',
+        ))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            table = root / "sum_scores.csv"
+            export = root / "pymol"
+            export.mkdir()
+            bridge = export / "bind_interface.py"
+            signature = b"# recognized generated renderer\n"
+            bridge.write_bytes(signature)
+            (root / "bundle_view.json").write_text(json.dumps({
+                "mode": "bundle", "view": "ligand_pocket", "membrane": {"reference_path": "ref.pdb"},
+            }), encoding="utf-8")
+            entry = SimpleNamespace(source_path="structures/a.pdb", resolved_path=str(root / "structures/a.pdb"))
+            dataset = SimpleNamespace(entries=(entry,), path_column="structure_path")
+            review = review_file.ReviewFile({}, ())
+
+            def config(command=step):
+                return review_file.bundle_view_config(review, str(table), step_cmd=command, dataset=dataset, selected=entry)
+
+            with patch.object(review_file, "_INTERFACE_BRIDGE_FILES", {bridge.name: sha256(signature).hexdigest()}):
+                self.assertEqual(config()["legacy_interface_step"], step)
+                self.assertIsNone(config(step + "\ncolor cyan"))
+                bridge.write_bytes(signature + b"# user's edit\n")
+                self.assertIsNone(config())
 
     def test_file_url_uses_the_actual_path_and_decodes_once(self):
         self.assertEqual(file_url_path(clean_pasted_path(' <file:///K:/A%20B/%2523+%23.csv> ')),

@@ -103,6 +103,22 @@ def _pocket_distances(identity, protein, ligand, cutoff, covalent_link):
     return interactions
 
 
+def style_residue_labels(api, labels, *, atom_size=False):
+    """Apply the shared label settings to atom selections grouped by color."""
+    by_color = {}
+    for selection, color in labels:
+        by_color.setdefault(color, []).append(selection)
+    if not by_color:
+        return
+    for color, selections in by_color.items():
+        api.set("label_color", color, " or ".join(f"({selected})" for selected in selections))
+    all_labels = " or ".join(f"({selected})" for selections in by_color.values() for selected in selections)
+    if atom_size:
+        api.set("label_size", 13, all_labels)
+    api.set("label_bg_color", "white", all_labels)
+    api.set("label_position", (0.0, 0.5, 1.1), all_labels)
+
+
 def membrane_surface_review(
     identity, protein, surface_residues, *, bounds=None, biased_residues=(),
     side_labels=(), core_bounds=(),
@@ -125,7 +141,7 @@ def membrane_surface_review(
             cmd.set("sphere_color", color, markers)
             cmd.set("cartoon_color", color, f"byres ({markers})")
 
-    labels = []
+    labels, residues = [], []
     # The represented charge belongs to the side chain at near-neutral pH.
     charges = {
         "ARG": ("CZ", "+1", "marine"), "LYS": ("NZ", "+1", "marine"),
@@ -137,7 +153,7 @@ def membrane_surface_review(
         residue = f"({protein}) and ({entry['selection']}) and resn {entry['resn']}"
         if not entry["weight"] or _count(f"({surface_ca}) and ({residue})") != 1:
             continue
-        acc_sidechain_sticks(residue, carbon_color="gray65", stick_radius=0.17)
+        residues.append(residue)
         if entry["resn"] in charges:
             anchor, charge, color = charges[entry["resn"]]
         else:
@@ -146,11 +162,12 @@ def membrane_surface_review(
         if not _count(selected):
             selected = f"({residue}) and name CA"
         cmd.label(selected, 'resn + resi + ' + repr(f" {charge}"))
-        cmd.set("label_color", color, selected)
-        cmd.set("label_size", 13, selected)
-        cmd.set("label_bg_color", "white", selected)
-        cmd.set("label_position", (0.0, 0.5, 1.1), selected)
-        labels.append(selected)
+        labels.append((selected, color))
+
+    if residues:
+        acc_sidechain_sticks(" or ".join(f"({residue})" for residue in residues),
+                             carbon_color="gray65", stick_radius=0.17)
+    style_residue_labels(cmd, labels, atom_size=True)
 
     planes, markers = [], []
     if bounds is not None:
@@ -199,7 +216,7 @@ def membrane_surface_review(
             marker = asset_name(identity, "membrane_core")
             cmd.load_cgo(rims, marker, zoom=0)
             markers.append(marker)
-    return {"planes": planes, "markers": markers, "bias_labels": labels}
+    return {"planes": planes, "markers": markers, "bias_labels": [selected for selected, _ in labels]}
 
 
 def ligand_pocket_review(

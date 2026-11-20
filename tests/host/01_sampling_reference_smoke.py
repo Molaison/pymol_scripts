@@ -184,11 +184,11 @@ def run(args, result):
         assert not panel._reference_object
         result["sample_save_and_next"] = "passed"
 
-        # Same real pair through the existing batch entry; review samples cannot
-        # silently restrict (or be mistaken for) the source-table batch scope.
+        # Inspect the review scope, then explicitly switch to the source before selecting this known pair.
         batch = panel._show_batch_processing()
         assert batch.config().b == "reference_file" and batch.config().mode == "paired"
-        assert "NOT transferred" in batch.source_scope_label.text()
+        assert batch.scope_choice.currentData() == "Current review"
+        batch.scope_choice.setCurrentIndex(batch.scope_choice.findData("Entire source"))
         batch.id_column.setCurrentText("relative_path")
         selected_row = next(row for row in rows if row["candidate_file"] == str(candidate_path))
         batch.ids.setText(selected_row["relative_path"])

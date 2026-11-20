@@ -32,6 +32,7 @@ from pymolplugins.annotation.review_steps import ReviewObjects, effective_steps,
 from pymolplugins.annotation.scene_groups import CandidateBundles, ancestors, candidates as scene_candidates, delete_owned, group_parents, write_manifest
 from pymolplugins.annotation.review_actions import save_annotations, undo_annotations
 from pymolplugins.annotation.score_summary import prepare_score_summary
+from pymolplugins.annotation.model import format_numeric_cell
 from pymolplugins.annotation.command_templates import format_commands
 from pymolplugins.annotation.review_file import (
     REVIEW_KEYS, bundle_table_name, bundle_view_config, check_review_unchanged, read_review_file, review_paths,
@@ -483,6 +484,7 @@ class AnnotatorState:
     step_context: dict = field(default_factory=dict)
     filter_presets: List[Dict[str, object]] = field(default_factory=list)
     sampling: Dict[str, object] = field(default_factory=dict)
+    cluster_scope: Dict[str, object] = field(default_factory=dict)
     filtered_count: int = 0
     display_columns: List[str] = field(default_factory=list)
     csv_encoding: str = DEFAULT_ENCODING
@@ -509,7 +511,7 @@ class AnnotatorState:
     step_cmd: str = "zoom {object}"
     auto_advance: bool = True
     save_on_label_click: bool = False
-    show_source_row: bool = False
+    show_source_row: bool = True
     show_file_status: bool = False
     keep_previous: bool = False
     prefer_gz: bool = True
@@ -829,7 +831,10 @@ def _table_view_entries(
         for entry in entries
         if predicate(entry)
     ]
-    if STATE.sampling.get("enabled"):
+    if STATE.cluster_scope:
+        by_id = {entry.id: entry for entry in filtered}
+        filtered = [by_id[key] for key in STATE.cluster_scope["ids"] if key in by_id]
+    elif STATE.sampling.get("enabled"):
         selected_ids = {entry.id for entry in STATE.entries}
         filtered = [entry for entry in filtered if entry.id in selected_ids]
     return _sort_entries(
@@ -889,7 +894,7 @@ def _runtime_snapshot() -> Dict[str, object]:
         "annotated_entry_ids", "row_annotation_store", "materialized_paths",
         "materialization_errors", "navigation_session", "managed_objects",
         "navigation_generation", "current_object", "state_path", "review_reference", "bundle_view",
-        "sampling", "filtered_count", "steps", "step_assets", "step_materialized", "step_context",
+        "sampling", "cluster_scope", "filtered_count", "steps", "step_assets", "step_materialized", "step_context",
     )
     snapshot: Dict[str, object] = {}
     for name in names:
@@ -2480,6 +2485,18 @@ def _has_review_steps():
     return bool(STATE.steps or STATE.reference_column)
 
 
+def _bundle_view_for_index(index):
+    config = STATE.bundle_view
+    if config and (legacy_step := config.get("legacy_interface_step")):
+        if _has_review_steps() or legacy_step != STATE.step_cmd.strip():
+            return None
+        entry = STATE.entries[index]
+        expected = os.path.join(os.path.dirname(STATE.csv_path), entry.source_path)
+        if os.path.normcase(os.path.abspath(expected)) != os.path.normcase(os.path.abspath(STATE.files[index])):
+            return None
+    return config
+
+
 def _ensure_loaded(index, focus, allow_gz_fallback=True, *, trust_materialized=False, view_run=None):
     if STATE.source_mode == "groups":
         return _show_scene_group(index, view_run) if focus else STATE.files[index]
@@ -2505,7 +2522,10 @@ def _ensure_loaded(index, focus, allow_gz_fallback=True, *, trust_materialized=F
                 if "commands" in item:
                     _run_pymol_commands(item["commands"], context, view_run=view_run)
                 elif not shared_step_executed:
-                    _run_pymol_commands(STATE.step_cmd, context, view_run=view_run)
+                    # The recognized legacy bridge is rendered by the native view queue.
+                    bundle = _bundle_view_for_index(index) or {}
+                    if _panel is None or _panel._closed or not bundle.get("legacy_interface_step"):
+                        _run_pymol_commands(STATE.step_cmd, context, view_run=view_run)
                     shared_step_executed = True
             elif item["name"] == "candidate":
                 loaded = _object_name_for_index(STATE.files[index], index) not in existing
@@ -3834,7 +3854,8 @@ def _prepare_csv_load(
     persisted_config = dict(persisted_config or {})
     persisted_config["reference_column"] = reference_column
     step_cmd = persisted_config.get("step_cmd", runtime.config.get("step_cmd", ""))
-    bundle_view = bundle_view_config(review, canonical_csv, step_cmd=step_cmd)
+    bundle_view = bundle_view_config(review, canonical_csv, step_cmd=step_cmd,
+                                     dataset=dataset, selected=selected_entry)
     if bundle_view is not None and is_legacy_bundle_step(step_cmd):
         persisted_config["step_cmd"] = ""
     persisted_config["steps"] = validate_steps(persisted_config.get("steps", []) if same_active_csv or persisted or "steps" in review.config else [],
@@ -3931,6 +3952,7 @@ def _commit_prepared_csv_load(plan: _PreparedCsvLoad) -> Dict[str, object]:
         STATE.sort_descending = plan.sort_descending
         STATE.dataset = dataset
         STATE.sampling = {}
+        STATE.cluster_scope = {}
         STATE.filtered_count = len(plan.active_entries)
         STATE.state_path = plan.state_path
         STATE.review_reference = {key: copy.deepcopy(getattr(STATE, key)) for key in REVIEW_KEYS}
@@ -4159,6 +4181,7 @@ def _commit_prepared_directory_load(plan):
         STATE.step_assets = {}
         STATE.step_materialized = {}
         STATE.sampling = {}
+        STATE.cluster_scope = {}
         STATE.filtered_count = len(plan.entries)
         STATE.display_columns = []
         STATE.csv_encoding = DEFAULT_ENCODING
@@ -4316,7 +4339,7 @@ def sa_load_groups(parent: str = "", review_path: str = "scene-review.json", res
         STATE.step_assets, STATE.step_materialized, STATE.materialized_paths = {}, {}, {}
         STATE.filter_text, STATE.sort_column = "", ""
         STATE.filter_presets = (saved or {}).get("config", {}).get("filter_presets", [])
-        STATE.sampling, STATE.display_columns = {}, []
+        STATE.sampling, STATE.cluster_scope, STATE.display_columns = {}, {}, []
         STATE.dataset = AnnotationDataset("groups", path, os.path.dirname(path), entries,
                                           columns=("group",))
         STATE.all_entries, STATE.filtered_count = list(entries), len(entries)
@@ -5005,6 +5028,7 @@ def sa_filter(
         STATE.sort_column = next_sort
         STATE.sort_descending = next_descending
         STATE.sampling = {}
+        STATE.cluster_scope = {}
         STATE.filtered_count = len(active_entries)
         _install_entries(STATE.all_entries, resume_entry_id=current_id)
         STATE.materialized_paths[selected_entry.id] = preflight_materialized
@@ -5039,7 +5063,7 @@ def sa_filter(
 
 
 def _prepare_view(entries, query, sort_column, descending, current_id,
-                  current_index, materialized, context, *, sampling=None, cancel_event=None,
+                  current_index, materialized, context, *, sampling=None, cluster_scope=None, cancel_event=None,
                   dataset=None, steps=None, step_cmd="", mapping=None, step_materialized=None):
     """Filter immutable rows and prepare the selected structure off the GUI thread."""
     _check_csv_preparation_cancelled(cancel_event)
@@ -5050,7 +5074,16 @@ def _prepare_view(entries, query, sort_column, descending, current_id,
                            sort_descending=bool(descending))
     filtered_count = len(active)
     sampling = dict(sampling or {})
-    if sampling.get("enabled"):
+    cluster_scope = dict(cluster_scope or {})
+    if cluster_scope:
+        ids = cluster_scope["ids"]
+        if sort_column:
+            selected_ids = set(ids)
+            active = [entry for entry in active if entry.id in selected_ids]
+        else:
+            by_id = {entry.id: entry for entry in active}
+            active = [by_id[key] for key in ids if key in by_id]
+    elif sampling.get("enabled"):
         from .sampling import stratified_sample
         active, _ = stratified_sample(active, **{key: sampling[key] for key in
             ("group_column", "metric_column", "per_stratum") if key in sampling})
@@ -5068,7 +5101,7 @@ def _prepare_view(entries, query, sort_column, descending, current_id,
                                               cancel_event=cancel_event)
     return {"entries": tuple(active), "selected": selected, "materialized": prepared,
             "step_assets": assets, "step_materialized": cached,
-            "sampling": sampling, "filtered_count": filtered_count,
+            "sampling": sampling, "cluster_scope": cluster_scope, "filtered_count": filtered_count,
             "query": query, "sort_column": sort_column, "descending": bool(descending),
             "navigation_session": _new_navigation_session(active, _resume_entry_index(active, selected.id, 0)) if selected is not None else None}
 
@@ -5082,6 +5115,7 @@ def _commit_prepared_view(plan):
         STATE.sort_column = plan["sort_column"]
         STATE.sort_descending = plan["descending"]
         STATE.sampling = plan["sampling"]
+        STATE.cluster_scope = plan["cluster_scope"]
         STATE.filtered_count = plan["filtered_count"]
         selected = plan["selected"]
         if selected is not None:
@@ -5614,6 +5648,8 @@ class _DatasetTableModel(QtCore.QAbstractTableModel):
         self._source_mode = "directory"
         self._annotation_values: Dict[str, str] = {}
         self._entry_id_to_row: Dict[str, int] = {}
+        self._selectable_ids = frozenset()
+        self._comparison_icons = {}
 
     def rowCount(self, parent=None) -> int:
         if parent is not None and parent.isValid():
@@ -5645,6 +5681,22 @@ class _DatasetTableModel(QtCore.QAbstractTableModel):
 
     def row_for_entry(self, entry_id: str) -> int:
         return self._entry_id_to_row.get(str(entry_id), -1)
+
+    def flags(self, index):
+        flags = super().flags(index)
+        if self._mode == "active" and self.entry_id_at(index.row()) not in self._selectable_ids:
+            flags &= ~QtCore.Qt.ItemIsSelectable
+        return flags
+
+    def set_comparison_icons(self, icons):
+        changed = self._comparison_icons.keys() | icons.keys()
+        self._comparison_icons = icons
+        role = _qt_enum("ItemDataRole", "DecorationRole")
+        for entry_id in changed:
+            row = self.row_for_entry(entry_id)
+            if row >= 0:
+                index = self.index(row, 2)
+                self.dataChanged.emit(index, index, [role])
 
     def _active_value(self, entry: AnnotationEntry, column: int) -> object:
         if column == 0:
@@ -5691,6 +5743,8 @@ class _DatasetTableModel(QtCore.QAbstractTableModel):
         user_role = _qt_enum("ItemDataRole", "UserRole")
         if role == user_role:
             return self._entry_id(index.row())
+        if self._mode == "active" and index.column() == 2 and role == _qt_enum("ItemDataRole", "DecorationRole"):
+            return self._comparison_icons.get(self._entry_id(index.row()))
         if self._mode == "active" and role == _qt_enum("ItemDataRole", "ForegroundRole"):
             from pymol.Qt import QtGui
             entry = self._rows[index.row()]
@@ -5711,15 +5765,23 @@ class _DatasetTableModel(QtCore.QAbstractTableModel):
             if self._mode == "preview"
             else self._active_value(raw, index.column())
         )
+        metadata_index = index.column() - (len(self._headers) - len(self._display_columns))
+        if role == display_role and 0 <= metadata_index < len(self._display_columns):
+            return format_numeric_cell(value, self._column_kinds.get(self._display_columns[metadata_index], ""))
         return str(value if value is not None else "")
 
     def headerData(self, section: int, orientation, role=None):
-        if (
-            role in (_qt_enum("ItemDataRole", "DisplayRole"), _qt_enum("ItemDataRole", "ToolTipRole"))
-            and orientation == _qt_enum("Orientation", "Horizontal")
-            and 0 <= section < len(self._headers)
-        ):
-            return self._headers[section]
+        display = _qt_enum("ItemDataRole", "DisplayRole")
+        tooltip = _qt_enum("ItemDataRole", "ToolTipRole")
+        if role not in (display, tooltip):
+            return None
+        if orientation == _qt_enum("Orientation", "Horizontal"):
+            return self._headers[section] if 0 <= section < len(self._headers) else None
+        if orientation == _qt_enum("Orientation", "Vertical") and 0 <= section < len(self._rows):
+            row = self._rows[section]
+            value = row.get("row_number") if self._mode == "preview" else row.row_number
+            if value is not None:
+                return str(value) if role == display else f"CSV source row {value}"
         return None
 
     def _reset(
@@ -5750,7 +5812,7 @@ class _DatasetTableModel(QtCore.QAbstractTableModel):
         self.endResetModel()
 
     def set_preview(
-        self, rows: Sequence[Mapping[str, object]], display_columns: Sequence[str]
+        self, rows: Sequence[Mapping[str, object]], display_columns: Sequence[str], column_kinds=None
     ) -> None:
         self._reset(
             mode="preview",
@@ -5758,6 +5820,7 @@ class _DatasetTableModel(QtCore.QAbstractTableModel):
             headers=["Source row", "Status", "Structure"] + list(display_columns),
             display_columns=display_columns,
             source_mode="preview",
+            column_kinds=column_kinds,
         )
 
     def set_active(
@@ -5769,6 +5832,7 @@ class _DatasetTableModel(QtCore.QAbstractTableModel):
         annotation_values: Mapping[str, str],
     ) -> None:
         headers = ["Source row", "Status", "Structure"]
+        self._selectable_ids = frozenset(entry.id for entry in STATE.entries)
         headers.append(label_key.replace("_", " ").capitalize())
         if STATE.reference_column:
             headers.append("Reference structure")
@@ -5886,6 +5950,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._error_poll_timer = QtCore.QTimer(self)
         self._error_poll_timer.timeout.connect(self._poll_background_errors)
         self._build_ui()
+        from .comparison import ReviewComparison
+        self.comparison = ReviewComparison(self, sys.modules[__name__])
         from .view_jobs import ViewJobs
         self._view_jobs = ViewJobs(self, self._view_is_current, self._prepare_candidate_view, self._draw_candidate_view)
         from .review_controller import ReviewController
@@ -5910,7 +5976,10 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             event.ignore()
             return
         self._closed = True
+        if getattr(self, "_cluster_dialog", None) is not None:
+            self._cluster_dialog.dispose()
         self._view_jobs.close()
+        self.comparison.clear()
         _review_objects.clear(cmd)
         _delete_managed_objects(False)
         _release_scene_groups()
@@ -5948,6 +6017,40 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         if dialog.exec_() == QtWidgets.QDialog.Accepted:
             self._apply_view(sampling=dialog.result_config)
 
+    def _show_clustering(self):
+        if self._csv_task_id or self._table_mode == "preview" or STATE.source_mode == "groups":
+            return
+        dialog = getattr(self, "_cluster_dialog", None)
+        if dialog is not None and dialog.is_current():
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            return
+        if dialog is not None:
+            dialog.dispose()
+            self._cluster_dialog = None
+        dataset, query = STATE.dataset, STATE.filter_text
+        rows = tuple(_view_entries(STATE.all_entries))
+        if dataset is None or not rows:
+            self._show_error("Load a structure dataset with candidates in the current filter first.")
+            return
+        from .cluster_widgets import ClusterDialog
+        source = _active_source_reference()
+        remote = parse_ssh_path(source) if is_ssh_path(source) else None
+
+        def current():
+            return not self._closed and STATE.dataset is dataset and STATE.filter_text == query
+
+        def show_view(ids, title):
+            if self._csv_task_id or self._table_mode == "preview":
+                return False
+            self._apply_view(cluster_scope={"ids": ids, "title": title} if title else {})
+            return bool(self._csv_task_id)
+
+        self._cluster_dialog = ClusterDialog(self, rows, dataset.columns, remote, current, show_view,
+                                             sort=STATE.sort_column, higher=STATE.sort_descending if STATE.sort_column else True)
+        self._cluster_dialog.show()
+
     def _edit_review_steps(self):
         if STATE.source_mode == "groups":
             self._show_error("Scene groups already contain their review objects. Edit the per-step commands to change their display.")
@@ -5977,7 +6080,13 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.active_source_label.setText(title or "Structure Annotator")
         self.active_source_label.setToolTip(source or "")
         self.back_button.setVisible(index == 2 or (index == 1 and STATE.dataset is not None))
-        self.import_button.setVisible(index != 1)
+        self.import_button.setVisible(index == 0)
+        self.view_open_button.setVisible(index == 0)
+        self.compare_toggle.setVisible(index == 0)
+        self.more_button.setVisible(index == 0)
+        if index != 0:
+            self.review_view_dialog.close()
+            self.score_dialog.close()
         self.settings_button.setVisible(index != 2)
         self.export_action.setEnabled(STATE.dataset is not None)
         self.handoff_action.setEnabled(STATE.dataset is not None)
@@ -5996,6 +6105,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
 
     def _back_to_review(self):
         self.main_tabs.setCurrentIndex(0 if STATE.dataset is not None else 1)
+        self.window().activateWindow()
+        (self.dataset_table if STATE.dataset is not None else self.source_path_edit).setFocus()
 
     def _show_filters(self):
         self._refresh_filter_presets()
@@ -6114,7 +6225,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                        and STATE.sort_column == p["sort_column"]
                        and STATE.sort_descending == p["sort_descending"]), None)
         title = active["name"] if active else "Filter •" if STATE.filter_text or STATE.sort_column else "Filter"
-        self.filter_button.setText(self.filter_button.fontMetrics().elidedText(title, QtCore.Qt.ElideRight, 100))
+        self.filter_button.setText("Filter / sort…")
         self.filter_button.setAccessibleName("Filter: " + title)
         self.filter_button.setToolTip((active["name"] + "\n" + active["expression"]) if active else "Edit filters")
 
@@ -6181,6 +6292,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.filter_menu.addSeparator()
         self.filter_menu.addAction("Edit filters…", self._show_filters)
         self.filter_menu.addAction("New filter group…", self._show_new_filter_group).setEnabled(STATE.dataset is not None)
+
 
     def _apply_filter_preset(self, name):
         self._refresh_filter_presets(preferred=name)
@@ -6670,8 +6782,13 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.review.quick_digit(digit)
 
     def _show_batch_processing(self):
-        from pymolplugins.targets.batch_sources import BatchConfig
+        from pymolplugins.targets.batch_sources import BatchConfig, csv_review_key
         from pymolplugins.targets.batch_widgets import show_batch_dialog
+        if not STATE.all_entries or STATE.source_mode not in {"csv", "directory"}:
+            return show_batch_dialog()
+        if is_ssh_path(_active_source_reference()):
+            self._show_error("Batch uses local inputs. Open a local copy of this review source before transferring rows.")
+            return None
         initial = BatchConfig(
             a=STATE.csv_path if STATE.source_mode == "csv" else STATE.dataset_dir,
             b=STATE.reference_column if STATE.source_mode == "csv" else "",
@@ -6682,10 +6799,18 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             target_format=STATE.mapping_target_format or "custom",
             wsl_distribution=STATE.mapping_wsl_distribution,
             encoding=STATE.csv_encoding, delimiter=STATE.csv_delimiter)
+        def members(entries):
+            if initial.source == "csv":
+                return tuple(csv_review_key(entry) for entry in entries)
+            return tuple((entry.ordinal, entry.resolved_path or entry.source_path) for entry in entries)
+
+        selected = tuple(self._entries_by_id[entry_id] for entry_id in self.review.targets())
+        scopes = {"Current review": members(STATE.entries), "Entire source": members(STATE.all_entries)}
+        if selected:
+            scopes = {"Selected rows": members(selected), **scopes}
         dialog = show_batch_dialog(initial)
-        dialog.source_scope_label.setText(f"Source scope: {len(STATE.all_entries):,} rows. "
-            "Review sampling / filters are NOT transferred. Choose IDs and preview before running.")
-        dialog.source_scope_label.show()
+        use_selected = bool(selected) and (len(selected) > 1 or selected[0].id != STATE.current_entry_id())
+        dialog.offer_review(initial, scopes, "Selected rows" if use_selected else "Current review")
         return dialog
 
     def _enable_qt_shortcuts(self):
@@ -6748,10 +6873,11 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         if not STATE.entries or self._filter_empty or self._table_mode == "preview":
             self._show_error("Load a dataset with matching rows before navigating.")
             return
+        self.comparison.close_pocket()
         self.error_label.hide()
-        self.review.selection.clear()
         self._sync_to_state(update_directory=False, persist=False)
         index %= len(STATE.entries)
+        self.review.selection.select_entry(STATE.entries[index].id)
         if STATE.source_mode == "groups":
             _navigate_annotation("goto", index)
             self._refresh_status()
@@ -6945,6 +7071,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         busy = bool(self._csv_task_id)
         navigating = self._pending_navigation is not None
         self.overview_button.setEnabled(bool(STATE.all_entries) and not busy)
+        self.cluster_button.setEnabled(bool(STATE.all_entries) and STATE.source_mode != "groups"
+                                       and self._table_mode != "preview" and not busy)
         self.source_location.setEnabled(not busy)
         self.local_mapping_group.setVisible(not self.source_location.remote)
         self.source_path_edit.setEnabled(not busy)
@@ -6976,9 +7104,10 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         ):
             widget.setEnabled(csv_mode and not busy)
         self.pattern_edit.setEnabled(not csv_mode and not busy)
-        self.csv_preview_btn.setText("Check file paths")
+        self.csv_preview_btn.setText("Preview paths…")
+        self.csv_preview_btn.setVisible(csv_mode)
         self.source_open_button.setText("Open")
-        self.csv_preview_btn.setEnabled(csv_mode and not busy)
+        self.csv_preview_btn.setEnabled(csv_mode and not busy and bool(self.source_path_edit.text().strip()))
         self.bundle_check_btn.setEnabled(csv_mode and not busy)
         self.source_open_button.setEnabled(not busy and bool(self.source_path_edit.text().strip()))
         if busy and self._csv_task_kind == "preview":
@@ -7240,7 +7369,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             from .mapping_widgets import MappingPreviewDialog
             if getattr(self, "_mapping_preview_dialog", None) is not None:
                 self._mapping_preview_dialog.close()
-            self._mapping_preview_dialog = MappingPreviewDialog(payload, self)
+            column_kinds = {spec.name: spec.kind for spec in result.dataset.column_specs}
+            self._mapping_preview_dialog = MappingPreviewDialog(payload, self, column_kinds=column_kinds)
             self._mapping_preview_dialog.show()
             self.status_label.setText(
                 f"CSV preview: {payload.get('row_count', 0)} rows; "
@@ -7368,14 +7498,19 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             str(dict(row).get("entry_id", "")): dict(row) for row in rows
         }
         display_columns = list(payload.get("display_columns") or [])
-        self._dataset_model.set_preview(rows, display_columns)
+        preview = self._prepared_preview
+        kinds = {spec.name: spec.kind for spec in preview.dataset.column_specs} if preview else {}
+        self._dataset_model.set_preview(rows, display_columns, kinds)
         self._display_source_columns()
         self.column_picker.set_columns(payload.get("columns", ()), display_columns)
-        self.view_summary_label.setText(f"Preview: {payload.get('row_count', 0):,} rows · load this CSV to annotate")
+        self.column_picker.setEnabled(bool(payload.get("columns")))
+        self.view_scope_label.hide()
+        self.view_summary_label.show()
+        self.view_summary_label.setText(f"Preview: {payload.get('row_count', 0):,} rows")
         self.review.selection.clear()
         self.review.refresh()
 
-    def _apply_view(self, *, sampling=None) -> None:
+    def _apply_view(self, *, sampling=None, cluster_scope=None) -> None:
         if not STATE.all_entries or self._table_mode == "preview":
             self._show_error("Load the CSV before applying a filter.")
             return
@@ -7383,16 +7518,24 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             if self._csv_task_kind != "view":
                 return
             self._cancel_csv_task(announce=False)
-        query = self._filter_input()
         arguments = self._view_arguments()
+        if cluster_scope is not None:
+            query, sort, descending = STATE.filter_text, STATE.sort_column, STATE.sort_descending
+            sampling = {}
+        else:
+            query = self._filter_input()
+            arguments = self._view_arguments()
+            sort, descending = arguments["sort_column"], arguments["descending"]
+            cluster_scope = STATE.cluster_scope if sampling is None and query == STATE.filter_text else {}
         self._start_csv_task("view", _prepare_view, arguments, worker_arguments={
             "entries": tuple(STATE.all_entries), "query": query,
-            "sort_column": arguments["sort_column"], "descending": arguments["descending"],
+            "sort_column": sort, "descending": descending,
             "current_id": STATE.current_entry_id(), "current_index": STATE.index,
             "materialized": dict(STATE.materialized_paths), "context": _materialization_context(),
             "dataset": STATE.dataset, "steps": copy.deepcopy(_configured_steps()), "step_cmd": STATE.step_cmd,
             "mapping": _step_mapping(), "step_materialized": dict(STATE.step_materialized),
             "sampling": dict(STATE.sampling if sampling is None else sampling),
+            "cluster_scope": dict(cluster_scope),
         })
 
     def _view_arguments(self):
@@ -7401,10 +7544,6 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
 
     def _dataset_index_clicked(self, index) -> None:
         if index is not None and index.isValid():
-            modifiers = QtWidgets.QApplication.keyboardModifiers()
-            if modifiers & (QtCore.Qt.ShiftModifier | QtCore.Qt.ControlModifier | QtCore.Qt.MetaModifier):
-                self.review.refresh()
-                return
             self._dataset_row_clicked(index.row(), index.column())
 
     def _dataset_row_clicked(self, row: int, column: int) -> None:
@@ -7573,15 +7712,25 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
 
     def _draw_candidate_view(self, owner, source, action, draw, data, exclusive):
         from .bundle_view import CandidateCavity, _draw_bundle, draw_candidate_cavity, prepare_candidate_cavity
+        from .review_membrane import MembraneNotice
         from .review_view_presets import draw_review_view
+        from pymolplugins.core.pymol_display import display_updates
 
-        with _capture_command_products(owner):
-            if action is None:
+        if action is None:
+            with _capture_command_products(owner):
                 draw(data)
-                return
-            followup = draw_review_view(cmd, source, action, draw, data, exclusive=exclusive or action is _draw_bundle)
+            return
+        if action is _draw_bundle:
+            with display_updates(cmd), _capture_command_products(owner):
+                followup = draw_review_view(cmd, source, action, draw, data, exclusive=True)
+        else:
+            with _capture_command_products(owner):
+                followup = draw_review_view(cmd, source, action, draw, data, exclusive=exclusive)
+        if isinstance(followup, MembraneNotice):
+            return followup
         if not isinstance(followup, CandidateCavity):
             return
+        self.interface_cavity_controls.reset(followup.interface)
         try:
             compute, draw_cavity = prepare_candidate_cavity(cmd, followup)
         except Exception as error:
@@ -7589,8 +7738,12 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             return
 
         def show_cavity(result):
-            with _capture_command_products(owner):
-                return draw_review_view(cmd, source, draw_candidate_cavity, draw_cavity, result)
+            with display_updates(cmd), _capture_command_products(owner):
+                rendered = draw_review_view(cmd, source, draw_candidate_cavity, draw_cavity, result)
+            if followup.interface:
+                self.interface_cavity_controls.show_result(rendered)
+                return "", rendered.tooltip
+            return rendered.status, rendered.tooltip
 
         self._view_jobs.start_cavity(followup.title, compute, show_cavity)
 
@@ -7600,23 +7753,28 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
 
         if not hasattr(self, "_view_jobs"):
             return
+        self.comparison.sync()
+        if self.comparison.pocket.created:
+            return
         clear_bundle_legend(cmd)
-        if STATE.bundle_view is not self._last_bundle_view:
-            self._last_bundle_view = STATE.bundle_view
-            if STATE.bundle_view is not None and self._quick_view:
+        bundle = _bundle_view_for_index(STATE.index)
+        if bundle is not self._last_bundle_view:
+            self._last_bundle_view = bundle
+            if bundle is not None and self._quick_view:
                 self._quick_view = ""
                 for button in self.quick_view_buttons.values():
                     button.setChecked(False)
+        self.interface_cavity_controls.reset(self._quick_view == "interface")
         title = QUICK_VIEWS.get(self._quick_view, "")
         owner = STATE.current_object
         if self._quick_view:
             recipes = [(owner, quick_view_command(self._quick_view, owner, self._interface_radius, self._mass_chain))]
-        elif STATE.source_mode == "csv" and STATE.bundle_view is not None and owner:
+        elif STATE.source_mode == "csv" and bundle is not None and owner:
             entry = STATE.current_entry()
             if entry is not None:
-                column = STATE.bundle_view.get("path_column", "structure_path")
+                column = bundle.get("path_column", "structure_path")
                 request = BundleViewRequest(
-                    STATE.csv_path, STATE.bundle_view, entry.metadata.get(column, ""), entry.display_name
+                    STATE.csv_path, bundle, entry.metadata.get(column, ""), entry.display_name
                 )
                 recipes = [*recipes, (owner, request)]
                 title = "Bundle view"
@@ -7624,6 +7782,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                               warnings=warnings, exclusive=bool(self._quick_view))
 
     def _choose_quick_view(self, name, radius=None):
+        self.comparison.close_pocket()
         self._quick_view = name
         if radius is not None:
             self._interface_radius = radius
@@ -8065,12 +8224,15 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.review.quick_label(value)
 
     def _display_source_columns(self, *args) -> None:
+        csv = self._table_mode == "preview" or STATE.source_mode == "csv"
         source_row = self.show_source_row_action.isChecked()
         file_status = self.show_file_status_action.isChecked()
-        self.dataset_table.setColumnHidden(0, not source_row)
+        self.show_source_row_action.setEnabled(csv)
+        self.dataset_table.setColumnHidden(0, True)
         self.dataset_table.setColumnHidden(1, not file_status)
-        has_metadata = bool(self._dataset_model._display_columns)
-        self.dataset_table.horizontalHeader().setVisible(has_metadata or bool(STATE.reference_column) or source_row or file_status)
+        gutter = self.dataset_table.verticalHeader()
+        gutter.setVisible(csv and source_row and bool(self._dataset_model.rowCount()))
+        self.dataset_table.horizontalHeader().setVisible(bool(self._dataset_model.columnCount()))
 
     def _refresh_dataset_table(self) -> None:
         display_columns = list(STATE.display_columns)
@@ -8089,6 +8251,11 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             annotation_values = store.snapshot_for_label(label_key, refresh=False)
 
         if reset_model:
+            selection = self.review.selection
+            same_source = self._table_mode == "active" and source_token == self._table_source_token
+            selected = selection.ids if same_source else (STATE.current_entry_id(),)
+            cursor_row = self.dataset_table.currentIndex().row()
+            cursor = self._dataset_model.entry_id_at(cursor_row) if same_source else STATE.current_entry_id()
             entries = _table_view_entries(STATE.all_entries or STATE.entries)
             self._table_mode = "active"
             self._table_source_token = source_token
@@ -8098,12 +8265,17 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                 entry.id: index for index, entry in enumerate(STATE.entries)
             }
             self._entries_by_id = {entry.id: entry for entry in entries}
-            self.review.selection.updating = True
+            selection.updating = True
             try:
                 self._dataset_model.set_active(entries, display_columns, STATE.source_mode, label_key, annotation_values)
             finally:
-                self.review.selection.updating = False
-            self.review.selection.model_reset(source_token)
+                selection.updating = False
+            surviving = tuple(entry_id for entry_id in selected if entry_id in self._entry_id_to_active_index)
+            if selected and not surviving:
+                surviving = (STATE.current_entry_id(),)
+            if cursor not in self._entry_id_to_active_index:
+                cursor = STATE.current_entry_id()
+            selection.restore(surviving, cursor)
             for column, width in enumerate((130, 110, 220, 170)):
                 self.dataset_table.setColumnWidth(column, width)
             self.dataset_table.setColumnWidth(2, 175)
@@ -8127,19 +8299,20 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             self._dataset_model.update_annotations(annotation_values)
 
         self._table_annotation_revision = annotation_revision
-        current_row = self._dataset_model.row_for_entry(STATE.current_entry_id())
-        self.review.selection.ensure_current(current_row)
-        filtered = bool(STATE.filter_text or STATE.sort_column)
+        self.review.selection.follow_current(STATE.current_entry_id())
         sampled = bool(STATE.sampling.get("enabled"))
-        self.view_summary_label.setText("Sample" if sampled else "Candidates")
-        self.view_summary_label.setVisible(sampled)
-        self.view_scope_label.setText(
-            f"Sample {len(STATE.entries):,} · Filtered {STATE.filtered_count:,} · All {len(STATE.all_entries):,}"
-            if sampled else f"Filtered {len(STATE.entries):,} / {len(STATE.all_entries):,}")
-        self.view_scope_label.setVisible(sampled or len(STATE.entries) != len(STATE.all_entries))
-        self.view_scope_label.setToolTip("Sampling is a coverage-review subset, not the whole dataset. "
-            "Overview / sample shows the method and returns to the full filtered set.")
-        self.overview_button.setText("Overview •" if sampled else "Overview")
+        cluster = STATE.cluster_scope.get("title", "")
+        title = cluster or ("Sample" if sampled else "Candidates")
+        self.view_summary_label.setText(title)
+        show_scope = bool(cluster or sampled or len(STATE.entries) != len(STATE.all_entries))
+        self.view_summary_label.setVisible(not show_scope)
+        self.view_scope_label.setVisible(show_scope)
+        self.view_scope_label.setText(f"{len(STATE.entries):,} / {len(STATE.all_entries):,} rows")
+        self.view_scope_label.setToolTip(
+            f"{title}: {len(STATE.entries):,} shown · {STATE.filtered_count:,} matched filters · "
+            f"{len(STATE.all_entries):,} total")
+        self.overview_button.setText("Statistics… •" if sampled else "Statistics…")
+        self.cluster_button.setText("Cluster •" if cluster else "Cluster…")
         self._refresh_filter_button()
 
     def _refresh_metadata_table(self) -> None:
@@ -8178,7 +8351,13 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._page_changed()
         busy = self._csv_task_kind in {"annotations", "annotation_undo"}
         ready = bool(STATE.files) and not self._filter_empty and self._table_mode != "preview" and not busy
-        self.quick_views.setEnabled(ready and bool(STATE.current_object))
+        view_available = ready and bool(STATE.current_object)
+        self.column_picker.setEnabled(STATE.dataset is not None and STATE.source_mode == "csv" and not busy)
+        self.table_options_button.setEnabled(STATE.dataset is not None and not busy)
+        self.quick_views.setEnabled(view_available)
+        self.view_open_button.setEnabled(view_available)
+        self.compare_toggle.setEnabled(view_available)
+        self.compare_bar.setEnabled(ready and bool(STATE.current_object))
         self._refresh_live_actions()
         for widget in (self.next_btn, self.prev_btn, self.next_unann_btn, self.goto_btn, self.apply_btn, *self._value_buttons):
             widget.setEnabled(ready)
@@ -8206,12 +8385,17 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                 self._dataset_model.set_active((), STATE.display_columns, STATE.source_mode,
                                                normalize_label_key(STATE.label_name), {})
                 self._display_source_columns()
-                self.view_summary_label.setText("0 matches")
-                self.view_scope_label.setText(f"Filtered 0 / {len(STATE.all_entries):,}")
+                self.view_summary_label.hide()
+                self.view_scope_label.setText(f"0 / {len(STATE.all_entries):,} rows")
+                self.view_scope_label.setToolTip("No candidates match the active filters")
                 self.view_scope_label.show()
                 self._refresh_filter_button()
             else:
                 self._dataset_model.clear_rows()
+                self._display_source_columns()
+                self.view_scope_label.hide()
+                self.view_summary_label.setText("Candidates")
+                self.view_summary_label.show()
             self.review.refresh()
             return
 
@@ -8234,6 +8418,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             + (f" · {later_count:,} later" if later_count else "")
         )
         self.current_title_label.setText(basename)
+        self.candidate_view_scope.setText(f"Candidate view · {basename} · follows candidate changes")
         self.current_title_label.setToolTip(basename + "\n" + path)
         later = bool(entry is not None and entry.id in later_ids)
         self.review_status_label.setVisible(later)
@@ -8243,7 +8428,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.next_later_action.setEnabled(bool(later_ids))
 
         # Check for mismatch between widget state and PyMOL state
-        if STATE.current_object:
+        if STATE.current_object and not self.comparison.pocket.created:
             if not _verify_current_object_enabled():
                 actual_enabled = _get_enabled_managed_object()
                 if actual_enabled and actual_enabled != STATE.current_object:

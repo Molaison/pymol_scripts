@@ -4,7 +4,7 @@
 
 ## 打开评分表
 
-1. 打开 **Plugin → PymolPlugins: Structure Annotator**。
+1. 打开 **Plugin → PymolPlugins → Review structures…**。
 2. **Open from** 选择 **This computer** 或已配置的 SSH 主机；在 **Path** 选择结构目录或 CSV/TSV，点击 **Open**。
 3. 如提示 **Structure column**，选择指向 `.pdb`、`.cif` 或其 `.gz` 文件的列。相对路径默认相对于表格所在目录；需要时在 **Import options → File locations** 指定基准目录或映射。
 4. 在 **Review** 查看当前结构及选定的评分列。选择标签，再点击 **Save and next**；保存成功后进入下一条。
@@ -20,7 +20,7 @@ design_id,structure_path,score1,label
 design_a,structures/model_a.pdb,0.82,典型模式
 ```
 
-建议使用唯一的非空 ID。多个行可以引用同一结构路径并分别标注；重复的非空 ID 会产生行错误。支持 CSV、TSV 以及自动识别的分隔符。点击 **Check file paths** 可检查路径；GUI 打开时其他候选通常按需检查，未访问项可能显示 `unchecked`。
+建议使用唯一的非空 ID。多个行可以引用同一结构路径并分别标注；重复的非空 ID 会产生行错误。支持 CSV、TSV 以及自动识别的分隔符。点击 **Preview paths…** 可在打开结构前查看路径状态和选定的评分列；GUI 打开时其他候选通常按需检查，未访问项可能显示 `unchecked`。
 
 ## 配置 review.json
 
@@ -61,17 +61,35 @@ design_a,structures/model_a.pdb,0.82,典型模式
 
 输入字段比较或匹配函数的值时，补全会提供该列的实际取值。类别值会按输入匹配，并在表达式中自动加引号。数值列会建议实际数值。**Add condition…** 里的 Value 也使用所选列的取值。
 
+分布图默认展开，CSV 来源行号显示在表格左侧的窄行头。在候选表旁，用 **Columns…** 选择要显示的列，用 **Table options** 切换分布图、来源行号和文件状态、查看行详情或导出带标注的 CSV。**Filter / sort…** 打开筛选和排序。打开分布图后，仍可拖选数字范围或点击分类来筛选。
+
 点击 Filter 旁箭头切换命名分组，或选 **New filter group…** 创建。编辑条件和排序后点 **Save group…**，用 **Delete** 删除所选组。CSV 源的人工修改写入 `review.override.json`，目录和场景组的修改写入各自的审阅状态。`filter_presets` 数组的每项包含唯一的 `name`、`expression` 及可选的 `sort_column`、`sort_descending`。组可重叠、可为空；override 中的 `[]` 清空全部组。需要自动整理分组时使用 [统一生成提示词](02_agent_review.md#复制提示词) 中的筛选组要求。
 
 代表性抽样是显式审阅路线，不等同全集或无偏统计样本。检查界面中的全集、筛选集和样本数量；重新导入回到完整筛选集合。批处理不会自动继承审阅的筛选和抽样。
 
+## 聚类并审阅代表结构
+
+在 **Review → Cluster…** 对当前 Filter 命中的候选聚类。选择 **Sequence**（MMseqs2）、**Structure**（Foldseek）或 **Sequence and structure**（同时属于同一序列簇和同一结构簇）。多链结构填要比较的蛋白链 ID，例如 binder 的链。序列也可从 CSV 的序列列读取。覆盖率要求比对覆盖两侧各自的长度。
+
+在 **Representative score** 选一列或填组合表达式，例如 `ipsae - 0.1 * rmsd`，再选分数越高或越低越好。列名有空格时用反引号。缺失与计算无效的分数排在末尾，同分按原始行序。改分数后点 **Show representatives** 可重选代表，不会重跑聚类。选择簇后点 **Show cluster members** 查看该簇，**Full filtered list** 返回完整筛选结果。状态栏显示跳过的行数，悬停可看原因。
+
+SSH 数据源默认在原 SSH profile 对应的服务器上跑，使用服务器的结构路径；分组结果返回本机。也可切换到 **This computer**。运行环境需要相应的 MMseqs2 或 Foldseek。读取结构时还需要 Python 3 的 Gemmi。Windows 支持使用默认 WSL 发行版，优先读取该环境中的 `~/.local/share/pymolplugins/clustering` 用户工具目录，再查找 PATH。 [MMseqs2](https://github.com/soedinglab/MMseqs2) · [Foldseek](https://github.com/steineggerlab/foldseek) · [Gemmi](https://gemmi.readthedocs.io/en/stable/mol.html)
+
+## 叠加与对齐结构
+
+在 **Review** 的表格里按 **Ctrl** 点选候选，把该结构作为彩色副本叠加到当前结构。再点一次移除。普通点选继续切换当前候选。用 **Pin current** 保留当前结构以便之后切换，用 **Frame all** 将视角缩放到所有可见的比较对象。
+
+点 **Align…** 选择一个或全部比较副本、参考对象、对齐方式和两侧的原子选择。默认比较蛋白 Cα，也可以限定链、残基或配体。按原子顺序配对时，两侧原子数须相同且顺序对应。对齐只移动比较副本，结果里的 RMSD 保持 PyMOL 所选方法的定义。
+
+在表格中逐项批量标注选行用 **Ctrl+Shift+点选**。用 **Shift+点选** 选择连续范围。比较列表仅保留在当前审阅会话，换数据源时清空。
+
 ## 配置标注、恢复和导出
 
-在 **Settings → Annotations** 设置单选、多选或文本字段及必填条件。普通选择是草稿；**Save and next** 保存并前进。单个候选 Ctrl+click 可保存并前进；多选字段的普通点击仍是草稿。选择多行后显式保存；**More actions → Undo last save** 撤销上一次完整保存。失败时草稿和当前位置保留。评分卡的相对排名针对当前筛选集合；绝对方向和阈值需由用户配置。
+在 **Settings → Annotations** 设置单选、多选或文本字段及必填条件。普通选择是草稿；**Save and next** 保存并前进。对单个候选的标注值按 Ctrl+点选可保存并前进；多选字段的普通点击仍是草稿。选择多行后显式保存；**More actions → Undo last save** 撤销上一次完整保存。失败时草稿和当前位置保留。评分卡的相对排名针对当前筛选集合；绝对方向和阈值需由用户配置。
 
-暂时不能判断时选择 **More → Mark current for later**；**Next marked for later** 用于回看。下次主动选择 **Data → Continue last review** 恢复最近的数据源、筛选和位置；打开面板不会自动连接历史 SSH 源。首次导入后的历史记录可能仍在后台写入，暂不可用时等保存完成再试。
+暂时不能判断时选择 **More → Mark current for later**；**Next marked for later** 用于回看。下次主动选择 **Open data… → Continue last review** 恢复最近的数据源、筛选和位置；打开面板不会自动连接历史 SSH 源。首次导入后的历史记录可能仍在后台写入，暂不可用时等保存完成再试。
 
-用 **Data → Export review handoff…** 导出进度和标注摘要，文件不包含结构。要导出带标注的 CSV，可在 PyMOL 控制台指定新文件：
+用 **Review tools → Export review handoff…** 导出进度和标注摘要，文件不包含结构。要导出带标注的 CSV，可在 PyMOL 控制台指定新文件：
 
 ```pymol
 sa_export_csv "D:/review/scores_reviewed.csv"
@@ -99,7 +117,7 @@ sa_export_csv "D:/review/scores_reviewed.csv"
 
 只引用执行到当前位置已经加载的对象；空辅助路径可跳过，但引用不存在对象会报错。`{object}` 和 `{selection}` 指 candidate；其他占位符包括 `{file}`、从 0 开始的 `{index}`、`{count}`、`{entry_id}`、`{row_number}`。标签动作还可用 `{label}`、`{value}`。未配置 `steps` 时使用 candidate 后执行 `step_cmd`。旧 `reference_column` 只映射为通用固定对象，不自动对齐、着色或调整视图。
 
-命令配置可执行 PyMOL 操作，只使用可信配置。编辑后先确认并 **Apply commands**；自定义命令的任意副作用不保证通用撤销。Viewing presets 和 AI command drafts 均先生成可编辑草稿，确认插入并 Apply 后才执行；预设依赖实际链和配体组成，不推断科学结论。
+命令配置可执行 PyMOL 操作，只使用可信配置。编辑后先确认并 **Save commands**；自定义命令的任意副作用不保证通用撤销。Viewing presets 和 AI command drafts 均先生成可编辑草稿，确认插入并 Apply 后才执行；预设依赖实际链和配体组成，不推断科学结论。
 
 蛋白设计与复合物可使用保持相机、界面表面、固定参考叠合及候选 Cα 对齐预设；具体行为和参考选择见 [Step commands 预设](02_agent_review.md#用-step-commands-预设调整显示)。
 
@@ -157,7 +175,7 @@ sa_cache_status 1
 
 ## 更新插件
 
-打开 **Plugin → PymolPlugins: Updates**，点击 **Check now** 检查正式版本；发现更新后点击 **Download and install**。安装完成后完全退出并重新打开 PyMOL；插件不会在当前会话热重载。
+打开 **Plugin → PymolPlugins → Maintenance → Updates**，点击 **Check now** 检查正式版本。发现更新后点击 **Download and install**。新版本在下次启动 PyMOL 时加载。
 
 在同一窗口，**Check for updates when PyMOL starts** 控制启动时检查，默认开启；**Automatically install stable updates (restart required)** 控制自动安装稳定版本，默认关闭。两项可分别设置；自动安装后同样需要完全重启。
 

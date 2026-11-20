@@ -11,6 +11,7 @@ class DisplayBridge:
         self.objects = {}
         self.signatures = {}
         self.atom_maps = {}
+        self.preview_object = None
         self.selection_name = "rfd4_selection_" + uuid.uuid4().hex[:8]
 
     @staticmethod
@@ -88,7 +89,8 @@ class DisplayBridge:
 
     def selected_indices(self, sid, selection):
         obj = self.assert_current(sid)
-        atoms = cmd.get_model("(%s) and (model %s)" % (selection or "none", obj), state=1).atom
+        visible = self.preview_object[1] if self.preview_object and self.preview_object[0] == sid else obj
+        atoms = cmd.get_model(f"({selection or 'none'}) and (%{obj} or %{visible})", state=1).atom
         mapping = self.atom_maps[sid]
         if any(int(atom.id) not in mapping for atom in atoms):
             raise ValueError("选择包含未映射原子，请刷新输入。")
@@ -96,6 +98,8 @@ class DisplayBridge:
 
     def select_indices(self, sid, indices):
         obj = self.assert_current(sid)
+        if self.preview_object and self.preview_object[0] == sid:
+            obj = self.preview_object[1]
         reverse = {index: atom_id for atom_id, index in self.atom_maps[sid].items()}
         cmd.select_list(self.selection_name, obj, [reverse[i] for i in indices], mode="id", quiet=1)
         cmd.enable(self.selection_name)

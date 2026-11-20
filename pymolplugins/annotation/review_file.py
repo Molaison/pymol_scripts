@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import base64
+from hashlib import sha256
 import json
 import ntpath
 import os
@@ -32,6 +33,19 @@ _LEGACY_BUNDLE_STEPS = {
         '/bundle_renderer = run_path(str(bundle_script))["acc_bundle_step"]',
         '/bundle_renderer("{object}", bundle_source)',
     ),
+}
+
+# Historical generated ligand-pocket bridge with membrane interface labels.
+# Only these shipped scripts have the same semantics as the native view.
+_INTERFACE_BRIDGE_LAST = '/bundle_renderer("{object}", str(bundle_source), "bind_interface.py")'
+_INTERFACE_BRIDGE_FILES = {
+    "acceptance_bundle.py": "19c375130dda2bb2d0056e480ae4be5e99ef8f9b09afc91e2d232258dbc31ff1",
+    "acceptance_recipes.py": "c5a5d854f330d17915e62d03e397c7a30dd4cd8ec4c43534c1627fb2b922b85e",
+    "acceptance_pocket_void.py": "17456c3d4b4a4f3e5d7ce430ff1af833225bc07d02da1a304f86aa135129c7c8",
+    "acceptance_cavity_runtime.py": "93e0b89286b4880f8680ddbcec2ebe3f089a70e9c450ed608157a540a2a3a808",
+    "acceptance_cavity_geometry.py": "db20b8c3100df2137cb2a695cdbaeed0fb3c637e12febd9ef7644771c836c29d",
+    "acceptance_collection.py": "8fd95c52855b302fec242288775c16928b9ad000df29b5d33de963b5cc19490b",
+    "bind_interface.py": "954f4bf2e947fe522491df3b0a6946a937d9fdad9944b0cd6da393e9eb6194b1",
 }
 
 
@@ -88,10 +102,41 @@ def bundle_matches_table(raw, table_path):
     return compare(ntpath.basename(source)) == compare(bundle_table_name(raw))
 
 
-def bundle_view_config(review, table_path, *, step_cmd=""):
+def _interface_bundle_config(table_path, step_cmd, dataset, selected):
+    lines = tuple(line.strip() for line in step_cmd.splitlines() if line.strip())
+    if (not lines or lines[-1] != _INTERFACE_BRIDGE_LAST or is_ssh_path(table_path)
+            or dataset is None or selected is None):
+        return None
+    stock = '\n'.join((*lines[:-1], '/bundle_renderer("{object}", bundle_source)'))
+    if not is_legacy_bundle_step(stock.replace('.absolute()', '')):
+        return None
+    root = os.path.dirname(os.path.abspath(table_path))
+    for entry in dataset.entries:
+        parts = entry.source_path.split("/")
+        if len(parts) != 2 or parts[0] != "structures" or ntpath.basename(parts[1]) != parts[1]:
+            return None
+    expected = os.path.normcase(os.path.normpath(os.path.join(root, selected.source_path)))
+    if expected != os.path.normcase(os.path.normpath(selected.resolved_path)):
+        return None
+    try:
+        for name, fingerprint in _INTERFACE_BRIDGE_FILES.items():
+            with open(windows_long_path(os.path.join(root, "pymol", name)), "rb") as handle:
+                if sha256(handle.read().replace(b"\r\n", b"\n")).hexdigest() != fingerprint:
+                    return None
+        with open(windows_long_path(os.path.join(root, "bundle_view.json")), encoding="utf-8-sig") as handle:
+            config = json.load(handle)
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if (bundle_matches_table(config, table_path) and config.get("view") == "ligand_pocket"
+            and config.get("path_column", "structure_path") == dataset.path_column and config.get("membrane")):
+        return {**config, "legacy_interface_step": step_cmd.strip()}
+    return None
+
+
+def bundle_view_config(review, table_path, *, step_cmd="", dataset=None, selected=None):
     """Choose the built-in view after merging the effective shared command."""
     if step_cmd.strip() and not is_legacy_bundle_step(step_cmd):
-        return None
+        return _interface_bundle_config(table_path, step_cmd, dataset, selected)
     for path, raw in review.layers:
         if ntpath.basename(path) != "review.json":
             continue

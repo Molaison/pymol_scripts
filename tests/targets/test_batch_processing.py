@@ -233,6 +233,27 @@ class BatchProcessingTests(unittest.TestCase):
                 prepare_batch(config, event)
         load.assert_called_once_with(cancel_event=event)
 
+    def test_review_scope_keeps_exact_csv_rows_even_if_paths_repeat(self):
+        from pymolplugins.annotation.sources.csv_source import CsvDatasetSource
+        from pymolplugins.targets.batch_sources import csv_review_key
+
+        csv = self.source / "pairs.csv"
+        csv.write_text("id,a\nfirst,A1.pdb\nsecond,A1.pdb\nthird,A2.pdb\n", encoding="utf-8")
+        entries = CsvDatasetSource(csv, "a", id_column="id").load().entries
+        config = replace(self.config, source="csv", a=str(csv), a_column="a", id_column="id",
+                         review_rows=(csv_review_key(entries[1]),))
+        self.assertEqual([item.pair.identifier for item in prepare_batch(config).items], ["second"])
+        csv.write_text("id,a\nsecond,A1.pdb\nfirst,A1.pdb\nthird,A2.pdb\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "review rows have changed"):
+            prepare_batch(config)
+
+    def test_review_scope_checks_only_selected_left_pairs(self):
+        (self.source / "B2.pdb").unlink()
+        config = replace(self.config, mode="paired", a=str(self.source / "A{id}.pdb"),
+                         b=str(self.source / "B{id}.pdb"),
+                         review_rows=((0, str(self.source / "A1.pdb")),))
+        self.assertEqual([item.pair.identifier for item in prepare_batch(config).items], ["1"])
+
     def test_csv_changed_during_preparation_is_rejected(self):
         from pymolplugins.targets import batch_sources
         csv = self.source / "pairs.csv"

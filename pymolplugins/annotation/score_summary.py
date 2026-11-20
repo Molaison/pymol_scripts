@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import math
 import re
 
+from .model import COLUMN_INTEGER, format_numeric_cell, infer_column_kind
 from .review_config import validate_score_config
 
 
@@ -22,17 +23,10 @@ def format_score(value):
     parsed = number(value)
     if parsed is None:
         return "—"
-    if parsed == 0:
-        return "0"
-    magnitude = abs(parsed)
-    if parsed.is_integer() and magnitude < 10_000_000:
-        return f"{int(parsed):,}"
-    if magnitude < 0.001 or magnitude >= 10000:
-        return f"{parsed:.3g}"
-    if magnitude < 1:
-        return f"{parsed:.3g}"
-    decimals = 2 if magnitude < 100 else 1
-    return f"{parsed:,.{decimals}f}".rstrip("0").rstrip(".")
+    text = str(value)
+    if infer_column_kind((text,)) == COLUMN_INTEGER and abs(parsed) < 10_000_000:
+        return f"{int(text):,}"
+    return format_numeric_cell(value)
 
 
 def _normal_name(value):

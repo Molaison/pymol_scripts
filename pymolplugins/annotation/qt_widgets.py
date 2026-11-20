@@ -16,12 +16,25 @@ def qt_enum(group, name):
 
 
 class ScoresTable(QtWidgets.QTableView):
-    """Keep Shift-wheel horizontal across the table and its header."""
+    """Use native row selection and preview on an unmodified click."""
+
+    candidateClicked = QtCore.Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
         self._wheel_fraction = 0.0
+        self._press_modifiers = qt_enum("KeyboardModifier", "NoModifier")
+        self.clicked.connect(self._candidate_clicked)
+
+    def mousePressEvent(self, event):
+        self._press_modifiers = event.modifiers()
+        super().mousePressEvent(event)
+
+    def _candidate_clicked(self, index):
+        selection_modifiers = QtCore.Qt.ShiftModifier | QtCore.Qt.ControlModifier | QtCore.Qt.MetaModifier
+        if not self._press_modifiers & selection_modifiers:
+            self.candidateClicked.emit(index)
 
     def scroll_shift_wheel(self, event):
         if not event.modifiers() & qt_enum("KeyboardModifier", "ShiftModifier"):

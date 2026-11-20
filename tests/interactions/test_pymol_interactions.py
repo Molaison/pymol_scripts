@@ -471,6 +471,24 @@ class PymolInteractionAdapterTests(unittest.TestCase):
             )
         self.assertEqual(fake.group_calls, [])
 
+    def test_polar_filter_matches_preview_export_and_rendered_measurements(self):
+        controller = InteractionController(PolarFakeCmd())
+        scope = dict(partner1="chain A", partner2="chain B", kind="polar")
+        preview = controller.preview("polar_qc", "complex", **scope)
+        self.assertEqual(preview["summary"]["counts_by_type"], {"hydrogen_bond": 2})
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "polar.json")
+            record = controller.run("polar_qc", "complex", output_json=path, **scope)
+            with open(path, encoding="utf-8") as file:
+                exported = InteractionResult.from_dict(json.load(file))
+        self.assertEqual(exported, record.result)
+        ids = {item.id for item in exported.interactions}
+        measurements = [entry for entry in record.manifest.created if entry.kind == "measurement"]
+        self.assertEqual({key for entry in measurements for key in entry.interaction_ids}, ids)
+        self.assertTrue(all("clash" not in entry.name for entry in measurements))
+        with self.assertRaisesRegex(ValueError, "does not compute kind=polar"):
+            controller.preview("ligand_contacts", "complex", kind="polar")
+
     def test_remote_plip_result_is_identity_checked_filtered_and_rendered(self):
         atoms = list(FakeCmd().atoms)
         atoms.append(FakeAtom(6, "C2", "C", "ALA", "A", "6", (1, 1, 0)))
@@ -499,6 +517,11 @@ class PymolInteractionAdapterTests(unittest.TestCase):
             ),
             Geometry(3.1, (145.0,)),
         )
+        selected_bond = Interaction(
+            "plip_selected_bond", "hydrogen_bond", "protein_donor",
+            (self._participant("donor", 1, "LYS", "1"), self._participant("acceptor", 2)),
+            Geometry(3.1, (145.0,)),
+        )
         parameters = {
             "preset": "plip_overview",
             "interface_selection": "complex and index 1",
@@ -510,7 +533,7 @@ class PymolInteractionAdapterTests(unittest.TestCase):
                 Partner("receptor", "complex and polymer", 2),
                 Partner("ligand", "complex and index 2", 1),
             ),
-            (InteractionSite("site_selected", (kept, removed)),),
+            (InteractionSite("site_selected", (kept, removed, selected_bond)),),
         )
         submission = RemoteInteractionSubmission(
             request={"run_id": "remote-run", "source": source.to_dict()},
@@ -519,6 +542,7 @@ class PymolInteractionAdapterTests(unittest.TestCase):
             output_json="",
             replace=True,
             ligand_identities=(("complex", 2),),
+            kind="pi",
         )
         record = controller.commit_remote_result(submission, result.to_dict())
         self.assertEqual(record.result.summary["counts_by_type"], {"pi_stacking": 1})

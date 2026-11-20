@@ -8,7 +8,7 @@ the same controller to Host PyMOL.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as replace_fields
 from functools import wraps
 import hashlib
 import json
@@ -21,13 +21,14 @@ import uuid
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from pymolplugins.core.parameters import extend_command
+from .plip_protocol import PLIP_INTERACTION_TYPES
 from .contact_queries import (
     H_BOND_ANGLE, find_pairs as _find_pairs,
     hydrogen_bond_specs as _hbond_specs, salt_bridge_specs as _salt_specs,
 )
 
 try:
-    from pymolplugins.interactions.presets import PRESETS, preset_parameters
+    from pymolplugins.interactions.presets import PRESETS, ligand_preset_for_kind, preset_parameters
     from pymolplugins.interactions.plip_protocol import build_plip_request_from_pymol
     from pymolplugins.interactions.schema import (
         AtomRef,
@@ -48,7 +49,7 @@ except ImportError:  # Supports ``run path/to/pymol_interactions.py``.
     _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
     if _MODULE_DIR not in sys.path:
         sys.path.insert(0, _MODULE_DIR)
-    from presets import PRESETS, preset_parameters
+    from presets import PRESETS, ligand_preset_for_kind, preset_parameters
     from plip_protocol import build_plip_request_from_pymol
     from schema import (
         AtomRef,
@@ -1421,6 +1422,8 @@ class RemoteInteractionSubmission:
     source_state: int = 1
     source_fingerprint: str = ""
     output_group: str = ""
+    kind: str = "all"
+    default_view: Optional[bool] = None
 
 
 def _remote_source_snapshot(
@@ -1494,6 +1497,59 @@ def _filter_result_to_ligand(
     )
 
 
+_KIND_TYPES = {
+    "polar": {"hydrogen_bond"},
+    "salt": {"salt_bridge"},
+    "pi": {"pi_stacking", "pi_cation"},
+    "clash": {"polar_clash"},
+    "contact": {"close_contact"},
+    "hydrophobic": {"hydrophobic"},
+}
+_PRESET_TYPES = {
+    "ligand_contacts": {"close_contact"},
+    "ligand_quick": {"hydrogen_bond"},
+    "ligand_site": {"hydrogen_bond", "salt_bridge"},
+    "interchain_basic": {"hydrogen_bond", "salt_bridge"},
+    "polar_qc": {"hydrogen_bond", "polar_clash"},
+}
+
+
+def _validate_kind(preset: str, kind: str) -> str:
+    value = str(kind).strip().lower() or "all"
+    if value == "all":
+        return value
+    if value not in _KIND_TYPES:
+        raise ValueError("kind must be all, %s" % ", ".join(_KIND_TYPES))
+    if not (_KIND_TYPES[value] & _PRESET_TYPES.get(preset, PLIP_INTERACTION_TYPES)):
+        raise ValueError("preset %s does not compute kind=%s; choose another preset" % (preset, value))
+    return value
+
+
+def _restrict_result(
+    result: InteractionResult, kind: str, default_view: Optional[bool] = None
+) -> InteractionResult:
+    if kind == "all" and default_view is None:
+        return result
+    parameters = dict(result.run.parameters)
+    if default_view is not None:
+        parameters["default_view"] = default_view
+    if kind == "all":
+        return replace_fields(result, run=replace_fields(result.run, parameters=parameters))
+    parameters["kind"] = kind
+    allowed = _KIND_TYPES[kind]
+    sites = [
+        InteractionSite(site.site_id, tuple(item for item in site.interactions if item.type in allowed))
+        for site in result.sites
+    ]
+    warnings = result.warnings
+    if not any(site.interactions for site in sites):
+        warnings += ("no kind=%s interactions found" % kind,)
+    return InteractionResult.create(
+        replace_fields(result.run, parameters=parameters), result.partners,
+        sites, warnings, result.provenance, result.raw,
+    )
+
+
 def _state_number(value: Any) -> int:
     if isinstance(value, bool):
         raise ValueError("state must be an integer >= 1")
@@ -1562,6 +1618,14 @@ def _root_group_name(source: str, preset: str, run_id: str, group: str) -> str:
             % _OUTPUT_NAME.pattern
         )
     return value
+
+
+def _public_group_name(source: str, preset: str) -> str:
+    component = _safe_component(source, 34)
+    if source != component:
+        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:10]
+        component += "_" + digest
+    return "ppi_%s_%s" % (component, preset)
 
 
 @dataclass(frozen=True)
@@ -1928,6 +1992,8 @@ class InteractionController:
         output_json: str = "",
         replace: Any = True,
         parameters: Optional[Mapping[str, Any]] = None,
+        kind: str = "all",
+        default_view: Optional[bool] = None,
     ) -> InteractionRunRecord:
         definition = PRESETS.resolve(preset)
         if definition.backend != "pymol-local":
@@ -1936,6 +2002,7 @@ class InteractionController:
                 % (definition.name, definition.backend)
             )
         canonical = definition.name
+        kind = _validate_kind(canonical, kind)
         source_value = str(source).strip()
         if not source_value:
             raise ValueError("source must not be empty")
@@ -1965,6 +2032,8 @@ class InteractionController:
             group=group,
             output_json=output_json,
             replace=replace,
+            kind=kind,
+            default_view=default_view,
         )
 
     def preview(
@@ -1978,6 +2047,7 @@ class InteractionController:
         output_json: str = "",
         replace: Any = True,
         parameters: Optional[Mapping[str, Any]] = None,
+        kind: str = "all",
     ) -> Dict[str, Any]:
         """Validate and compute a read-only interaction plan.
 
@@ -1988,6 +2058,7 @@ class InteractionController:
 
         definition = PRESETS.resolve(preset)
         canonical = definition.name
+        kind = _validate_kind(canonical, kind)
         source_value = str(source).strip()
         if not source_value:
             raise ValueError("source must not be empty")
@@ -2005,6 +2076,7 @@ class InteractionController:
                 output_json=output_json,
                 replace=replace_value,
                 parameters=parameters,
+                kind=kind,
             )
             request = submission.request
             return {
@@ -2019,7 +2091,7 @@ class InteractionController:
                 "group": submission.output_group,
                 "run_id": str(request["run_id"]),
                 "partners": [dict(value) for value in request.get("partners", ())],
-                "parameters": dict(request.get("parameters", {})),
+                "parameters": {**request.get("parameters", {}), "kind": kind},
                 "summary": {
                     "result_available": False,
                     "counts_by_type": None,
@@ -2046,6 +2118,7 @@ class InteractionController:
             state_value,
             effective,
         )
+        result = _restrict_result(result, kind)
         return {
             "schema": _PREVIEW_SCHEMA,
             "status": "preview",
@@ -2070,9 +2143,12 @@ class InteractionController:
         group: str = "",
         output_json: str = "",
         replace: Any = True,
+        kind: str = "all",
+        default_view: Optional[bool] = None,
     ) -> InteractionRunRecord:
         definition = PRESETS.resolve(preset)
         canonical = definition.name
+        result = _restrict_result(result, _validate_kind(canonical, kind), default_view)
         result.validate()
         result_preset = str(result.run.parameters.get("preset", ""))
         if result_preset != canonical:
@@ -2183,11 +2259,26 @@ class InteractionController:
                 "scene; clear/replace remains available until this PyMOL session ends"
             )
         self._runs[root_group] = record
+        if default_view and _as_bool(replace):
+            self._hide_previous_default_views(manifest)
         _emit_interaction_completion(
             record,
             old_record.manifest.run_id if old_record is not None else "",
         )
         return record
+
+    def _hide_previous_default_views(self, current: OutputManifest) -> None:
+        existing = set(_existing_names(self.cmd))
+        for name, record in self._runs.items():
+            previous = record.manifest
+            if name == current.root_group or previous.source != current.source:
+                continue
+            legacy_name = "ppi_%s_%s" % (_safe_component(previous.source, 34), previous.preset)
+            if previous.parameters.get("default_view", name == legacy_name) and name in existing:
+                try:
+                    self.cmd.disable(name)
+                except Exception as error:
+                    print("Warning: could not hide earlier interaction group %s: %s" % (name, error))
 
     def prepare_remote(
         self,
@@ -2200,10 +2291,13 @@ class InteractionController:
         output_json: str = "",
         replace: Any = True,
         parameters: Optional[Mapping[str, Any]] = None,
+        kind: str = "all",
+        default_view: Optional[bool] = None,
     ) -> RemoteInteractionSubmission:
         definition = PRESETS.resolve(preset)
         if definition.backend != "plip-wsl":
             raise ValueError("prepare_remote requires a PLIP preset")
+        kind = _validate_kind(definition.name, kind)
         source_value = str(source).strip()
         if not source_value:
             raise ValueError("source must not be empty")
@@ -2227,7 +2321,7 @@ class InteractionController:
             if len(ligand_residues) > 1:
                 raise ValueError(
                     "default organic matches %d ligand residues; PLIP requires an "
-                    "explicit ligand selection (use ligand=... in pp_interact_run)"
+                    "explicit ligand selection (use focus=... in pp_contacts)"
                     % len(ligand_residues)
                 )
         receptor_count = _count_atoms(self.cmd, receptor, state_value)
@@ -2287,6 +2381,8 @@ class InteractionController:
             source_state=state_value,
             source_fingerprint=source_fingerprint,
             output_group=output_group,
+            kind=kind,
+            default_view=default_view,
         )
 
     def _require_remote_source_current(
@@ -2346,6 +2442,8 @@ class InteractionController:
             group=submission.output_group or submission.group,
             output_json=submission.output_json,
             replace=submission.replace,
+            kind=submission.kind,
+            default_view=submission.default_view,
         )
 
     def get(self, group: str) -> InteractionRunRecord:
@@ -2507,7 +2605,7 @@ def _resolve_public_source(
     if not candidates:
         raise ValueError(
             "no molecule object with atoms is loaded; load a protein-ligand complex "
-            "and run pp_interact_run"
+            "and run pp_contacts"
         )
     raise ValueError(
         "source is ambiguous; molecule objects: %s. Choose one with "
@@ -2542,7 +2640,7 @@ def pp_interact_describe(preset: str) -> Dict[str, Any]:
 
 
 def pp_interact_run(
-    preset: str = "ligand_contacts",
+    preset: str = "",
     source: str = "",
     partner1: str = "",
     partner2: str = "",
@@ -2564,9 +2662,11 @@ def pp_interact_run(
     contact_cutoff: Any = "",
     receptor: str = "",
     ligand: str = "",
+    kind: str = "all",
 ) -> Any:
     parameters: Dict[str, Any] = {}
-    canonical = PRESETS.resolve(preset).name
+    canonical = PRESETS.resolve(str(preset).strip() or ligand_preset_for_kind(kind)).name
+    kind = _validate_kind(canonical, kind)
     partner1_value = str(partner1).strip()
     partner2_value = str(partner2).strip()
     receptor_value = str(receptor).strip()
@@ -2609,10 +2709,8 @@ def pp_interact_run(
     controller = get_controller()
     state_value = _state_number(state)
     source_value = _resolve_public_source(controller, source, state_value)
-    group_value = str(group).strip() or "ppi_%s_%s" % (
-        _safe_component(source_value, 34),
-        canonical,
-    )
+    requested_group = str(group).strip()
+    group_value = requested_group or _public_group_name(source_value, canonical)
     definition = PRESETS.resolve(canonical)
     if definition.backend == "plip-wsl":
         submission = controller.prepare_remote(
@@ -2625,6 +2723,8 @@ def pp_interact_run(
             output_json=output_json,
             replace=replace,
             parameters=parameters,
+            kind=kind,
+            default_view=not requested_group,
         )
         timeout_value = float(timeout)
         if not math.isfinite(timeout_value) or timeout_value < 0.1:
@@ -2661,6 +2761,8 @@ def pp_interact_run(
             output_json=output_json,
             replace=replace,
             parameters=parameters,
+            kind=kind,
+            default_view=not requested_group,
         )
     counts = dict(record.result.summary["counts_by_type"])
     status = "ready" if counts else "empty"
@@ -2698,16 +2800,14 @@ def preview_interaction(
     replace: Any = True,
     parameters: Optional[Mapping[str, Any]] = None,
     cmd_api: Any = None,
+    kind: str = "all",
 ) -> Dict[str, Any]:
     """Public read-only validation API used by task-oriented facades."""
 
     controller = get_controller(cmd_api)
     canonical = PRESETS.resolve(preset).name
     source_value = str(source).strip()
-    group_value = str(group).strip() or "ppi_%s_%s" % (
-        _safe_component(source_value, 34),
-        canonical,
-    )
+    group_value = str(group).strip() or _public_group_name(source_value, canonical)
     return controller.preview(
         canonical,
         source_value,
@@ -2718,6 +2818,7 @@ def preview_interaction(
         output_json=output_json,
         replace=replace,
         parameters=parameters,
+        kind=kind,
     )
 
 
@@ -2777,8 +2878,8 @@ def _interaction_console_guard(command_name: str, function: Any) -> Any:
             worker_code = str(getattr(exc, "code", ""))
             if worker_code:
                 action = (
-                    "Run pp_worker_health; meanwhile use `pp_interact_run "
-                    "ligand_contacts, source=OBJECT` for local distance contacts."
+                    "Run pp_worker_health; meanwhile use `pp_contacts OBJECT, "
+                    "preset=ligand_contacts` for local distance contacts."
                 )
                 expected = True
             elif isinstance(exc, StaleInteractionOwnerError):

@@ -84,7 +84,7 @@
 ## 导入并标注
 
 1. 将 `sum_scores.csv` 和生成的 `review.json` 放在同一目录，保留表中相对路径所指向的结构文件。
-2. 打开 **Plugin → PymolPlugins: Structure Annotator**，在 **Open data** 粘贴文件夹、`sum_scores.csv` 或相邻的 `review.json` 路径，按 Enter 或点 **Open**。也接受 `file:///` 链接。文件夹和 `review.json` 会优先打开 Bundle 声明的 `scores_file`。
+2. 打开 **Plugin → PymolPlugins → Structure Annotator**，在 **Open data** 粘贴文件夹、`sum_scores.csv` 或相邻的 `review.json` 路径，按 Enter 或点 **Open**。也接受 `file:///` 链接。文件夹和 `review.json` 会优先打开 Bundle 声明的 `scores_file`。
 3. 在 **Review** 查看结构、选定的评分列和代表性 `label`。选择人工标签，点击 **Save and next**；稍后可用 **Data → Continue last review** 继续。
 4. 如需交接，使用 **Data → Export review handoff…** 导出进度与标签摘要；它不包含结构文件。导出带标注的表格时选择新的输出路径。
 
@@ -105,7 +105,7 @@
 | 预设 | 适用场景 | 相机/坐标 |
 | --- | --- | --- |
 | Review · keep camera | 同坐标系连续查看蛋白候选 | 都保持 |
-| Interface · contacts and voids | 蛋白界面或配体口袋。可选 4 或 6 Å 邻域，以及显示全部邻域侧链或仅显示参与已检出相互作用的侧链。空腔与 Bundle 共用双探针算法和缓存 | 缩放到界面，后台空腔不会再移动视角 |
+| Interface · contacts and voids | 蛋白界面或配体口袋。可选 4 或 6 Å 邻域，以及显示全部邻域侧链或仅显示参与已检出相互作用的侧链。Review 分别显示青点凹槽和紫点封闭空腔的体积，两类散点默认勾选，可单独开关 | 缩放到界面，散点开关只调整对应图层 |
 | PPI · interface surface | 显示蛋白链间 5 Å 邻域的表面和侧链 | 缩放到界面，坐标保持 |
 | Membrane · hydrophobic surface and planes | 叠加半透明疏水性表面。用脂质头基或本地 TmDet 估算膜边界，并显示边界附近的 Tyr、Trp、Arg、Lys 侧链 | 都保持 |
 | MASS paper · residue-number gradient | 只选 Binder chain 就为 binder 上色。也选 Target chain 时，两条链分别按自己的残基编号范围使用同一色板 | 都保持 |

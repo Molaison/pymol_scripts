@@ -680,6 +680,18 @@ def show_rfd4_from_toolkit():
     return open_panel()
 
 
+def show_comparison_from_toolkit():
+    from .compare_structures import show_compare
+
+    return show_compare()
+
+
+def toggle_interactive_focus():
+    from .interactive_focus import toggle_focus
+
+    return toggle_focus(cmd)
+
+
 def pp_wizard(topic="welcome"):
     """Open the toolkit introduction and step-by-step guide.
 
@@ -692,18 +704,51 @@ def pp_wizard(topic="welcome"):
     return show_wizard(topic)
 
 
+def pp_view(preset="", object_name="", mode="auto", radius="4", scope="nearby",
+            target_chain="auto", binder_chain="auto", surface="0", transparency="0.5", nucleic="1"):
+    """Open Structure views, toggle Interactive focus, or apply a structure view."""
+    preset = str(preset).strip().lower()
+    if not preset:
+        from .show_presets import show_presets
+        return show_presets()
+    if preset == "focus" and not object_name:
+        return toggle_interactive_focus()
+    from pymolplugins.annotation.review_view_presets import execute_review_command, show_preset_command
+
+    if not object_name:
+        raise ValueError("Specify a loaded object, or open the picker with pp_view.")
+    command = show_preset_command(preset, object_name, mode, radius, scope, target_chain, binder_chain,
+                                  surface, transparency, nucleic)
+    return execute_review_command(command, cmd, exclusive=True)
+
+
 def __init_plugin__(app=None):
     from pymol.plugins import addmenuitemqt
+    from pymolplugins.navigation.qt_keys import install_qt_navigation_keys
+    from .toolbar import install_toolbar
 
-    addmenuitemqt("PymolPlugins: Getting Started", pp_wizard)
-    addmenuitemqt("PymolPlugins: Load Toolkit", pp_load)
-    addmenuitemqt("PymolPlugins: Doctor", pp_doctor)
-    addmenuitemqt("PymolPlugins: Capabilities", pp_capabilities)
-    addmenuitemqt("PymolPlugins: Command Help", pp_help)
-    addmenuitemqt("PymolPlugins: Structure Annotator", show_structure_annotator_from_toolkit)
-    addmenuitemqt("PymolPlugins: Batch Processing", show_batch_processing_from_toolkit)
-    addmenuitemqt("PymolPlugins: RFD4 · Proteina", show_rfd4_from_toolkit)
-    addmenuitemqt("PymolPlugins: Updates", show_updates_from_toolkit)
+    entries = (
+        ("Review structures…", "Review", "Open, label and export review data", show_structure_annotator_from_toolkit),
+        ("Change scene view…", "Scene view", "Change a loaded object's view or the scene lighting", pp_view),
+        ("Click to focus", "Click to focus", "Inspect contacts around a point in the scene", toggle_interactive_focus),
+        ("Align loaded objects…", "Align objects", "Compare objects already in the PyMOL scene", show_comparison_from_toolkit),
+        ("Pair and export files…", "Batch files", "Pair input files and write processed structures", show_batch_processing_from_toolkit),
+        ("RFD4 · Proteina", "RFD4", "Open the RFD4 Studio workflow", show_rfd4_from_toolkit),
+    )
+    for label, _, _, callback in entries:
+        addmenuitemqt("PymolPlugins|" + label, callback)
+    for label, callback in (
+        ("Getting Started", pp_wizard),
+        ("Command Help…", lambda: pp_wizard("tools")),
+        ("Maintenance|Updates", show_updates_from_toolkit),
+        ("Maintenance|Doctor", pp_doctor),
+        ("Maintenance|Capabilities", pp_capabilities),
+        ("Maintenance|Reload toolkit", pp_load),
+    ):
+        addmenuitemqt("PymolPlugins|" + label, callback)
+    install_toolbar(((text, tip, callback) for _, text, tip, callback in entries),
+                    focus_callback=toggle_interactive_focus)
+    install_qt_navigation_keys()
     from .updater_widgets import start_update_check
     start_update_check()
 
@@ -721,6 +766,7 @@ _register_host_command("pp_capabilities", pp_capabilities)
 _register_host_command("pp_help", pp_help)
 _register_host_command("pp_wizard", pp_wizard)
 _register_host_command("pp_review_groups", pp_review_groups)
+_register_host_command("pp_view", pp_view)
 
 try:
     cmd.auto_arg[0]["pp_help"] = [
@@ -728,6 +774,10 @@ try:
         "task_command_or_preset",
         "",
     ]
+    from pymolplugins.annotation.review_view_presets import SHOW_PRESETS, loaded_molecules
+
+    cmd.auto_arg[0]["pp_view"] = [lambda: cmd.Shortcut(("focus", *SHOW_PRESETS)), "preset", ", "]
+    cmd.auto_arg[1]["pp_view"] = [lambda: cmd.Shortcut(loaded_molecules(cmd)), "object", ""]
 except (AttributeError, KeyError, TypeError):
     # Headless/fake command APIs and some older Host builds expose no completion.
     pass

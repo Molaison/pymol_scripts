@@ -1,10 +1,12 @@
-"""Read-only operations sent to the selected SSH host's Python 3 interpreter."""
+"""Operations sent to the selected SSH host's Python 3 interpreter."""
 
 import base64
 import csv
 import io
 import json
 import os
+import select
+import signal
 import stat
 import struct
 import sys
@@ -133,6 +135,26 @@ def table_header(path, encoding, delimiter):
     return {"columns": columns, "delimiter": delimiter, "encoding": encoding}
 
 
+def check_cluster_channel():
+    if select.select([sys.stdin], [], [], 0)[0] and not os.read(sys.stdin.fileno(), 1):
+        raise InterruptedError("Clustering channel closed.")
+
+
+def cluster_request(options):
+    engine = globals().get("run_cluster")
+    if engine is None:
+        raise ValueError("This SSH channel is for file access. Start a clustering channel.")
+
+    def disconnected(_signal, _frame):
+        raise InterruptedError("Clustering channel closed.")
+
+    saved = signal.signal(signal.SIGHUP, disconnected)
+    try:
+        return engine(options, check_cancel=check_cluster_channel)
+    finally:
+        signal.signal(signal.SIGHUP, saved)
+
+
 def dispatch(request):
     operation = request["operation"]
     if operation == "read":
@@ -145,6 +167,8 @@ def dispatch(request):
         reply(list_directory(request["path"], request["maximum"]))
     elif operation == "header":
         reply(table_header(request["path"], request["encoding"], request["delimiter"]))
+    elif operation == "cluster":
+        reply(cluster_request(request["options"]))
     else:
         raise ValueError("Unknown SSH read operation: " + str(operation))
 

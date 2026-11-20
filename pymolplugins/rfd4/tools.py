@@ -12,16 +12,17 @@ class ViewTools(QtWidgets.QDialog):
     def __init__(self, panel):
         super().__init__(panel)
         self.panel = panel
-        self.snapshot = None
         self.contact_groups = []
         self.setWindowTitle("结构查看工具")
         self.resize(400, 300)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setSpacing(8)
         self.tool = QtWidgets.QComboBox()
-        self.tool.addItems(["PyMOL 显示", "Molaison 配色", "Molaison Contacts", "Molaison 按序列选择",
+        self.tool.addItems(["PyMOL 显示", "配色与光照", "Molaison Contacts", "Molaison 按序列选择",
                             "服务端相互作用分析"])
         layout.addWidget(self.tool)
+        self.scope = CompactLabel()
+        layout.addWidget(self.scope)
         self.stack = QtWidgets.QStackedWidget()
         self.tool.currentIndexChanged.connect(self.stack.setCurrentIndex)
         layout.addWidget(self.stack)
@@ -38,10 +39,12 @@ class ViewTools(QtWidgets.QDialog):
         form.addRow(self.visible)
         form.addRow(self.sequence_view)
         _, form = self._page()
-        self.style = QtWidgets.QComboBox()
-        self.style.addItems(["minimal_light", "publication_light", "rfd2_paper_palette", "rfd2_sam_palette"])
-        form.addRow("预设", self.style)
-        self.style.setToolTip("配色预设可能同时修改全局背景和光照；使用“撤销”可恢复。")
+        self.color_button = QtWidgets.QPushButton("配色…")
+        self.color_button.clicked.connect(lambda: self._open_appearance("color"))
+        self.lighting_button = QtWidgets.QPushButton("光照…")
+        self.lighting_button.clicked.connect(lambda: self._open_appearance("lighting"))
+        form.addRow(self.color_button)
+        form.addRow(self.lighting_button)
         _, form = self._page()
         self.contacts = QtWidgets.QComboBox()
         self.contacts.addItems(["interchain_basic", "polar_qc", "ligand_contacts", "ligand_quick", "ligand_site"])
@@ -70,15 +73,44 @@ class ViewTools(QtWidgets.QDialog):
         self.apply_button = apply
         apply.clicked.connect(self.apply)
         row.addWidget(apply)
-        undo = QtWidgets.QPushButton("撤销")
+        undo = QtWidgets.QPushButton("清除接触标记")
         undo.setAutoDefault(False)
-        undo.setToolTip("撤销本窗口保存的配色快照和接触组")
+        undo.setToolTip("清除本窗口生成的接触组")
         self.undo_button = undo
         undo.clicked.connect(self.undo)
         row.addWidget(undo)
         layout.addLayout(row)
         self.status = CompactLabel()
         layout.addWidget(self.status)
+        self.tool.currentIndexChanged.connect(self._tool_changed)
+        self.visible.toggled.connect(lambda: self._tool_changed(self.tool.currentIndex()))
+        self._tool_changed(0)
+        from pymolplugins.annotation.panel_style import apply_style
+        apply_style(self, "rfd4ViewTools")
+
+    def _tool_changed(self, mode):
+        actions = ("显示当前表示" if self.visible.isChecked() else "隐藏当前表示", "",
+                   "计算接触", "查找并选择序列", "生成相互作用报告")
+        scopes = ("当前结构的表示方式 · 序列条影响整个场景", "配色针对当前结构 · 光照影响整个场景",
+                  "在当前结构上创建接触标记", "在当前结构中创建 PyMOL 选择", "分析当前结构 · 结果写入任务详情")
+        self.scope.setText(scopes[mode])
+        self.apply_button.setText(actions[mode])
+        self.apply_button.setVisible(bool(actions[mode]))
+        self.undo_button.setVisible(mode == 2)
+
+    def _open_appearance(self, tab):
+        from pymolplugins.host.show_presets import show_presets
+
+        try:
+            if not self.panel.current or self.panel._busy:
+                raise ValueError("请先打开一个结构，并等待当前操作结束。")
+            source = self.panel.bridge.assert_current(self.panel.current)
+            show_presets(tab=tab, source=source)
+        except Exception as error:
+            self.status.setText(str(error))
+            self.status.set_error()
+            return
+        self.hide()
 
     def _page(self):
         widget = QtWidgets.QWidget()
@@ -103,8 +135,7 @@ class ViewTools(QtWidgets.QDialog):
             if mode == 0:
                 (cmd.show if self.visible.isChecked() else cmd.hide)(self.representation.currentText(), "model " + obj)
             elif mode == 1:
-                self.snapshot = integrations.apply_style(self.style.currentText(), obj)
-                self._check(self.snapshot)
+                return
             elif mode == 2:
                 a, b = self.partner1.text().strip(), self.partner2.text().strip()
                 if not a or not b or not cmd.count_atoms("(%s) and model %s" % (a, obj)) or not cmd.count_atoms("(%s) and model %s" % (b, obj)):
@@ -133,7 +164,7 @@ class ViewTools(QtWidgets.QDialog):
                     lambda: self.panel.api.request("POST", "/api/sessions/%s/interactions/analyze" % sid, payload),
                     done, "正在分析结构相互作用…")
                 return
-            self.status.setText("查看工具已应用。")
+            self.status.setText(self.apply_button.text() + " · 完成")
         except Exception as error:
             self.status.setText(str(error))
             self.status.set_error()
@@ -143,10 +174,7 @@ class ViewTools(QtWidgets.QDialog):
             for group in self.contact_groups:
                 integrations.clear_contacts(group)
             self.contact_groups.clear()
-            if self.snapshot is not None:
-                integrations.revert_style(self.snapshot)
-                self.snapshot = None
-            self.status.setText("已撤销本窗口保存的配色快照和接触组。")
+            self.status.setText("已清除本窗口生成的接触组。")
         except Exception as error:
             self.status.setText(str(error))
             self.status.set_error()

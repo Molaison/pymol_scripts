@@ -193,7 +193,10 @@ class OrderedReviewStepsTests(unittest.TestCase):
         panel._qt_shortcuts = None
         panel.error_label = mock.Mock()
         panel.status_label = mock.Mock()
-        panel.review = SimpleNamespace(selection=SimpleNamespace(clear=mock.Mock()))
+        panel.comparison = SimpleNamespace(close_pocket=mock.Mock())
+        panel.review = SimpleNamespace(selection=SimpleNamespace(
+            clear=mock.Mock(), select_entry=mock.Mock()
+        ))
         for name in ("_source_mode_changed", "_sync_to_state", "_refresh_status", "_show_error",
                      "_schedule_state_save", "_queue_preload_maintenance"):
             setattr(panel, name, mock.Mock())

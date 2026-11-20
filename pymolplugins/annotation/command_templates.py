@@ -7,125 +7,61 @@ STEP_FIELDS = {"object", "selection", "candidate", "file", "index", "count", "en
 BUCKET_FIELDS = STEP_FIELDS | {"label", "value"}
 
 VIEW_PRESETS = {
-    "cartoon": "Cartoon overview",
+    "overview": "Structure overview",
     "review_fixed_view": "Review · keep camera",
-    "interface_detail": "Interface · contacts and voids",
-    "ppi": "PPI · protein interface",
-    "ppi_surface": "PPI · interface surface",
+    "interface_detail": "Interface & pocket",
     "reference_overlay": "Reference · overlay, keep coordinates",
     "reference_align": "Reference · align candidate Cα",
     "reference_target_align": "Reference · align target, compare binder",
-    "pli": "PLI · ligand pocket",
-    "oligomer": "Oligomer · subunits",
-    "membrane_layer": "Membrane · hydrophobic surface and planes",
-    "membrane": "Membrane · protein & lipids",
+    "membrane_layer": "Membrane topology",
     "mass_residue_colors": "MASS paper · residue-number gradient",
-    "nucleic": "DNA / RNA complex",
-    "surface": "Molecular surface",
 }
+CORE_VIEW_PRESETS = ("overview", "interface_detail", "membrane_layer", "mass_residue_colors")
 LIPID_SELECTION = "resn POPC+POPE+POPG+POPS+DPPC+DPPE+DOPC+DOPE+DOPS+DLPC+DMPC+CHOL+CLR"
 
 
 def viewing_preset(name, object_name, api, *, reference_name="", reference_object="",
                    target_chain=None, binder_chain=None, reference_chain=None,
-                   interface_mode="auto", contact_radius="4", sidechain_scope="nearby"):
+                   interface_mode="auto", contact_radius="4", sidechain_scope="nearby",
+                   surface="0", transparency="0.5", nucleic="1"):
     """Build an editable, candidate-scoped recipe from the loaded structure."""
     if name not in VIEW_PRESETS:
         raise ValueError("Choose a viewing preset")
     if not object_name or api.count_atoms(object_name) < 1:
         raise ValueError("Open a candidate structure first")
-    if name in {"interface_detail", "membrane_layer", "mass_residue_colors"}:
-        return _review_viewing_preset(name, target_chain, binder_chain,
-                                      interface_mode, contact_radius, sidechain_scope)
-    target = "({object})"
-    protein = target + " and polymer.protein"
-    def count(selection):
-        return api.count_atoms(selection.replace("{object}", object_name))
-    commands = ["hide everything, " + target]
-    note = ""
+    if name in CORE_VIEW_PRESETS:
+        return _review_viewing_preset(name, target_chain, binder_chain, interface_mode,
+                                      contact_radius, sidechain_scope, surface, transparency, nucleic)
     if name.startswith("reference_"):
         return _reference_preset(name, object_name, api, reference_name, reference_object,
                                  target_chain, binder_chain, reference_chain)
-    if name in {"ppi", "ppi_surface", "oligomer", "membrane", "review_fixed_view"} and not count(protein):
+    target = "({object})"
+    protein = target + " and polymer.protein"
+    if not api.count_atoms(protein.replace("{object}", object_name)):
         raise ValueError("This preset needs a protein in the current structure")
-    if name in {"ppi", "ppi_surface", "oligomer"}:
-        chains = api.get_chains(protein.replace("{object}", object_name))
-        if len(chains) < 2:
-            raise ValueError("This preset needs at least two protein chains; load the biological assembly")
-    if name == "review_fixed_view":
-        commands += ["show cartoon, " + protein, "util.cbc " + protein,
-                     "set cartoon_transparency, 0, " + protein]
-        note = "Camera and coordinates unchanged. Use candidates in a common coordinate frame."
-    elif name in {"ppi", "ppi_surface"}:
-        # Each chain is compared with the other chains, never with itself.
-        if target_chain is not None or binder_chain is not None:
-            target_part, binder = _candidate_chains(object_name, api, target_chain, binder_chain)
-            protein = "((" + target_part + ") or (" + binder + "))"
-            interfaces = ["byres ((%s) within 5 of (%s))" % (target_part, binder),
-                          "byres ((%s) within 5 of (%s))" % (binder, target_part)]
-        else:
-            interfaces = ["byres ((%s and chain \"%s\") within 5 of (%s and not chain \"%s\"))"
-                          % (protein, chain, protein, chain) for chain in chains]
-        interface = "(" + " or ".join("(" + value + ")" for value in interfaces) + ")"
-        if not count(interface):
-            raise ValueError("No inter-chain protein contacts within 5 Å")
-        commands += ["show cartoon, " + protein, "util.cbc " + protein,
-                     "show sticks, " + interface, "util.cnc " + interface,
-                     "zoom " + interface + ", 6"]
-        if name == "ppi_surface":
-            commands[-1:-1] = ["show surface, " + interface,
-                               "set transparency, 0.35, " + target,
-                               "set cartoon_transparency, 0, " + protein]
-            note = "Inter-chain residues within 5 Å; a visual neighborhood, not an interaction score."
-    elif name == "pli":
-        ligand = target + " and organic and not (" + LIPID_SELECTION + ")"
-        if not count(ligand):
-            raise ValueError("No organic ligand found in this structure")
-        pocket = "byres ((%s) within 5 of (%s))" % (protein, ligand)
-        focus = "((%s) or (%s))" % (ligand, pocket)
-        commands += ["show cartoon, " + protein, "color gray70, " + protein,
-                     "set cartoon_transparency, 0.65, " + protein,
-                     "show sticks, " + focus, "color yellow, (" + ligand + ") and elem C",
-                     "set stick_radius, 0.16, " + pocket, "set stick_radius, 0.25, " + ligand,
-                     "util.cnc " + focus, "orient " + focus, "zoom " + focus + ", 5"]
-    elif name == "membrane":
-        commands += ["show cartoon, " + protein, "color gray70, " + protein,
-                     "color orange, (" + protein + ") and resn ALA+VAL+ILE+LEU+MET+PHE+TRP+TYR"]
-        lipids = target + " and (" + LIPID_SELECTION + ")"
-        if count(lipids):
-            commands += ["show lines, " + lipids, "color cyan, (" + lipids + ") and elem C",
-                         "util.cnc " + lipids]
-        else:
-            note = "No lipids found; hydrophobic residues highlighted. Orientation unchanged."
-        commands += ["zoom " + target + ", 3"]
-    elif name == "nucleic":
-        nucleic = target + " and polymer.nucleic"
-        if not count(nucleic):
-            raise ValueError("No DNA or RNA found in this structure")
-        commands += ["show cartoon, " + target + " and polymer", "util.cbc " + target,
-                     "show sticks, " + nucleic, "util.cnc " + nucleic, "zoom " + target + ", 3"]
-    else:
-        commands += ["show cartoon, " + target + " and polymer", "util.cbc " + target]
-        if name in {"surface", "oligomer"}:
-            commands += ["show surface, " + target,
-                         "set transparency, %s, %s" % ("0.65" if name == "oligomer" else "0.25", target)]
-        commands += ["orient " + target, "zoom " + target + ", 3"]
-    return commands, note
+    return [
+        "hide everything, " + target, "show cartoon, " + protein, "util.cbc " + protein,
+        "set cartoon_transparency, 0, " + protein,
+    ], "Camera and coordinates unchanged. Use candidates in a common coordinate frame."
 
 
-def _review_viewing_preset(name, target_chain, binder_chain, mode, radius, scope):
-    from .review_view_presets import encode_review_command
+def _review_viewing_preset(name, target_chain, binder_chain, mode, radius, scope, surface, transparency, nucleic):
+    from .review_view_presets import show_preset_command
 
-    binder = "auto" if binder_chain is None else "chain:" + binder_chain
-    target = "auto" if target_chain is None else "chain:" + target_chain
-    if name == "interface_detail":
-        command = encode_review_command("sa_view_interface", "{object}", mode, radius, scope, target, binder)
-        note = "Teal dashes: polar contacts. Pink thick dashes: salt bridges. Violet beads: π stacking. Blue dots: estimated voids."
+    if name == "overview":
+        command = show_preset_command("overview", "{object}", surface=surface,
+                                      transparency=transparency, nucleic=nucleic)
+        note = "Chain-colored cartoon with ligand sticks and optional surface or nucleic-acid sticks."
+    elif name == "interface_detail":
+        command = show_preset_command("interface", "{object}", mode, radius, scope, target_chain, binder_chain,
+                                      surface=surface, transparency=transparency)
+        note = ("Teal dashes: polar contacts. Thick pink dashes: salt bridges. "
+                "Blue beads: pi stacking. Cyan dots: accessible recesses. Violet dots: enclosed voids.")
     elif name == "membrane_layer":
-        command = "sa_view_membrane {object}"
-        note = "Translucent hydrophobic surface. Bilayer bounds use modeled leaflets or local TmDet, with a helix-geometry fallback."
+        command = show_preset_command("membrane", "{object}")
+        note = "Shows membrane source, thickness, TM regions and key sidechains from modeled lipids or local TmDet."
     else:
-        command = encode_review_command("sa_view_mass", "{object}", binder, target)
+        command = show_preset_command("mass", "{object}", target_chain=target_chain, binder_chain=binder_chain)
         note = "MASS paper palette by residue number. Select a target to color both chains, each over its own range."
     return [command], note
 

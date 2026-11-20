@@ -34,13 +34,13 @@ def wait_for(predicate, timeout=55):
 def check():
     try:
         import pymolplugins
-        assert pymolplugins.__version__ == "0.19.0"
+        assert pymolplugins.__version__ == plugins.plugins["pymol_plugins"].get_version()
         assert "rfd4_pymol" not in plugins.plugins
         assert "rfd4_studio" not in cmd.keyword
         assert "pymolplugins.rfd4.panel" not in sys.modules
         window = get_qtwindow()
-        actions = [a for a in window.menudict["PluginQt"].actions() if "RFD4" in a.text()]
-        assert len(actions) == 1 and actions[0].text() == "PymolPlugins: RFD4 · Proteina"
+        actions = [a for a in window.menudict["PluginQt|PymolPlugins"].actions() if "RFD4" in a.text()]
+        assert len(actions) == 1 and actions[0].text() == "RFD4 · Proteina"
         actions[0].trigger()
         from pymolplugins import rfd4
         from pymolplugins.rfd4 import integrations

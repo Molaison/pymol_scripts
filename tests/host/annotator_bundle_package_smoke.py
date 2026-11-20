@@ -118,7 +118,7 @@ def check_bundles(annotation, directory, menu):
     from pymolplugins.annotation import bundle_view
 
     app = QtWidgets.QApplication.instance()
-    action = next(action for action in menu.actions() if action.text() == 'PymolPlugins: Structure Annotator')
+    action = next(action for action in menu.actions() if action.text() == 'Structure Annotator')
     action.trigger()
     app.processEvents()
     panel = annotation._panel

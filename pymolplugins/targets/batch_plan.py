@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import fnmatch
 import glob
+import os
 from pathlib import Path
 import re
 from string import Formatter
@@ -144,11 +145,18 @@ def _index_ids(names, pattern, side, case_sensitive, match):
 
 
 def id_pairs(left_names, right_names, left_pattern, right_pattern, identifiers="", *, case_sensitive=True,
-             match="template"):
+             match="template", review_files=None):
     """Pair equal IDs; missing or duplicate partners never become skipped rows."""
     left = _index_ids(left_names, left_pattern, "A", case_sensitive, match)
     right = _index_ids(right_names, right_pattern, "B", case_sensitive, match)
-    ids = select_ids(set(left) | set(right), identifiers)
+    available = set(left) | set(right)
+    if review_files is not None:
+        expected = {os.path.normcase(path) for path in review_files}
+        matching = {key for key, path in left.items() if os.path.normcase(path) in expected}
+        if len(matching) != len(expected):
+            raise ValueError("The pair patterns do not include every review file")
+        available = matching
+    ids = select_ids(available, identifiers)
     if not ids:
         raise ValueError("No matching A/B IDs")
     missing_left = [value for value in ids if value not in left]

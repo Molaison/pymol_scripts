@@ -40,6 +40,15 @@ class CandidateCavity:
     title: str
     identity: str
     capture: Callable
+    interface: bool = False
+
+
+@dataclass(frozen=True)
+class CavityRender:
+    status: str
+    tooltip: str
+    volumes: dict
+    objects: dict
 
 
 def clear_bundle_legend(api):
@@ -152,7 +161,9 @@ def _ligand_renderer(modules, request, root, assets, focus):
         reference_path = root / "reference" / name
         reference_path.parent.mkdir()
         reference_path.write_bytes(reference)
-        view_annotation = {key: value for key, value in annotation.items() if key != "cavity_centers"}
+        view_annotation = dict(annotation)
+        if not config.get("legacy_interface_step"):
+            view_annotation.pop("cavity_centers", None)
         (root / "surface.json").write_text(json.dumps({request.row_path: view_annotation}), encoding="utf-8")
         config["membrane"] = {
             **config["membrane"],
@@ -162,9 +173,36 @@ def _ligand_renderer(modules, request, root, assets, focus):
     with _skill_imports():
         sys.modules.update(modules)
         renderer = modules["acceptance_collection"]._ligand_view(
-            config, root, column, step_scene=focus, calculate_cavity=False
+            config, root, column, store_scene=bool(focus), step_scene=focus, calculate_cavity=False
         )
     return renderer, {column: request.row_path}
+
+
+def _draw_interface_labels(api, modules, owner, annotation):
+    protein = f"%{owner} and chain A and polymer.protein"
+    interface = annotation["interface_residues"]
+    if interface:
+        positions = "+".join(interface)
+        modules["acceptance_bundle"].acc_sidechain_sticks(
+            f"({protein}) and resi {positions}", carbon_color="gray65", stick_radius=0.17
+        )
+    biased = {entry["selection"]: entry["resn"] for entry in annotation["biased_residues"]}
+    displayed = {f"resi {position}": residue for position, residue in interface.items()}
+    displayed.update(biased)
+    charge = {
+        "ARG": ("CZ", "+1", "marine"), "LYS": ("NZ", "+1", "marine"),
+        "ASP": ("CG", "-1", "firebrick"), "GLU": ("CD", "-1", "firebrick"),
+        "TYR": ("OH", "0", "gray35"), "TRP": ("NE1", "0", "gray35"),
+    }
+    api.set("label_size", 13, owner)
+    labels = []
+    for position, residue in displayed.items():
+        atom, sign, color = charge[residue]
+        selection = f"({protein}) and ({position}) and resn {residue} and name {atom}"
+        suffix = f" {sign}" + (" *" if position in biased else "")
+        api.label(selection, "resn + resi + " + repr(suffix))
+        labels.append((selection, color))
+    modules["acceptance_recipes"].style_residue_labels(api, labels)
 
 
 def _draw_bundle(api, owner, prepared):
@@ -175,7 +213,9 @@ def _draw_bundle(api, owner, prepared):
         raise ValueError(f"Unsupported Bundle view: {view!r}")
     token = uuid4().hex
     identity = f"{owner}_{token}"
-    focus, backup = f"_sa_bundle_focus_{token}", f"_sa_bundle_backup_{token}"
+    interface_labels = bool(request.config.get("legacy_interface_step"))
+    focus = "" if interface_labels else f"_sa_bundle_focus_{token}"
+    backup = f"_sa_bundle_backup_{token}"
     selections = set(api.get_names("selections"))
     coordinates = [api.get_coordset(owner, state) for state in range(1, api.count_states(owner) + 1)]
     transform = api.get_object_ttt(owner)
@@ -187,7 +227,9 @@ def _draw_bundle(api, owner, prepared):
             else:
                 render, row = modules["acceptance_collection"]._cartoon_view, {}
             render(identity, {"model": owner}, row)
-            if view == "ligand_pocket":
+            if interface_labels:
+                _draw_interface_labels(api, modules, owner, assets[2])
+            elif view == "ligand_pocket":
                 legend = api.get_scene_message(focus).splitlines()[1:]
                 title = next(iter(request.label.splitlines()), "")
                 # PyMOL's native scene message wizard requires ASCII. Unicode
@@ -212,7 +254,8 @@ def _draw_bundle(api, owner, prepared):
             if name in api.get_scene_list():
                 api.scene(name, "delete")
     enabled = modules["acceptance_recipes"]._truthy(request.config.get("show_cavity", True), True)
-    if view == "ligand_pocket" and enabled:
+    precomputed_centers = interface_labels and assets[2].get("cavity_centers") is not None
+    if view == "ligand_pocket" and enabled and not precomputed_centers:
         protein = f"%{owner} and ({request.config['protein_selection']})"
         ligand = f"%{owner} and ({request.config['ligand_selection']})"
         return CandidateCavity("Pocket cavity", identity, lambda renderer: renderer.capture_cavity(api, protein, ligand))
@@ -233,14 +276,14 @@ def prepare_candidate_cavity(api, view):
 def draw_candidate_cavity(api, view, payload):
     result, cached = payload
     cavity = _load_skill()["acceptance_pocket_void"]
-    cavity.draw_cavity(view.identity, result, api=api)
-    recess = sum(region["volume"] for region in result["recesses"])
-    enclosed = sum(region["volume"] for region in result["enclosed"])
-    status = f"{view.title} · {recess:.1f} Å³ recess · {enclosed:.1f} Å³ enclosed"
+    products = cavity.draw_cavity(view.identity, result, api=api)
+    names = cavity.cavity_object_names(view.identity)
+    volumes = {kind: sum(region["volume"] for region in regions) for kind, regions in result.items()}
+    status = f"{view.title} · {volumes['recesses']:.1f} Å³ recess · {volumes['enclosed']:.1f} Å³ enclosed"
     tooltip = (
         f"{status}\nCyan: reached by a 1.4 Å probe from bulk, shielded from the 4.0 Å probe.\n"
         "Violet: the water-sized probe fits, with no path to bulk in this model.\n"
         "Volumes count probe-center grid cells in the bound geometry (0.5 Å grid).\n"
         + ("Read from cache." if cached else "Calculated for this structure.")
     )
-    return status, tooltip
+    return CavityRender(status, tooltip, volumes, {kind: name for kind, name in names.items() if name in products})

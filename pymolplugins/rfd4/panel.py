@@ -7,13 +7,16 @@ import uuid
 import zipfile
 
 from pymol import cmd
-from pymol.Qt import QtCore, QtWidgets
+from pymol.Qt import QtCore, QtGui, QtWidgets
+
+from pymolplugins.annotation.panel_style import apply_style, thin_scrollbars
 
 from .bridge import DisplayBridge
 from .client import ApiClient, ApiError
 from .credentials import load_token, save_token
-from .editors import ConditionEditor, OperationEditor
-from .ui import CompactLabel, Disclosure, button, collapsible, icon_button, menu_button, primary
+from .editors import ConditionEditor, OperationEditor, _label
+from .preview import ConditionPreview, layers_for_view
+from .ui import CompactLabel, Disclosure, button, collapsible, menu_button, primary
 
 Signal = getattr(QtCore, "Signal", None) or QtCore.pyqtSignal
 
@@ -27,6 +30,8 @@ class WorkflowPanel(QtWidgets.QWidget):
         self.api = None
         self.capabilities = {}
         self.bridge = DisplayBridge()
+        self.preview = ConditionPreview(self.bridge)
+        self.preview_layers = ()
         self.sessions = {}
         self.current = None
         self.job_data = None
@@ -46,6 +51,7 @@ class WorkflowPanel(QtWidgets.QWidget):
         self.timer.setInterval(1500)
         self.timer.timeout.connect(self.poll_job)
         self._build()
+        apply_style(self, "rfd4Workspace")
         self._set_ready()
         QtCore.QTimer.singleShot(0, self._restore_connection)
 
@@ -56,33 +62,54 @@ class WorkflowPanel(QtWidgets.QWidget):
         connection = QtWidgets.QHBoxLayout()
         self.connection_label = CompactLabel("● 未连接")
         connection.addWidget(self.connection_label, 1)
-        self.connect_button = icon_button(button("", self.connection_dialog, connection),
-                                          QtWidgets.QStyle.SP_DriveNetIcon, "连接设置")
+        self.connect_button = button("连接 RFD4 Studio…", self.connection_dialog, connection)
+        self.connect_button.setProperty("role", "primary")
         root.addLayout(connection)
-        active = QtWidgets.QHBoxLayout()
+        self.offline_hint = QtWidgets.QLabel("连接后可打开结构、查看任务或继续已有结果。")
+        self.offline_hint.setWordWrap(True)
+        root.addWidget(self.offline_hint)
+        self.offline_space = QtWidgets.QWidget()
+        root.addWidget(self.offline_space, 1)
+        self.active_row = QtWidgets.QWidget()
+        active = QtWidgets.QHBoxLayout(self.active_row)
+        active.setContentsMargins(0, 0, 0, 0)
         self.object_combo = QtWidgets.QComboBox()
         self.object_combo.setToolTip("当前输入 / 结果对象")
         self.object_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.object_combo.setMinimumContentsLength(12)
         self.object_combo.activated.connect(self._choose_session)
         active.addWidget(self.object_combo, 1)
+        self.preview_button = QtWidgets.QPushButton("预览条件")
+        self.preview_button.setAutoDefault(False)
+        self.preview_button.setCheckable(True)
+        self.preview_button.toggled.connect(self._toggle_condition_preview)
+        active.addWidget(self.preview_button)
+        self.preview_button.setToolTip("在 PyMOL 中查看当前输入修订的条件和可变片段")
         self.tools_button = button("查看工具", self.open_tools, active)
-        root.addLayout(active)
+        root.addWidget(self.active_row)
+        self._build_preview(root)
         self.tabs = QtWidgets.QTabWidget()
         root.addWidget(self.tabs, 1)
         self._build_input()
         self._build_edit()
         self._build_generate()
         self._build_results()
+        for widget in (self.backend, self.thinking):
+            widget.currentIndexChanged.connect(self._update_preview_config)
+        for widget in (self.samples, self.backbone_k, self.latent_k, self.partial_percent, self.trajectory_stride):
+            widget.valueChanged.connect(self._update_preview_config)
+        self.seed.textChanged.connect(self._update_preview_config)
+        self.partial.toggled.connect(self._update_preview_config)
+        self.save_trajectory.toggled.connect(self._update_preview_config)
         self.progress = QtWidgets.QProgressBar()
         self.progress.setMaximumHeight(5)
         self.progress.setTextVisible(False)
         self.progress.hide()
         root.addWidget(self.progress)
         footer = QtWidgets.QHBoxLayout()
-        self.status = CompactLabel("就绪")
+        self.status = CompactLabel("")
         footer.addWidget(self.status, 1)
-        task_details = QtWidgets.QWidget()
+        task_details = self.task_details = QtWidgets.QWidget()
         task = QtWidgets.QHBoxLayout(task_details)
         task.setContentsMargins(0, 0, 0, 0)
         self.job_id = QtWidgets.QLineEdit()
@@ -98,15 +125,44 @@ class WorkflowPanel(QtWidgets.QWidget):
         root.addWidget(task_details)
         self.setMinimumWidth(410)
 
+    def _build_preview(self, root):
+        self.preview_pane = QtWidgets.QWidget()
+        body = QtWidgets.QVBoxLayout(self.preview_pane)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(4)
+        header = QtWidgets.QHBoxLayout()
+        self.preview_status = CompactLabel()
+        header.addWidget(self.preview_status, 1)
+        self.show_all_layers = button("返回概览", self._show_all_preview_layers, header)
+        self.show_all_layers.setToolTip("概览突出片段和热点；点击条件可查看该组原子。")
+        body.addLayout(header)
+        self.annotation_tree = QtWidgets.QTreeWidget()
+        self.annotation_tree.setObjectName("conditionPreview")
+        self.annotation_tree.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.annotation_tree.setHeaderLabels(["已应用条件", "范围 / 值"])
+        self.annotation_tree.setToolTip("单击一项在结构里查看。双击把实际原子载入选择。")
+        self.annotation_tree.setRootIsDecorated(True)
+        self.annotation_tree.setUniformRowHeights(True)
+        self.annotation_tree.setMinimumHeight(96)
+        self.annotation_tree.setMaximumHeight(172)
+        self.annotation_tree.header().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        self.annotation_tree.currentItemChanged.connect(self._preview_layer_changed)
+        self.annotation_tree.itemDoubleClicked.connect(self.select_annotation)
+        body.addWidget(self.annotation_tree)
+        thin_scrollbars(self.annotation_tree)
+        root.addWidget(self.preview_pane)
+        self.preview_pane.hide()
+
     def _page(self, label):
         content = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(content)
-        layout.setContentsMargins(8, 10, 8, 8)
+        layout.setContentsMargins(0, 10, 0, 4)
         layout.setSpacing(10)
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         scroll.setWidget(content)
+        thin_scrollbars(scroll)
         self.tabs.addTab(scroll, label)
         return layout
 
@@ -167,15 +223,16 @@ class WorkflowPanel(QtWidgets.QWidget):
         self.scope.setToolTip("应用范围：按原子、残基或链扩展选择")
         selection_form.addWidget(self.selection, 1)
         selection_form.addWidget(self.scope)
+        self.inspect_button = button("检查选择", self.inspect_selection, selection_form)
         layout.addLayout(selection_form)
-        selection_info = QtWidgets.QHBoxLayout()
-        self.selection_summary = CompactLabel("未检查选择")
-        selection_info.addWidget(self.selection_summary, 1)
-        self.inspect_button = button("检查选择", self.inspect_selection, selection_info)
-        layout.addLayout(selection_info)
+        editor_header = QtWidgets.QHBoxLayout()
         self.edit_mode = QtWidgets.QComboBox()
         self.edit_mode.addItems(["设计条件", "结构操作"])
-        layout.addWidget(self.edit_mode)
+        editor_header.addWidget(self.edit_mode)
+        self.selection_summary = CompactLabel("")
+        self.selection_summary.setProperty("role", "muted")
+        editor_header.addWidget(self.selection_summary, 1)
+        layout.addLayout(editor_header)
         self.edit_stack = QtWidgets.QStackedWidget()
         self.conditions = ConditionEditor()
         self.operations = OperationEditor()
@@ -192,12 +249,6 @@ class WorkflowPanel(QtWidgets.QWidget):
         self.edit_menu_button = menu_button("更多", row)
         self.edit_menu_button.menu().addAction("恢复服务端显示", self.reload_view)
         layout.addLayout(row)
-        self.annotation_tree = QtWidgets.QTreeWidget()
-        self.annotation_tree.setHeaderLabels(["已设置条件", "数量"])
-        self.annotation_tree.setToolTip("点击条件或子项，在结构中定位")
-        self.annotation_tree.setMinimumHeight(110)
-        self.annotation_tree.itemClicked.connect(self.select_annotation)
-        layout.addWidget(self.annotation_tree)
         button("设置生成参数 →", lambda: self.tabs.setCurrentIndex(2), layout)
         layout.addStretch()
 
@@ -300,8 +351,18 @@ class WorkflowPanel(QtWidgets.QWidget):
         busy = self._busy or bool(self._applying_result)
         self.object_combo.setEnabled(connected and not busy)
         self.connect_button.setEnabled(not busy and not self.job_active)
+        self.connect_button.setText("连接设置…" if connected else "连接 RFD4 Studio…")
+        self.offline_hint.setVisible(not connected and not busy)
+        self.offline_space.setVisible(not connected)
+        self.active_row.setVisible(connected)
+        self.tabs.setVisible(connected)
+        self.task_toggle.setVisible(connected or self.job_active)
+        self.task_details.setVisible((connected or self.job_active) and self.task_toggle.isChecked())
         self.tabs.setEnabled(connected and not busy)
         self.tools_button.setEnabled(has_input and not busy)
+        self.preview_button.setEnabled(has_input and not busy)
+        if not has_input and self.preview_button.isChecked():
+            self.preview_button.setChecked(False)
         self.generate_button.setEnabled(has_input and not busy and not self.job_active)
         self.apply_button.setEnabled(has_input and not busy)
         self.cancel_button.setEnabled(self.job_active and not busy)
@@ -423,12 +484,14 @@ class WorkflowPanel(QtWidgets.QWidget):
         def connected(caps):
             changed = self.api is not None and self.api.base_url != api.base_url
             if changed:
+                self.preview.clear()
                 self.current = None
                 self.sessions.clear()
                 self.object_combo.clear()
                 self.result_list.clear()
                 self.batches.clear()
                 self.bridge = DisplayBridge()
+                self.preview = ConditionPreview(self.bridge)
             self.api = api
             self.capabilities = caps
             self.settings.setValue("url", api.base_url)
@@ -521,8 +584,14 @@ class WorkflowPanel(QtWidgets.QWidget):
             self._error(error)
 
     def _activate_view(self, view, label=None):
+        self.preview.clear()
         sid = view["session_id"]
-        obj = self.bridge.load(view)
+        try:
+            obj = self.bridge.load(view)
+        except Exception:
+            if self.preview_button.isChecked():
+                self._show_all_preview_layers()
+            raise
         previous = self.sessions.get(sid, {})
         old_label = previous.get("label")
         self.sessions[sid] = {"view": view, "label": label or old_label or view.get("name", obj)}
@@ -553,23 +622,102 @@ class WorkflowPanel(QtWidgets.QWidget):
         for label in (self.input_summary, self.generate_summary):
             label.setText(short_summary)
             label.setToolTip(summary)
-        self.annotation_tree.clear()
-        for entry in view.get("annotations", []):
-            item = QtWidgets.QTreeWidgetItem([entry.get("label", entry["name"]),
-                                            str(entry.get("count", "")) + " " + entry.get("unit", "")])
-            self.annotation_tree.addTopLevelItem(item)
-            all_indices = set()
-            for value in entry.get("values", []):
-                indices = value.get("atom_indices", [])
-                all_indices.update(indices)
-                child = QtWidgets.QTreeWidgetItem([str(value.get("label", "")), str(value.get("count", len(indices)))])
-                child.setData(0, QtCore.Qt.UserRole, indices)
-                item.addChild(child)
-            item.setData(0, QtCore.Qt.UserRole, sorted(all_indices))
-        self.annotation_tree.resizeColumnToContents(0)
+        self._set_preview_view(view)
         issues = structure.get("validation", [])
         self._issues_report(issues, "输入交互验证通过。")
         self._set_ready()
+
+    def _set_preview_view(self, view):
+        specs = self.capabilities.get("conditions", {})
+        self.preview_layers = layers_for_view(view, specs)
+        tree = self.annotation_tree
+        with QtCore.QSignalBlocker(tree):
+            tree.clear()
+            groups = {}
+            for layer in self.preview_layers:
+                groups.setdefault((layer.key, layer.label), []).append(layer)
+            for (key, label), layers in groups.items():
+                if key in specs and key != "chain_centroid":
+                    label = _label(key, specs[key])
+                parent = QtWidgets.QTreeWidgetItem([label, layers[0].value if len(layers) == 1 else f"{len(layers)} 项"])
+                parent.setData(0, QtCore.Qt.UserRole, sorted({index for layer in layers for index in layer.indices}))
+                parent.setData(0, QtCore.Qt.UserRole + 1, tuple(layers))
+                tree.addTopLevelItem(parent)
+                if len(layers) > 1:
+                    for layer in layers:
+                        detail, separator, amount = layer.value.rpartition(" · ")
+                        child = QtWidgets.QTreeWidgetItem([detail, amount] if separator else [layer.value, ""])
+                        child.setData(0, QtCore.Qt.UserRole, list(layer.indices))
+                        child.setData(0, QtCore.Qt.UserRole + 1, (layer,))
+                        self._set_layer_color(child, layer.color)
+                        parent.addChild(child)
+                elif layers:
+                    self._set_layer_color(parent, layers[0].color)
+            self.preview_config = QtWidgets.QTreeWidgetItem(["生成参数", ""])
+            tree.addTopLevelItem(self.preview_config)
+            tree.setCurrentItem(None)
+        self._update_preview_config()
+        self.preview_status.setToolTip("来自当前输入修订。选中一项查看；双击可定位实际原子。片段示意点保留输入坐标。")
+        self._show_all_preview_layers()
+
+    @staticmethod
+    def _set_layer_color(item, color):
+        icon = QtGui.QPixmap(10, 10)
+        icon.fill(QtGui.QColor.fromRgbF(*color))
+        item.setIcon(0, QtGui.QIcon(icon))
+
+    def _update_preview_config(self, *_):
+        parent = getattr(self, "preview_config", None)
+        if parent is None:
+            return
+        try:
+            options = self.generation_options()
+        except ValueError as error:
+            parent.setText(1, str(error))
+            parent.takeChildren()
+            return
+        parent.setText(1, f"{self.samples.value()} 个 · {self.backend.currentText() or '默认'}")
+        revision = self.sessions[self.current]["view"]["revision"]
+        self.preview_status.setText(f"输入 r{revision} · {len(self.preview_layers)} 项 · {self.samples.value()} 个设计")
+        expanded = parent.isExpanded()
+        parent.takeChildren()
+        labels = {
+            "backend": "计算后端", "thinking": "Thinking", "samples": "数量", "seed": "Seed",
+            "backbone_k": "Backbone K", "latent_k": "Latent K", "partial_diffusion": "Partial diffusion",
+            "partial_diffusion_percent": "扩散比例", "trajectory_stride": "轨迹间隔",
+        }
+        for key, value in options.items():
+            text = ("开" if value else "关") if isinstance(value, bool) else str(value)
+            parent.addChild(QtWidgets.QTreeWidgetItem([labels.get(key, key), text]))
+        parent.setExpanded(expanded)
+
+    def _toggle_condition_preview(self, enabled):
+        self.preview_pane.setVisible(enabled)
+        self.preview_button.setText("结束预览" if enabled else "预览条件")
+        if enabled:
+            self._show_all_preview_layers()
+        else:
+            self.preview.clear()
+
+    def workspace_visibility_changed(self, visible):
+        if not visible and self.preview_button.isChecked():
+            self.preview_button.setChecked(False)
+
+    def _show_all_preview_layers(self):
+        with QtCore.QSignalBlocker(self.annotation_tree):
+            self.annotation_tree.setCurrentItem(None)
+        self._preview_layer_changed(None)
+
+    def _preview_layer_changed(self, item, _previous=None):
+        if not self.preview_button.isChecked() or not self.current:
+            return
+        layers = item.data(0, QtCore.Qt.UserRole + 1) if item is not None else None
+        self.show_all_layers.setEnabled(layers is not None)
+        try:
+            self.preview.draw(self.current, self.sessions[self.current]["view"], layers, self.preview_layers)
+        except Exception as error:
+            self.preview_button.setChecked(False)
+            self._error(error)
 
     def _choose_session(self, index):
         sid = self.object_combo.itemData(index)
@@ -857,6 +1005,7 @@ class WorkflowPanel(QtWidgets.QWidget):
         self.request(fork, opened, "正在从所选 candidate 建立下一轮输入…")
 
     def open_trajectory(self):
+        self.preview_button.setChecked(False)
         item = self.result_list.currentItem()
         if not item:
             self._error(ValueError("请先选择一个 candidate。"))
@@ -887,6 +1036,7 @@ class WorkflowPanel(QtWidgets.QWidget):
                               record["label"], opened)
 
     def compare_result(self):
+        self.preview_button.setChecked(False)
         item = self.result_list.currentItem()
         if not item:
             self._error(ValueError("请先选择并打开一个结果。"))
@@ -933,6 +1083,8 @@ class WorkflowPanel(QtWidgets.QWidget):
                 self._error(error)
 
     def open_tools(self):
+        if self.preview_button.isChecked():
+            self.preview_button.setChecked(False)
         from .tools import ViewTools
         if self._tools is None:
             self._tools = ViewTools(self)

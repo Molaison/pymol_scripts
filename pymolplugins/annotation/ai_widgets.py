@@ -10,8 +10,9 @@ from pymol import cmd
 from pymol.Qt import QtCore, QtWidgets
 
 from .ai_commands import build_prompt, output_schema, parse_draft
-from .command_templates import VIEW_PRESETS, viewing_preset
+from .command_templates import CORE_VIEW_PRESETS, VIEW_PRESETS, viewing_preset
 from .panel_style import STYLE
+from .view_controls import ViewLayers
 from ..host.workspace import window_settings
 from ..remote.client import _strict_json_loads
 
@@ -248,13 +249,17 @@ class AICommandDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(self)
         presets = QtWidgets.QHBoxLayout()
         self.preset_combo = QtWidgets.QComboBox()
-        self.preset_combo.addItem("Choose a viewing preset…", "")
+        self.preset_combo.addItem("Choose a structure view…", "")
+        for key in CORE_VIEW_PRESETS:
+            self.preset_combo.addItem(VIEW_PRESETS[key], key)
+        self.preset_combo.insertSeparator(self.preset_combo.count())
         for key, title in VIEW_PRESETS.items():
-            self.preset_combo.addItem(title, key)
+            if key not in CORE_VIEW_PRESETS:
+                self.preset_combo.addItem(title, key)
         self.saved_presets = json.loads(str(window_settings().value("command_presets", "{}")))
         for name in sorted(self.saved_presets):
             self.preset_combo.addItem("Saved · " + name, "saved:" + name)
-        self.preset_button = QtWidgets.QPushButton("Use preset")
+        self.preset_button = QtWidgets.QPushButton("Use view")
         self.preset_button.setAutoDefault(False)
         self.preset_button.clicked.connect(self.use_preset)
         presets.addWidget(self.preset_combo, 1)
@@ -301,6 +306,8 @@ class AICommandDialog(QtWidgets.QDialog):
         interface_layout.addRow("Neighborhood", self.contact_radius)
         interface_layout.addRow("Sidechains", self.sidechain_scope)
         layout.addWidget(self.interface_row)
+        self.view_layers = ViewLayers(self)
+        layout.addWidget(self.view_layers)
         self._fill_chains(self.target_chain_combo, current_context(self.panel)["object"])
         self._fill_chains(self.binder_chain_combo, current_context(self.panel)["object"])
         self.reference_combo.currentIndexChanged.connect(self._reference_chains)
@@ -349,7 +356,7 @@ class AICommandDialog(QtWidgets.QDialog):
         layout.addWidget(self.previews, 1)
         footer = QtWidgets.QHBoxLayout()
         self.insert_button = QtWidgets.QPushButton("Insert draft…")
-        self.insert_button.setToolTip("Replace selected command drafts only. Use Apply commands in Settings to enable them.")
+        self.insert_button.setToolTip("Replace selected command drafts only. Use Save commands in Saved review commands when ready.")
         self.insert_button.setEnabled(False)
         self.insert_button.clicked.connect(self.insert)
         self.apply_view_button = QtWidgets.QPushButton("Apply and view…")
@@ -387,10 +394,11 @@ class AICommandDialog(QtWidgets.QDialog):
         name = str(self.preset_combo.currentData())
         self.reference_row.setVisible(name.startswith("reference_"))
         explicit = name == "reference_target_align"
-        self.chain_row.setVisible(explicit or name in {"ppi", "ppi_surface", "interface_detail", "mass_residue_colors"})
+        self.chain_row.setVisible(explicit or name in {"interface_detail", "mass_residue_colors"})
         self.reference_chain_combo.setVisible(explicit)
         self.chain_layout.labelForField(self.reference_chain_combo).setVisible(explicit)
         self.interface_row.setVisible(name == "interface_detail")
+        self.view_layers.set_view("interface" if name == "interface_detail" else name)
 
     def configure_connection(self):
         self.connection_dialog = AIConnectionDialog(self)
@@ -446,6 +454,7 @@ class AICommandDialog(QtWidgets.QDialog):
                 interface_mode=self.interface_mode.currentData(),
                 contact_radius=self.contact_radius.currentData(),
                 sidechain_scope=self.sidechain_scope.currentData(),
+                **self.view_layers.arguments(),
                 **({key + "_chain": getattr(self, key + "_chain_combo").currentData()
                     for key in ("target", "binder", "reference")}
                    if self.chain_row.isVisible() else {}))
@@ -614,7 +623,7 @@ class AICommandDialog(QtWidgets.QDialog):
              "On-open Review steps will execute. After-label commands are saved for future labels."
              if execute else
              "Replace drafts for %d selected triggers? Other editors are unchanged.\n"
-             "Nothing will execute. You must still use Apply commands in Settings." % len(drafts)),
+             "Nothing will execute. Use Save commands in Saved review commands when ready." % len(drafts)),
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
         if answer != QtWidgets.QMessageBox.Yes:
             return
