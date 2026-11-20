@@ -1,6 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
+from pymolplugins.annotation.model import COLUMN_INTEGER, COLUMN_TEXT, format_numeric_cell
 from pymolplugins.annotation.review_config import (
     decode_value, encode_value, missing_required, validate_fields,
 )
@@ -24,10 +25,15 @@ class ReviewGuidanceTests(unittest.TestCase):
 
     def test_number_formatting_and_missing_values(self):
         cases = {"0.873241": "0.873", "87.3456": "87.35", "1234": "1,234",
-                 "0.000012345": "1.23e-05", "0": "0", "NaN": "—", "inf": "—", "": "—"}
+                 "82.1": "82.10", "1.2": "1.20", "-0.004199": "-0.00420",
+                 "0.01": "0.0100", "0.000012345": "1.23e-05", "0": "0", "0.0": "0.00",
+                 "NaN": "—", "inf": "—", "": "—"}
         for raw, expected in cases.items():
             with self.subTest(raw=raw):
                 self.assertEqual(format_score(raw), expected)
+        self.assertEqual(format_numeric_cell("003", COLUMN_INTEGER), "003")
+        self.assertEqual(format_numeric_cell("1.2", COLUMN_TEXT), "1.2")
+        self.assertEqual(format_numeric_cell(""), "")
 
     def test_summary_uses_only_selected_columns_and_current_cohort(self):
         entries = [SimpleNamespace(metadata={"AC.iptm": str(value), "hidden": "10", "score_ac_iptm_pass": "True"})

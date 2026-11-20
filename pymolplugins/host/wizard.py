@@ -21,7 +21,7 @@ _PAGES = (
         "<p><b>结构工具</b>：浏览对象或 group，设置显示样式、对齐结构、查看接触。</p>"
         "<p><b>批处理</b>：为多份结构配置处理步骤，先预览配对，再运行。</p>"
         "<hr><p>接下来用四步熟悉入口。你可以边看向导边操作 PyMOL，"
-        "也可以随时关闭，再从插件菜单或审阅面板的 <b>?</b> 打开。</p>",
+        "也可以随时关闭，再从插件菜单或审阅面板的 <b>Help</b> 打开。</p>",
     ),
     (
         "打开第一份数据",
@@ -43,13 +43,13 @@ _PAGES = (
         "<h3>一次候选的审阅循环</h3>"
         "<p><b>查看</b>：检查当前结构、分数及配置好的 Review steps / reference。</p>"
         "<p><b>判断</b>：选择标签。暂时不能判断时，使用 "
-        "<b>More → Mark current for later</b>。</p>"
+        "<b>Review tools → Mark current for later</b>。</p>"
         "<p><b>保存</b>：点击 <b>Save and next</b> 保存当前标签并进入下一条。"
         "<b>Previous / Next</b> 用于导航。</p>"
         "<h3>下次继续</h3>"
-        "<p><b>Data → Continue last review</b> 恢复最近一次审阅；"
+        "<p><b>Open data… → Continue last review</b> 恢复最近一次审阅；"
         "<b>Recent configurations…</b> 可选择其他记录。</p>"
-        "<p><b>Data → Export annotations… / Export review handoff…</b> "
+        "<p><b>Review tools → Export annotations… / Export review handoff…</b> "
         "用于导出标签和交接信息。SSH 审阅结果保存在本机，源结构和评分表保持不变。</p>",
     ),
     (
@@ -66,7 +66,7 @@ _PAGES = (
         "从你的数据出发，需要时再查看帮助。",
         "<h3>常用入口</h3>"
         "<p><b>Structure Annotator</b>：打开数据、逐条审阅、记录标签。</p>"
-        "<p><b>Batch Processing</b>：配置文件或表格中的结构配对与处理步骤。</p>"
+        "<p><b>Batch files</b>：配置文件或表格中的结构配对与处理步骤。</p>"
         "<p><b>Command Help</b> 或 <code>pp_help 主题</code>："
         "在 PyMOL 控制台查询命令用法，例如 <code>pp_help navigation</code>。</p>"
         "<p><b>Doctor</b>：检查本机能力及可选后端。"

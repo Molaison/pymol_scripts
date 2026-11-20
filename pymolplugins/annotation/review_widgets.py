@@ -85,6 +85,7 @@ class AnnotationForm(QtWidgets.QWidget):
 
     def __init__(self, fields, parent=None):
         super().__init__(parent)
+        self.setObjectName("annotationForm")
         self.fields = validate_fields(fields)
         self.editors, self.values, self.primary_buttons = {}, {}, []
         self.dirty = set()
@@ -92,17 +93,18 @@ class AnnotationForm(QtWidgets.QWidget):
         self._loading = False
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
         self.target_label = QtWidgets.QLabel("Current candidate")
         self.target_label.setParent(self)
         self.target_label.hide()
         content = QtWidgets.QWidget()
         form = self.content_layout = QtWidgets.QVBoxLayout(content)
-        form.setContentsMargins(0, 0, 0, 0)
-        form.setSpacing(12)
+        form.setContentsMargins(0, 0, 10, 0)
+        form.setSpacing(5)
         self.optional_content = QtWidgets.QWidget()
         optional = QtWidgets.QVBoxLayout(self.optional_content)
         optional.setContentsMargins(0, 0, 0, 0)
-        optional.setSpacing(10)
+        optional.setSpacing(5)
         for index, field in enumerate(self.fields):
             editor = self._editor(field, index == 0)
             self.editors[field["name"]] = editor
@@ -112,24 +114,28 @@ class AnnotationForm(QtWidgets.QWidget):
             label.setToolTip(title + (" (required)" if field["required"] else ""))
             label.setBuddy(editor)
             label.setProperty("role", "muted")
-            section.addWidget(label)
-            section.addWidget(editor)
+            label.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+            label.setFixedWidth(92)
+            field_row = QtWidgets.QHBoxLayout()
+            field_row.addWidget(label)
+            field_row.addWidget(editor, 1)
+            section.addLayout(field_row)
         optional_fields = [field for index, field in enumerate(self.fields) if not field["required"] and index != 0]
         self.optional_toggle = QtWidgets.QPushButton("+ Add note" if len(optional_fields) == 1 and optional_fields[0]["type"] == "text" else "+ More fields")
         self.optional_toggle.setAutoDefault(False)
         self.optional_toggle.setCheckable(True)
-        self.optional_toggle.setProperty("role", "quiet")
+        self.optional_toggle.setProperty("role", "compact")
         self.optional_toggle.toggled.connect(self.optional_content.setVisible)
+        self.optional_toggle.clicked.connect(self._reveal_optional_fields)
         self.optional_toggle.setVisible(bool(optional_fields))
         self.optional_content.hide()
-        form.addWidget(self.optional_toggle, 0, QtCore.Qt.AlignLeft)
         form.addWidget(self.optional_content)
         form.addStretch()
         scroll = self.scroll = _AnnotationScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         scroll.setWidget(content)
-        scroll.setMinimumHeight(80)
+        scroll.setMinimumHeight(42)
         scroll.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Maximum)
         layout.addWidget(scroll)
         row = QtWidgets.QHBoxLayout()
@@ -145,11 +151,23 @@ class AnnotationForm(QtWidgets.QWidget):
         self.fields_button.hide()
         self.hint_label = ElidedLabel()
         self.hint_label.setProperty("role", "muted")
+        self.score_button = QtWidgets.QPushButton("Scores…")
+        self.score_button.setAutoDefault(False)
+        self.score_button.setProperty("role", "compact")
+        row.addWidget(self.optional_toggle)
+        row.addWidget(self.score_button)
         row.addWidget(self.hint_label, 1)
         row.addWidget(self.save_button)
         layout.addLayout(row)
         # Keep saving beside the fields instead of at an auto-hidden taskbar edge.
         layout.addStretch(1)
+
+    def _reveal_optional_fields(self, checked):
+        if checked:
+            QtCore.QTimer.singleShot(0, self._scroll_to_optional_fields)
+
+    def _scroll_to_optional_fields(self):
+        self.scroll.ensureWidgetVisible(self.optional_content, 0, 0)
 
     def _editor(self, field, primary):
         name, kind = field["name"], field["type"]
@@ -408,15 +426,12 @@ class ScoreFooter(QtWidgets.QWidget):
         if column_picker is not None:
             column_picker.setProperty("role", "quiet")
             header.addWidget(column_picker)
-        header.addStretch()
         self.help_button = QtWidgets.QToolButton()
-        self.help_button.setText("?")
-        self.help_button.setProperty("role", "icon")
+        self.help_button.setText("About scores")
+        self.help_button.setProperty("role", "compact")
         self.help_button.setAccessibleName("About scores")
         self.help_button.setToolTip("About scores")
         self.help_button.clicked.connect(self._show_help)
-        header.addWidget(self.help_button)
-        layout.addLayout(header)
         self.hint = QtWidgets.QLabel()
         self.hint.setProperty("role", "muted")
         self.hint.setWordWrap(True)
@@ -426,6 +441,24 @@ class ScoreFooter(QtWidgets.QWidget):
         layout.addLayout(self.grid)
         self.cards = {}
         self._grid_columns = 2
+        self.more_scores = QtWidgets.QPushButton()
+        self.more_scores.setCheckable(True)
+        self.more_scores.setAutoDefault(False)
+        self.more_scores.setProperty("role", "compact")
+        self.more_scores.toggled.connect(self._show_score_cards)
+        header.addWidget(self.more_scores)
+        header.addStretch()
+        header.addWidget(self.help_button)
+        layout.addLayout(header)
+        self.more_scores.hide()
+
+    def _show_score_cards(self, *_):
+        expanded = self.more_scores.isChecked()
+        for index, (frame, _) in enumerate(self.cards.values()):
+            frame.setVisible(expanded or index < 2)
+        extra = max(0, len(self.cards) - 2)
+        self.more_scores.setVisible(bool(extra))
+        self.more_scores.setText("Show fewer scores" if expanded else f"Show {extra} more scores")
 
     def _show_help(self):
         QtWidgets.QMessageBox.information(self, "About scores",
@@ -466,6 +499,7 @@ class ScoreFooter(QtWidgets.QWidget):
         else:
             self.hint.setText("")
         self.hint.setVisible(loading)
+        self._show_score_cards()
         self.help_button.setVisible(bool(cards))
         if self.column_picker is not None:
             self.column_picker.setText("Scores…" if cards else "+ Add scores")

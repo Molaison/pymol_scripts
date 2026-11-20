@@ -28,7 +28,7 @@ def _combo(entries, label):
 class ShowPresetsDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("PymolPlugins · Structure views")
+        self.setWindowTitle("PymolPlugins · Change scene view")
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
         self.setModal(False)
         self.resize(500, 290)
@@ -37,6 +37,13 @@ class ShowPresetsDialog(QtWidgets.QDialog):
         self.jobs = ViewJobs(self, self._is_current, self._prepare, self._draw)
         self.finished.connect(lambda _result: self.jobs.close())
         self.refresh_objects()
+
+    def _refresh_scope(self, *_):
+        if self.tabs.currentIndex() == 2:
+            self.scope_label.setText("Applies to the whole scene")
+        else:
+            target = self.objects.currentText()
+            self.scope_label.setText(f"Applies to {target}" if target else "Choose a loaded object")
 
     def _build(self):
         layout = QtWidgets.QVBoxLayout(self)
@@ -53,6 +60,10 @@ class ShowPresetsDialog(QtWidgets.QDialog):
         object_row.addWidget(refresh)
         form.addRow("Object", object_row)
         layout.addWidget(object_picker)
+        self.scope_label = QtWidgets.QLabel()
+        self.scope_label.setProperty("role", "muted")
+        self.scope_label.setWordWrap(True)
+        layout.addWidget(self.scope_label)
         self.tabs = QtWidgets.QTabWidget(self)
         layout.addWidget(self.tabs)
         structure = QtWidgets.QWidget(self.tabs)
@@ -62,6 +73,7 @@ class ShowPresetsDialog(QtWidgets.QDialog):
         self.tabs.addTab(self.color_page, "Color")
         self.tabs.addTab(self.lighting_page, "Lighting")
         self.tabs.currentChanged.connect(lambda index: object_picker.setVisible(index != 2))
+        self.tabs.currentChanged.connect(self._refresh_scope)
         layout = QtWidgets.QVBoxLayout(structure)
         form = QtWidgets.QFormLayout()
         self.preset = _combo(((title, key) for key, title in SHOW_PRESETS.items()), "Structure view")
@@ -91,7 +103,7 @@ class ShowPresetsDialog(QtWidgets.QDialog):
         layout.addWidget(self.quick_view_status)
         row = QtWidgets.QHBoxLayout()
         self.copy = QtWidgets.QPushButton("Copy command")
-        self.apply = QtWidgets.QPushButton("Apply")
+        self.apply = QtWidgets.QPushButton("Apply to object")
         self.apply.setProperty("role", "primary")
         self.apply.clicked.connect(self.apply_preset)
         self.copy.clicked.connect(self.copy_command)
@@ -122,6 +134,7 @@ class ShowPresetsDialog(QtWidgets.QDialog):
         self._update_options()
 
     def _object_changed(self):
+        self._refresh_scope()
         self.jobs.cancel()
         source = self.objects.currentData()
         chains = cmd.get_chains(f"%{source} and polymer.protein") if source else []

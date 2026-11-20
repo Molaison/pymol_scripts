@@ -34,7 +34,7 @@ class AppearancePage(QtWidgets.QWidget):
         buttons = QtWidgets.QHBoxLayout()
         self.copy = QtWidgets.QPushButton("Copy command")
         self.copy.clicked.connect(self._copy)
-        self.apply_button = QtWidgets.QPushButton("Apply")
+        self.apply_button = QtWidgets.QPushButton("Apply scene lighting" if kind == "lighting" else "Apply object color")
         self.apply_button.setProperty("role", "primary")
         self.apply_button.clicked.connect(self._apply)
         undo = QtWidgets.QPushButton("Undo last style")

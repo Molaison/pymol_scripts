@@ -63,7 +63,7 @@ class AlignmentRange(QtWidgets.QWidget):
 class CompareStructuresDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("PymolPlugins · Compare & align")
+        self.setWindowTitle("PymolPlugins · Align loaded objects")
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
         self.resize(610, 485)
         self.overlays = {}
@@ -104,6 +104,10 @@ class CompareStructuresDialog(QtWidgets.QDialog):
             inner.addWidget(controls)
             sides.addWidget(section, 1)
         layout.addLayout(sides)
+        scope = QtWidgets.QLabel("Comparison is temporary. Closing this window clears the overlays.")
+        scope.setProperty("role", "muted")
+        scope.setWordWrap(True)
+        layout.addWidget(scope)
         self.status = QtWidgets.QLabel("Check at least two objects.")
         self.status.setTextFormat(QtCore.Qt.PlainText)
         self.status.setWordWrap(True)

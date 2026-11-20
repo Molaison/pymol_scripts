@@ -1,6 +1,7 @@
 """File/CSV batch processing dialog with main-thread PyMOL execution."""
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 import json
 from pathlib import Path
 import threading
@@ -89,7 +90,7 @@ def _columns(dialog, form):
     columns.setContentsMargins(0, 0, 0, 0)
     dialog.a_column = QtWidgets.QComboBox()
     dialog.id_column = QtWidgets.QComboBox()
-    for title, widget in (("A column", dialog.a_column), ("ID column", dialog.id_column)):
+    for title, widget in (("Candidate column", dialog.a_column), ("ID column", dialog.id_column)):
         widget.setEditable(True)
         widget.setMinimumContentsLength(10)
         widget.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -147,13 +148,13 @@ def _input_page(dialog):
     dialog.source.addItem("CSV table", "csv")
     dialog.mode = QtWidgets.QComboBox()
     dialog.mode.addItem("All against reference", "reference")
-    dialog.mode.addItem("A / B by ID", "paired")
+    dialog.mode.addItem("Match files by ID", "paired")
     row.addWidget(dialog.source, 1)
     row.addWidget(dialog.mode, 1)
     form.addRow("Input / pairing", selectors)
     _pattern_options(dialog, form)
     dialog.a_edit, a_row = _line_with_browse(dialog, dialog.browse_a)
-    dialog.a_label = QtWidgets.QLabel("A files")
+    dialog.a_label = QtWidgets.QLabel("Candidate files")
     form.addRow(dialog.a_label, a_row)
     _columns(dialog, form)
     dialog.b_edit, dialog.b_file_row = _line_with_browse(dialog, dialog.browse_b)
@@ -168,15 +169,20 @@ def _input_page(dialog):
     dialog.ids = QtWidgets.QLineEdit()
     dialog.ids.setPlaceholderText("1-20,25")
     dialog.ids.setToolTip("Empty selects all IDs. Comma-separated IDs and numeric ranges are accepted.")
-    form.addRow("IDs", dialog.ids)
+    form.addRow("Limit to IDs", dialog.ids)
     dialog.output, output_row = _line_with_browse(dialog, dialog.browse_output)
     form.addRow("Output directory", output_row)
-    dialog.save_b = QtWidgets.QCheckBox("Also save processed B")
+    dialog.save_b = QtWidgets.QCheckBox("Also save processed reference")
     dialog.on_error = QtWidgets.QComboBox()
     dialog.on_error.addItem("Stop on error", "stop")
     dialog.on_error.addItem("Continue with next pair", "continue")
     form.addRow(dialog.save_b, dialog.on_error)
     _path_options(dialog, form)
+    dialog.command_section = CollapsibleSection("Commands per pair", expanded=False)
+    recipe = QtWidgets.QVBoxLayout(dialog.command_section.content)
+    recipe.setContentsMargins(0, 0, 0, 0)
+    recipe.addWidget(_command_page(dialog))
+    form.addRow(dialog.command_section)
     area = QtWidgets.QScrollArea()
     area.setWidgetResizable(True)
     area.setFrameShape(QtWidgets.QFrame.NoFrame)
@@ -218,6 +224,7 @@ def _command_page(dialog):
     dialog.commands.setToolTip("One PyMOL command per line. Fields: {A}, {B}, {id}, {index}, "
                                "{A_source}, {B_source}, {output_A}, {output_B}, {output_dir}.")
     dialog.commands.setMinimumHeight(100)
+    dialog.commands.setMaximumHeight(160)
     layout.addWidget(dialog.preset)
     layout.addWidget(dialog.commands, 1)
     dialog.preset.activated.connect(lambda index: dialog.commands.setPlainText(
@@ -226,7 +233,7 @@ def _command_page(dialog):
 
 
 def _footer(dialog, layout):
-    dialog.summary = QtWidgets.QLabel("Not prepared")
+    dialog.summary = QtWidgets.QLabel("Choose inputs, then preview the pairs.")
     dialog.summary.setProperty("role", "muted")
     dialog.summary.setWordWrap(True)
     dialog.progress = QtWidgets.QProgressBar()
@@ -234,6 +241,7 @@ def _footer(dialog, layout):
     dialog.progress.setValue(0)
     dialog.progress.setTextVisible(False)
     dialog.progress.setFixedHeight(3)
+    dialog.progress.hide()
     layout.addWidget(dialog.summary)
     layout.addWidget(dialog.progress)
     dialog.error_box = QtWidgets.QPlainTextEdit()
@@ -260,6 +268,7 @@ def _footer(dialog, layout):
     layout.addLayout(row)
     dialog.run_button.setEnabled(False)
     dialog.stop_button.setEnabled(False)
+    dialog.stop_button.hide()
     dialog.export_button.setEnabled(False)
 
 
@@ -272,7 +281,7 @@ class BatchDialog(QtWidgets.QWidget):
         self.plan, self.runner, self.future = None, None, None
         self.cancel_event, self.future_kind = None, ""
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pymol-batch-input")
-        self.setWindowTitle("Batch processing")
+        self.setWindowTitle("Pair and export files")
         self.resize(1000, 720)
         self.setMinimumSize(700, 560)
         layout = QtWidgets.QVBoxLayout(self)
@@ -281,15 +290,21 @@ class BatchDialog(QtWidgets.QWidget):
         self.source_scope_label = QtWidgets.QLabel()
         self.source_scope_label.setWordWrap(True)
         self.source_scope_label.setProperty("role", "muted")
+        self.review_source = None
+        self.review_scopes = {}
+        self.scope_choice = QtWidgets.QComboBox()
+        self.scope_choice.setAccessibleName("Batch input scope")
+        self.scope_choice.currentIndexChanged.connect(self._scope_changed)
+        self.scope_choice.hide()
         self.source_scope_label.hide()
+        layout.addWidget(self.scope_choice)
         layout.addWidget(self.source_scope_label)
         splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         splitter.setChildrenCollapsible(False)
-        self.tabs = QtWidgets.QTabWidget()
         self.window_mode_button = WindowModeButton(self)
-        self.tabs.setCornerWidget(self.window_mode_button)
-        self.tabs.addTab(_input_page(self), "Inputs")
-        self.tabs.addTab(_command_page(self), "Commands per pair")
+        layout.addWidget(self.window_mode_button, 0, QtCore.Qt.AlignRight)
+        self.inputs = _input_page(self)
+        self.command_section.toggle.toggled.connect(self._reveal_recipe)
         self.table = QtWidgets.QTableView()
         self.table.setMinimumHeight(112)
         self.model = PairTableModel(self)
@@ -305,8 +320,10 @@ class BatchDialog(QtWidgets.QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         for index, width in enumerate((65, 220, 220, 100, 160, 180)):
             self.table.setColumnWidth(index, width)
-        splitter.addWidget(self.tabs)
+        splitter.addWidget(self.inputs)
         splitter.addWidget(self.table)
+        self.table.hide()
+        self.model.modelReset.connect(lambda: self.table.setVisible(bool(self.model.rowCount())))
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
         splitter.setSizes([400, 175])
@@ -332,9 +349,18 @@ class BatchDialog(QtWidgets.QWidget):
         self._mode_changed()
         self._commands_changed()
 
+    def _reveal_recipe(self, expanded):
+        if expanded:
+            QtCore.QTimer.singleShot(0, self._scroll_to_recipe)
+
+    def _scroll_to_recipe(self):
+        if not self._closed and self.command_section.toggle.isChecked():
+            self.inputs.ensureWidgetVisible(self.commands, 0, 8)
+
     def _commands_changed(self):
         text = self.commands.toPlainText().strip()
         self.preset.setCurrentText(next((name for name, value in _PRESETS.items() if value == text), "Custom"))
+        self.command_section.toggle.setText("Commands per pair · " + self.preset.currentText())
         self.invalidate()
 
     def _set_initial(self, config):
@@ -358,6 +384,37 @@ class BatchDialog(QtWidgets.QWidget):
         if config.source == "csv" and config.mode == "paired":
             self.b_column.setCurrentText(config.b)
 
+    def offer_review(self, source, scopes, preferred):
+        if self.future is not None or (self.runner is not None and self.runner.running):
+            self.summary.setText("Finish or stop the current batch, then reopen from the review.")
+            return
+        self.review_source = source
+        self.review_scopes = scopes
+        self.scope_choice.blockSignals(True)
+        self.scope_choice.clear()
+        for title, rows in scopes.items():
+            self.scope_choice.addItem(f"{title} ({len(rows):,})", title)
+        self.scope_choice.addItem("Choose a different source", "")
+        self.scope_choice.setCurrentIndex(self.scope_choice.findData(preferred))
+        self.scope_choice.blockSignals(False)
+        self.scope_choice.show()
+        self.source_scope_label.show()
+        self._scope_changed()
+
+    def _scope_changed(self, *args):
+        scope = self.scope_choice.currentData()
+        if scope in self.review_scopes:
+            draft = self.config()
+            if draft.a != self.review_source.a or draft.source != self.review_source.source:
+                self._set_initial(replace(self.review_source, output=draft.output, commands=draft.commands,
+                                          save_b=draft.save_b, on_error=draft.on_error))
+            elif draft.ids:
+                self.ids.clear()
+            self.source_scope_label.setText(f"Input scope · {self.scope_choice.currentText()} · Preview to check pairs")
+        else:
+            self.source_scope_label.setText("Choose the inputs and preview the file pairs.")
+        self.invalidate()
+
     def config(self):
         csv = self.source.currentData() == "csv"
         paired = self.mode.currentData() == "paired"
@@ -371,15 +428,16 @@ class BatchDialog(QtWidgets.QWidget):
                            on_error=self.on_error.currentData(), mapping_profile=self.profile.currentText(),
                            source_base=self.base.text().strip(), target_format=self.target_format.currentText(),
                            wsl_distribution=self.distribution.text().strip(), encoding=self.encoding.text(),
-                           delimiter=self.delimiter.currentText())
+                           delimiter=self.delimiter.currentText(),
+                           review_rows=self.review_scopes.get(self.scope_choice.currentData()))
 
     def _mode_changed(self, *args):
         csv, paired = self.source.currentData() == "csv", self.mode.currentData() == "paired"
         regex = paired and not csv and self.match.currentData() == "regex"
         self.match_box.setVisible(paired and not csv)
         self.regex_box.setVisible(regex)
-        self.a_label.setText("CSV file" if csv else "A directory" if regex else "A pattern" if paired else "A files")
-        self.b_label.setText("B column" if csv and paired else "B directory" if regex else "B pattern" if paired else "Reference file")
+        self.a_label.setText("CSV file" if csv else "Candidate folder" if regex else "Candidate pattern" if paired else "Candidate files")
+        self.b_label.setText("Reference column" if csv and paired else "Reference folder" if regex else "Reference pattern" if paired else "Reference file")
         self.column_box.setVisible(csv)
         self.b_stack.setCurrentIndex(1 if csv and paired else 0)
         marker = "*" if self.match.currentData() == "glob" else "{id}"
@@ -392,16 +450,22 @@ class BatchDialog(QtWidgets.QWidget):
     def invalidate(self, *args):
         if self.runner is not None and self.runner.running:
             return
-        self.plan = None
+        self.plan = self.runner = None
+        if self.model.rowCount():
+            self.model.set_rows([])
         self.run_button.setEnabled(False)
-        self.summary.setText("Not prepared")
+        self.export_button.setEnabled(False)
+        self.progress.hide()
+        self.summary.setText("Choose inputs, then preview the pairs.")
 
     def _busy(self, busy):
-        for index in range(self.tabs.count()):
-            self.tabs.widget(index).setEnabled(not busy)
+        self.inputs.setEnabled(not busy)
+        self.scope_choice.setEnabled(not busy)
         self.preview_button.setEnabled(not busy)
         self.run_button.setEnabled(not busy and self.plan is not None and self.runner is None)
         self.stop_button.setEnabled(busy)
+        self.stop_button.setVisible(busy)
+        self.progress.setVisible(busy)
 
     def _error(self, exc):
         traceback.print_exception(type(exc), exc, exc.__traceback__)
@@ -423,6 +487,12 @@ class BatchDialog(QtWidgets.QWidget):
                       encoding=config.encoding, delimiter=config.delimiter)
 
     def preview(self):
+        config = self.config()
+        if config.review_rows is not None and (config.source != self.review_source.source
+                                               or config.a != self.review_source.a
+                                               or (config.source == "csv" and config.a_column != self.review_source.a_column)):
+            self._error(ValueError("Use the review source for this scope, or choose a different source."))
+            return
         self.runner = None
         self.plan = None
         self.model.set_rows([])
@@ -430,7 +500,7 @@ class BatchDialog(QtWidgets.QWidget):
         self.progress.setValue(0)
         self.export_button.setEnabled(False)
         self.cancel_event = threading.Event()
-        self._prepare("pairs", prepare_batch, self.config(), self.cancel_event)
+        self._prepare("pairs", prepare_batch, config, self.cancel_event)
 
     def _poll_preparation(self):
         if not self.future.done():
@@ -456,7 +526,8 @@ class BatchDialog(QtWidgets.QWidget):
                              planned_outputs=[path for path in (item.output_a, item.output_b) if path])
                         for item in result.items]
                 self.model.set_rows(rows)
-                self.summary.setText("%d pairs ready" % len(rows))
+                scope = self.scope_choice.currentText() if result.config.review_rows is not None else ""
+                self.summary.setText(f"{len(rows):,} pairs ready" + (f" · {scope}" if scope else ""))
         except InterruptedError:
             self.summary.setText("Cancelled")
         except Exception as exc:

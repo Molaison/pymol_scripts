@@ -567,13 +567,14 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
             self.assertFalse(self.module.STATE.show_source_row)
             self.assertFalse(self.module.STATE.show_file_status)
 
-    def test_annotation_interaction_preferences_default_off_and_validate(self):
+    def test_annotation_interaction_preferences_defaults_and_validation(self):
         legacy = self.module._validate_persisted_config({"auto_advance": True})
         self.module._apply_persisted_config(legacy)
-        for name in ("save_on_label_click", "show_source_row", "show_file_status"):
-            self.assertFalse(getattr(self.module.AnnotatorState(), name))
-            self.assertFalse(getattr(self.module.STATE, name))
-            self.assertFalse(self.module._persisted_config()[name])
+        defaults = {"save_on_label_click": False, "show_source_row": True, "show_file_status": False}
+        for name, default in defaults.items():
+            self.assertIs(getattr(self.module.AnnotatorState(), name), default)
+            self.assertIs(getattr(self.module.STATE, name), default)
+            self.assertIs(self.module._persisted_config()[name], default)
             for enabled in (True, False):
                 config = self.module._validate_persisted_config({name: enabled})
                 self.module._apply_persisted_config(config)
@@ -2216,8 +2217,11 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
                 row_for_entry=lambda _entry_id: -1,
             )
             panel.dataset_table = types.SimpleNamespace(selectRow=mock.Mock())
-            panel.view_summary_label = types.SimpleNamespace(setText=mock.Mock())
-            panel.filter_button = types.SimpleNamespace(setText=mock.Mock())
+            panel.view_summary_label = mock.Mock()
+            panel.view_scope_label = mock.Mock()
+            panel.filter_button = mock.Mock()
+            panel.overview_button = mock.Mock()
+            panel.cluster_button = mock.Mock()
             panel.review = types.SimpleNamespace(selection=types.SimpleNamespace(ensure_current=mock.Mock()))
 
             with mock.patch.object(

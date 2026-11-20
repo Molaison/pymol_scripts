@@ -83,8 +83,13 @@ def type_text(editor, text):
 def tab(dialog, index):
     from pymol.Qt import QtCore
     from PyQt5.QtTest import QTest
-    bar = dialog.tabs.tabBar()
-    QTest.mouseClick(bar, QtCore.Qt.LeftButton, pos=bar.tabRect(index).center())
+    section = dialog.command_section
+    if section.toggle.isChecked() != bool(index):
+        scroll_to(dialog.inputs, section.toggle)
+        QTest.mouseClick(section.toggle, QtCore.Qt.LeftButton)
+        QTest.qWait(40)
+    if index:
+        scroll_to(dialog.inputs, dialog.commands)
     QTest.qWait(30)
 
 
@@ -98,11 +103,11 @@ def configure(dialog, a, b, output, *, paired=False, csv_mode=False, save_b=True
               match="ID template", a_pattern="", b_pattern=""):
     from pymol.Qt import QtWidgets
     tab(dialog, 0)
-    area = dialog.tabs.widget(0)
+    area = dialog.inputs
     scroll_to(area, dialog.source)
     choose(dialog.source, "CSV table" if csv_mode else "Folder / file patterns")
     scroll_to(area, dialog.mode)
-    choose(dialog.mode, "A / B by ID" if paired else "All against reference")
+    choose(dialog.mode, "Match files by ID" if paired else "All against reference")
     if paired and not csv_mode:
         scroll_to(area, dialog.match)
         choose(dialog.match, match)
@@ -246,7 +251,8 @@ def check_style(dialog, panel=None):
         assert panel.dataset_table.verticalHeader().defaultSectionSize() == 36
         assert panel.error_label.property("role") == dialog.error_box.property("role")
         assert all(button.width() == button.height() == 34
-                   for button in (panel.prev_btn, panel.next_btn, panel.more_button))
+                   for button in (panel.prev_btn, panel.next_btn))
+        assert panel.more_button.text() == 'Review tools'
     return dict(status="passed", control_fonts=fonts, command_font=command_font,
                 primary_colors=sorted(colors & expected), table_row_height=36, icon_size=34,
                 matches_annotation=panel is not None)
@@ -270,8 +276,12 @@ def check_layout(dialog, app, output):
         resize_workspace(dialog, width, height)
         QTest.qWait(80)
         assert dialog.width() == width and dialog.height() == height
-        controls = [dialog.tabs, dialog.table, dialog.summary, dialog.progress, dialog.preview_button,
-                    dialog.run_button, dialog.stop_button, dialog.export_button]
+        assert dialog.table.isVisible() == bool(dialog.model.rowCount())
+        assert dialog.progress.isVisible() == dialog.stop_button.isVisible()
+        controls = [dialog.inputs, dialog.summary]
+        if dialog.table.isVisible():
+            controls.append(dialog.table)
+        controls.extend((dialog.preview_button, dialog.run_button, dialog.export_button))
         bounds[str(width)] = []
         for widget in controls:
             try:
@@ -280,24 +290,24 @@ def check_layout(dialog, app, output):
                 raise AssertionError(dict(widget=type(widget).__name__, name=widget.objectName(),
                                           geometry=widget.geometry().getRect(), rect=widget.rect().getRect(),
                                           visible=widget.visibleRegion().boundingRect().getRect())) from exc
-        for button in controls[-4:]:
+        for button in controls[-3:]:
             option = QtWidgets.QStyleOptionButton()
             button.initStyleOption(option)
             contents = button.style().subElementRect(QtWidgets.QStyle.SE_PushButtonContents, option, button)
             needed = button.fontMetrics().horizontalAdvance(button.text()) + button.iconSize().width() + 4
             assert contents.width() >= needed, (button.text(), contents.width(), needed)
             assert contents.height() >= button.fontMetrics().height()
-        buttons = controls[-4:]
+        buttons = controls[-3:]
         for index, button in enumerate(buttons):
             for other in buttons[index + 1:]:
                 assert not button.geometry().intersects(other.geometry())
         assert dialog.summary.fontMetrics().horizontalAdvance(dialog.summary.text()) < dialog.summary.width()
         screenshot(dialog, output, "layout-%d" % width)
         tab(dialog, 0)
-        dialog.tabs.widget(0).verticalScrollBar().setValue(0)
+        dialog.inputs.verticalScrollBar().setValue(0)
         for combo in (dialog.source, dialog.mode):
             combo_text_bounds(combo)
-        assert dialog.tabs.widget(0).horizontalScrollBar().maximum() == 0
+        assert dialog.inputs.horizontalScrollBar().maximum() == 0
         screenshot(dialog, output, "inputs-%d" % width)
         tab(dialog, 1)
     resize_workspace(dialog, 1000, 720)
@@ -308,7 +318,7 @@ def check_layout(dialog, app, output):
 def check_locations(dialog, app, output):
     from PyQt5.QtTest import QTest
     tab(dialog, 0)
-    area = dialog.tabs.widget(0)
+    area = dialog.inputs
     scroll_to(area, dialog.location_toggle)
     click(dialog.location_toggle)
     QTest.qWait(80)
@@ -361,7 +371,7 @@ def check_failures(dialog, app, root, all_files, pairs, output):
         configure(dialog, all_files, all_files / "ref.pdb", root / ("error-" + policy),
                   recipe="align {A}, missing_batch_reference\ntranslate [0, 2, 0], {B}")
         tab(dialog, 0)
-        scroll_to(dialog.tabs.widget(0), dialog.on_error)
+        scroll_to(dialog.inputs, dialog.on_error)
         choose(dialog.on_error, "Stop on error" if policy == "stop" else "Continue with next pair")
         prepare(dialog, app, ["1", "2", "3"])
         report = execute(dialog, app)
@@ -398,25 +408,10 @@ def check_annotation_entry(app, table, output):
     app.processEvents()
     try:
         before = annotation.STATE.current_entry_id()
-        action = next(action for action in panel.import_button.menu().actions()
-                      if action.text() == "Batch processing...")
-        menu, errors = panel.import_button.menu(), []
-        def select_action():
-            try:
-                assert menu.isVisible() and action.isEnabled()
-                QTest.mouseClick(menu, QtCore.Qt.LeftButton, pos=menu.actionGeometry(action).center())
-            except Exception as exc:
-                errors.append(exc)
-                menu.close()
-        option = QtWidgets.QStyleOptionToolButton()
-        panel.import_button.initStyleOption(option)
-        arrow = panel.import_button.style().subControlRect(
-            QtWidgets.QStyle.CC_ToolButton, option, QtWidgets.QStyle.SC_ToolButtonMenu, panel.import_button)
-        QtCore.QTimer.singleShot(80, select_action)
-        QTest.mouseClick(panel.import_button, QtCore.Qt.LeftButton, pos=arrow.center())
-        app.processEvents()
-        if errors:
-            raise errors[0]
+        action = next(action for action in panel.more_button.menu().actions()
+                      if action.text() == "Pair and export files…")
+        from annotator_layout_smoke import menu_action
+        menu_action(panel.more_button, action)
         dialog = batch_widgets._DIALOG
         assert dialog is not None and dialog.isVisible()
         assert dialog.config().source == "csv" and dialog.config().a == str(table)
@@ -480,6 +475,7 @@ def run(output):
             prepare(dialog, app, ["1", "2", "3"])
             shared_style["ready"] = check_style(dialog)
             screenshot(dialog, output, "ready")
+            tab(dialog, 1)
             type_text(dialog.commands, RECIPE + "\n# changed draft")
             assert dialog.plan is None and not dialog.run_button.isEnabled()
             prepare(dialog, app, ["1", "2", "3"])
@@ -508,14 +504,14 @@ def run(output):
             regex = execute(dialog, app)
             error = max(error, output_error(regex, cmd))
             tab(dialog, 0)
-            dialog.tabs.widget(0).verticalScrollBar().setValue(0)
+            dialog.inputs.verticalScrollBar().setValue(0)
             screenshot(dialog, output, "regex-inputs")
             resize_workspace(dialog, 760, 560)
             app.processEvents()
             for editor in (dialog.match, dialog.a_pattern, dialog.b_pattern, dialog.a_edit, dialog.b_edit):
-                scroll_to(dialog.tabs.widget(0), editor)
+                scroll_to(dialog.inputs, editor)
                 visible(editor)
-            dialog.tabs.widget(0).verticalScrollBar().setValue(0)
+            dialog.inputs.verticalScrollBar().setValue(0)
             screenshot(dialog, output, "regex-compact")
             resize_workspace(dialog, 1000, 720)
             configure(dialog, table, "Reference file", root / "csv-paired", paired=True, csv_mode=True)

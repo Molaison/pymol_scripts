@@ -9,6 +9,7 @@ from pymol.Qt import QtCore, QtGui, QtWidgets
 from .category_picker import OtherCategoryPicker
 from .column_profiles import build_column_profiles, format_proportion, other_category_counts
 from .header_filters import HeaderChoice
+from .model import COLUMN_INTEGER, COLUMN_NUMBER, format_numeric_cell
 
 
 class ScoreProfileHeader(QtWidgets.QHeaderView):
@@ -22,7 +23,10 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
         self.selections = {}
         self._other_popup = None
         self.can_filter = False
+        self._show_profiles = False
+        self.has_profiles = False
         self._expanded = False
+        self._profile_lines = 3
         self._future = None
         self._cancel = Event()
         self._get_executor = get_executor
@@ -31,6 +35,10 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
         self._timer.timeout.connect(self._collect)
         self._brush = _HeaderFilterInteraction(self)
         model.modelReset.connect(self._refresh)
+
+    def set_profiles_visible(self, visible):
+        self._show_profiles = bool(visible)
+        self._refresh()
 
     def _refresh(self):
         if self._other_popup is not None:
@@ -44,7 +52,8 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
         self._brush.reset()
         rows, columns, kinds, preview, filters, source = self.model().profile_input()
         self.can_filter = not preview
-        self._expanded = bool(columns and (rows or filters.selections))
+        self.has_profiles = bool(columns and (rows or filters.selections))
+        self._expanded = self._show_profiles and self.has_profiles
         self._first_profile = self.model().columnCount() - len(columns)
         self.selections = {index: filters.selections[column]
                            for index, column in enumerate(columns, self._first_profile)
@@ -69,10 +78,23 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
             self.profiles = dict(enumerate(future.result(), self._first_profile))
         except Exception:
             traceback.print_exc()
+        lines = max((self._profile_height_in_lines(index, profile)
+                     for index, profile in self.profiles.items()), default=0)
+        if lines != self._profile_lines:
+            self._profile_lines = lines
+            self.updateGeometry()
+            self.geometriesChanged.emit()
         self.viewport().update()
 
     def is_selected(self, index, kind, label=None):
         return any(choice.key == (kind, label) for choice in self.selections.get(index, ()))
+
+    def shows_missing(self, index, profile):
+        return bool(profile.missing or self.is_selected(index, "missing"))
+
+    def _profile_height_in_lines(self, index, profile):
+        body = 3 if profile.bins else len(profile.categories) + self.has_other(index, profile)
+        return body + self.shows_missing(index, profile)
 
     def _other_state(self, index, profile):
         visible = {label for label, _ in profile.categories}
@@ -119,7 +141,7 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
         hint = super().sizeHint()
         if self._expanded:
             line = QtGui.QFontMetrics(self._summary_font()).height() + 1
-            hint.setHeight(hint.height() + 6 * line + 8)
+            hint.setHeight(hint.height() + self._profile_lines * line + 8)
         return hint
 
     def summary_rect(self, section):
@@ -149,15 +171,13 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
         metrics = painter.fontMetrics()
         line = metrics.height() + 1
         painter.setPen(QtGui.QColor("#687078"))
-        missing = f"Missing {profile.missing:,} ({format_proportion(profile.missing, profile.total)})"
-        missing_row = QtCore.QRect(rect.x(), rect.y(), rect.width(), line)
-        missing_selected = self.is_selected(index, "missing")
-        self._paint_checkbox(painter, missing_row, missing, "",
-                             QtCore.Qt.Checked if missing_selected else QtCore.Qt.Unchecked,
-                             enabled=bool(profile.missing or missing_selected))
-        distinct = QtCore.QRect(rect.x(), rect.y() + line, rect.width(), line)
-        self._paint_pair(painter, distinct, f"{profile.distinct:,} distinct", "")
-        rect = rect.adjusted(0, 2 * line, 0, 0)
+        if self.shows_missing(index, profile):
+            missing = (f"Missing {profile.missing:,} ({format_proportion(profile.missing, profile.total)})"
+                       if profile.missing else "Missing filter active")
+            missing_row = QtCore.QRect(rect.x(), rect.y(), rect.width(), line)
+            state = QtCore.Qt.Checked if self.is_selected(index, "missing") else QtCore.Qt.Unchecked
+            self._paint_checkbox(painter, missing_row, missing, "", state)
+            rect = rect.adjusted(0, line, 0, 0)
         if profile.bins:
             limits = next((choice.value for choice in self.selections.get(index, ()) if choice.kind == "range"), None)
             active = profile.bins_overlapping(*limits) if limits else None
@@ -172,7 +192,7 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
                 self._paint_checkbox(painter, row, "Other ▸", format_proportion(profile.other, profile.total),
                                      self._other_state(index, profile))
 
-    def _paint_checkbox(self, painter, row, title, value, state, *, enabled=True):
+    def _paint_checkbox(self, painter, row, title, value, state):
         style = self.style()
         option = QtWidgets.QStyleOptionButton()
         width = style.pixelMetric(QtWidgets.QStyle.PM_IndicatorWidth, option, self)
@@ -183,8 +203,7 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
             QtCore.Qt.PartiallyChecked: QtWidgets.QStyle.State_NoChange,
             QtCore.Qt.Unchecked: QtWidgets.QStyle.State_Off,
         }[state]
-        if enabled:
-            option.state |= QtWidgets.QStyle.State_Enabled
+        option.state |= QtWidgets.QStyle.State_Enabled
         if state != QtCore.Qt.Unchecked:
             painter.fillRect(row, QtGui.QColor("#dbe6fc"))
         style.drawPrimitive(QtWidgets.QStyle.PE_IndicatorCheckBox, option, painter, self)
@@ -202,7 +221,7 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
 
     def _paint_histogram(self, painter, rect, line, profile, selection, active):
         width = max(0, rect.width())
-        height = 3 * line - 4
+        height = _histogram_height(line)
         baseline = rect.y() + height
         peak = max(profile.bins)
         minimum, maximum = profile.minimum, profile.maximum
@@ -234,8 +253,11 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
             if profile is not None:
                 name = self.model().headerData(index, QtCore.Qt.Horizontal, QtCore.Qt.DisplayRole)
                 scope = "rows matching the other filters" if index in self.selections else "displayed rows"
-                lines = [str(name), f"{profile.total:,} {scope} · {profile.distinct:,} distinct",
-                         f"Missing: {profile.missing:,} ({format_proportion(profile.missing, profile.total)})"]
+                lines = [str(name), f"{profile.total:,} {scope} · {profile.distinct:,} distinct"]
+                if profile.missing:
+                    lines.append(f"Missing: {profile.missing:,} ({format_proportion(profile.missing, profile.total)})")
+                if self.is_selected(index, "missing"):
+                    lines.append("Missing filter active")
                 if profile.bins:
                     lines.append(f"Range: {profile.minimum} to {profile.maximum}")
                     limits = next((choice.value for choice in self.selections.get(index, ()) if choice.kind == "range"), None)
@@ -300,11 +322,13 @@ class _HeaderFilterInteraction(QtCore.QObject):
             return None
         line = QtGui.QFontMetrics(self.header._summary_font()).height() + 1
         y = point.y() - rect.top()
-        if y < line and (profile.missing or self.header.is_selected(index, "missing")):
-            return index, "missing", None
-        if profile.bins and 2 * line <= y < 5 * line - 4:
-            return index, "bins", self._bin_at(index, point.x())
-        category = y // line - 2
+        if self.header.shows_missing(index, profile):
+            if y < line:
+                return index, "missing", None
+            y -= line
+        if profile.bins:
+            return (index, "bins", self._bin_at(index, point.x())) if y < _histogram_height(line) else None
+        category = y // line
         if 0 <= category < len(profile.categories):
             return index, "category", category
         if category == len(profile.categories) and self.header.has_other(index, profile):
@@ -357,8 +381,9 @@ class _HeaderFilterInteraction(QtCore.QObject):
         return False
 
 
+def _histogram_height(line):
+    return 2 * line - 4
+
+
 def _edge_label(value):
-    try:
-        return f"{value:.4g}"
-    except OverflowError:
-        return str(value)
+    return format_numeric_cell(value, COLUMN_INTEGER if isinstance(value, int) else COLUMN_NUMBER)

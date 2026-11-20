@@ -15,75 +15,62 @@ _score_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="candidate-sc
 
 
 class SelectionState:
-    def __init__(self, panel, owner, changed):
-        self.panel, self.owner, self.changed = panel, owner, changed
-        self.ids = set()
+    def __init__(self, panel, changed):
+        self.panel, self.changed = panel, changed
         self.revision = 0
         self.updating = False
-        self.source_token = None
+        self.current_id = ""
         panel.dataset_table.selectionModel().selectionChanged.connect(self._changed)
 
-    def _changed(self, selected, deselected):
-        if self.updating:
-            return
-        for ranges, adding in ((deselected, False), (selected, True)):
-            for area in ranges:
-                for row in range(area.top(), area.bottom() + 1):
-                    entry_id = self.panel._dataset_model.entry_id_at(row)
-                    if adding:
-                        self.ids.add(entry_id)
-                    else:
-                        self.ids.discard(entry_id)
-        self.ids.discard("")
-        self.revision += 1
-        self.changed()
+    @property
+    def ids(self):
+        if self.panel._table_mode != "active":
+            return ()
+        model = self.panel._dataset_model
+        rows = self.panel.dataset_table.selectionModel().selectedRows()
+        selected = (model.entry_id_at(row) for row in sorted(index.row() for index in rows))
+        return tuple(entry_id for entry_id in selected if entry_id in self.panel._entry_id_to_active_index)
+
+    def _changed(self, *_):
+        if not self.updating:
+            self.revision += 1
+            self.changed()
 
     def clear(self):
-        self.updating = True
-        try:
-            self.panel.dataset_table.clearSelection()
-            self.ids.clear()
-            self.revision += 1
-        finally:
-            self.updating = False
+        self.panel.dataset_table.clearSelection()
 
-    def model_reset(self, source_token):
-        if source_token != self.source_token:
-            self.ids.clear()
-        self.source_token = source_token
-        self.ids.intersection_update(self.panel._entries_by_id)
-        self.revision += 1
-        if len(self.ids) < 2:
-            return
-        rows = sorted(self.panel._dataset_model.row_for_entry(entry_id) for entry_id in self.ids)
+    def restore(self, entry_ids, cursor_id):
+        model = self.panel._dataset_model
+        rows = sorted(model.row_for_entry(entry_id) for entry_id in entry_ids
+                      if entry_id in self.panel._entry_id_to_active_index)
         selection = QtCore.QItemSelection()
-        start = end = rows[0]
-        for row in rows[1:] + [None]:
-            if row is not None and row == end + 1:
-                end = row
-                continue
-            selection.select(self.panel._dataset_model.index(start, 0), self.panel._dataset_model.index(end, self.panel._dataset_model.columnCount() - 1))
-            start = end = row
+        if rows:
+            start = end = rows[0]
+            for row in rows[1:] + [None]:
+                if row is not None and row == end + 1:
+                    end = row
+                    continue
+                selection.select(model.index(start, 0), model.index(end, model.columnCount() - 1))
+                start = end = row
+        current = model.index(model.row_for_entry(cursor_id), 2)
+        selection_model = self.panel.dataset_table.selectionModel()
+        flags = QtCore.QItemSelectionModel
         self.updating = True
         try:
-            flags = QtCore.QItemSelectionModel.ClearAndSelect | QtCore.QItemSelectionModel.Rows
-            self.panel.dataset_table.selectionModel().select(selection, flags)
-        finally:
-            self.updating = False
-
-    def ensure_current(self, row):
-        if row < 0 or len(self.ids) > 1:
-            return
-        entry_id = self.owner.STATE.current_entry_id()
-        if self.ids == {entry_id}:
-            return
-        self.updating = True
-        try:
-            self.panel.dataset_table.selectRow(row)
-            self.ids = {entry_id}
+            selection_model.setCurrentIndex(current, flags.NoUpdate)
+            selection_model.select(selection, flags.ClearAndSelect | flags.Rows)
             self.revision += 1
         finally:
             self.updating = False
+
+    def select_entry(self, entry_id):
+        if entry_id in self.panel._entry_id_to_active_index and self.ids != (entry_id,):
+            self.restore((entry_id,), entry_id)
+
+    def follow_current(self, entry_id):
+        previous, self.current_id = self.current_id, entry_id
+        if previous and entry_id != previous and self.ids == (previous,):
+            self.select_entry(entry_id)
 
 
 class ScoreController:
@@ -100,9 +87,10 @@ class ScoreController:
 
     def refresh(self, selected_count=1):
         state = self.owner.STATE
-        self.panel.score_footer.setVisible(state.source_mode == "csv" and state.dataset is not None)
-        if self.panel._table_mode == "preview":
-            self.panel.score_footer.show_scores("CSV preview — load to review", [], 0)
+        has_scores = state.source_mode == "csv" and state.dataset is not None and self.panel._table_mode != "preview"
+        self.panel.review.form.score_button.setVisible(has_scores)
+        if not has_scores:
+            self.panel.score_dialog.close()
             return
         signature = (state.dataset_generation, tuple(state.display_columns), self.rules_revision)
         if signature != self.signature:
@@ -120,6 +108,7 @@ class ScoreController:
                 self.future = None
                 self.timer.stop()
         entry = state.current_entry()
+        self.panel.score_dialog.setWindowTitle(f"Scores · {entry.display_name}" if entry else "Candidate scores")
         cards = self.summary.cards(entry) if self.summary is not None and entry is not None else []
         self.panel.score_footer.show_scores(entry.display_name if entry else "No candidate", cards,
                                            state.filtered_count, selected_count, self.future is not None)
@@ -163,18 +152,17 @@ class ReviewController:
         self.draft_store = None
         self.drafts = {}
         self.pending = None
-        self.selection = SelectionState(panel, owner, self.refresh)
+        self.selection = SelectionState(panel, self.refresh)
         self.scores = ScoreController(panel, owner)
 
     def rebuild_form(self):
         if self.form is not None:
             if self.form_targets and self.form.dirty:
-                self.drafts[self.form_targets] = self.form.updates()
-            self.panel.score_footer.setParent(self.panel)
+                self.drafts[frozenset(self.form_targets)] = self.form.updates()
             self.panel.quick_values_layout.removeWidget(self.form)
             self.form.deleteLater()
         self.form = AnnotationForm(self.owner._annotation_fields(), self.panel)
-        self.form.content_layout.insertWidget(0, self.panel.score_footer)
+        self.form.score_button.clicked.connect(self.panel.score_dialog.show)
         self.form.primaryChosen.connect(self._label_clicked)
         self.form.saveRequested.connect(self.save)
         self.form.advanceRequested.connect(self._advance_clicked)
@@ -186,21 +174,20 @@ class ReviewController:
         self.refresh()
 
     def targets(self):
-        if self.selection.ids:
-            return tuple(sorted(self.selection.ids, key=lambda value: self.panel._dataset_model.row_for_entry(value)))
-        current = self.owner.STATE.current_entry_id()
-        return (current,) if current else ()
+        return self.selection.ids
 
     def _draft_changed(self):
         self.form.hint_label.setText("Not saved")
         self._refresh_actions()
 
-    def _refresh_actions(self):
-        targets = self.targets()
+    def _refresh_actions(self, targets=None):
+        if targets is None:
+            targets = self.targets()
+        is_current = targets == (self.owner.STATE.current_entry_id(),)
         if len(targets) > 1:
             text = f"Save {len(targets):,} candidates"
         else:
-            text = "Save and next" if self.panel.auto_advance_cb.isChecked() else "Save"
+            text = "Save and next" if is_current and self.panel.auto_advance_cb.isChecked() else "Save"
         self.form.save_button.setText(text)
         self.form.save_button.setEnabled(self.form.can_save())
         if self.form.dirty:
@@ -208,8 +195,9 @@ class ReviewController:
             message = "Required: " + ", ".join(name.replace("_", " ") for name in missing) if missing else "Not saved"
             self.form.hint_label.setText(message)
             self.form.hint_label.setToolTip(message)
-        self.panel.selection_label.setText(f"{len(targets):,} selected" if len(targets) > 1 else "")
-        self.panel.selection_label.setVisible(len(targets) > 1)
+        self.panel.selection_label.setText(f"{len(targets):,} selected")
+        self.panel.selection_label.setVisible(bool(targets) and not is_current)
+        self.panel.comparison.update_selection(targets)
 
     def refresh(self):
         if self.form is None:
@@ -224,13 +212,13 @@ class ReviewController:
         busy = self.panel._csv_task_kind in {"annotations", "annotation_undo"}
         targets = self.targets()
         current = state.current_entry_id()
-        ready = bool(state.entries and targets) and not self.panel._filter_empty and self.panel._table_mode != "preview" and self.panel._pending_navigation is None and (len(targets) > 1 or targets[0] == current)
+        ready = bool(state.entries and targets) and not self.panel._filter_empty and self.panel._pending_navigation is None
         self.form.setEnabled(ready and not busy)
         self.form.target_label.setText(f"Annotate {len(targets):,} selected candidates" if len(targets) > 1 else "Annotate the displayed candidate")
         signature = (state.dataset_generation, state.annotation_generation, current, self.selection.revision)
         if ready and not busy and signature != self.form_signature:
             if self.form_targets and self.form.dirty:
-                self.drafts[self.form_targets] = self.form.updates()
+                self.drafts[frozenset(self.form_targets)] = self.form.updates()
             self.form_targets = targets
             store = state.row_annotation_store
             values = {entry_id: store.annotations_for(entry_id, refresh=False) for entry_id in targets} if store is not None else {}
@@ -245,9 +233,9 @@ class ReviewController:
                     mixed.add(name)
             required_filled = {field["name"]: all(not missing_required([field], values.get(entry_id, {})) for entry_id in targets)
                                for field in self.form.fields if field["required"]}
-            self.form.load_annotations(common, mixed, self.drafts.get(targets), required_filled=required_filled)
+            self.form.load_annotations(common, mixed, self.drafts.get(frozenset(targets)), required_filled=required_filled)
             self.form_signature = signature
-        self._refresh_actions()
+        self._refresh_actions(targets)
         self.scores.refresh(max(1, len(targets)))
 
     def quick_label(self, value):
@@ -296,7 +284,8 @@ class ReviewController:
         targets = self.targets()
         if not targets or self.owner.STATE.row_annotation_store is None:
             return
-        if (self.owner.STATE.source_mode == "groups" and len(targets) == 1
+        on_displayed_candidate = targets == (self.owner.STATE.current_entry_id(),)
+        if (self.owner.STATE.source_mode == "groups" and on_displayed_candidate
                 and not self.owner._verify_current_object_enabled(check_parents=True)):
             self.panel._show_error("The current group or its parent is hidden. Reload the group before saving.")
             return
@@ -307,7 +296,7 @@ class ReviewController:
             return
         self.pending = {"store": self.owner.STATE.row_annotation_store, "targets": targets,
                         "current": self.owner.STATE.current_entry_id(), "undo": False,
-                        "advance": len(targets) == 1, "updates": updates,
+                        "advance": on_displayed_candidate, "updates": updates,
                         "force_advance": bool(force_advance),
                         "fields": copy.deepcopy(self.form.fields)}
         self.panel._start_csv_task("annotations", self.owner.save_annotations,
@@ -368,11 +357,11 @@ class ReviewController:
         self.panel._dataset_model.update_annotation_entries(displayed)
         self.panel._table_annotation_revision = state.row_annotation_store.revision(refresh=False)
         self.form.dirty.clear()
-        self.drafts.pop(pending["targets"], None)
+        self.drafts.pop(frozenset(pending["targets"]), None)
         self.form_signature = None
         self.panel._schedule_state_save()
         self.panel._refresh_status()
-        if not pending["undo"] and len(pending["targets"]) == 1 and state.current_entry_id() == pending["current"]:
+        if pending["advance"] and state.current_entry_id() == pending["current"]:
             primary = pending["fields"][0]
             value = pending["updates"].get(primary["name"])
             if primary["type"] == "single" and value:

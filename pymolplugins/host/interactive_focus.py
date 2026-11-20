@@ -183,6 +183,8 @@ class InteractiveFocus(Wizard):
             self.cmd.refresh_wizard()
 
     def cleanup(self):
+        from .toolbar import set_focus_active
+        set_focus_active(False)
         self.closed = True
         self.clear()
         close_pocket(self)
@@ -215,4 +217,6 @@ def toggle_focus(api=cmd):
         wizard.cleanup()
         raise
     pocket_for(wizard).attach_layers(wizard)
+    from .toolbar import set_focus_active
+    set_focus_active(True)
     return "started"

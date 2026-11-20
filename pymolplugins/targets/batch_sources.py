@@ -2,6 +2,8 @@
 
 from dataclasses import asdict, dataclass
 import glob
+import hashlib
+import json
 import os
 from pathlib import Path
 import uuid
@@ -40,6 +42,7 @@ class BatchConfig:
     wsl_distribution: str = ""
     save_b: bool = True
     on_error: str = "stop"
+    review_rows: tuple = None
 
 
 @dataclass(frozen=True)
@@ -97,15 +100,30 @@ def _file_inputs(config):
         else:
             left_names, right_names = (glob.glob(id_pattern_glob(path, config.match)) for path in (left, right))
             left_pattern, right_pattern = left, right
+        scoped = _review_files(left_names, config.review_rows) if config.review_rows is not None else None
         return id_pairs(left_names, right_names, left_pattern, right_pattern, config.ids,
-                        case_sensitive=os.name != "nt", match=config.match)
+                        case_sensitive=os.name != "nt", match=config.match, review_files=scoped)
     pattern = os.path.join(glob.escape(left), "*") if os.path.isdir(left) else left
     names = sorted((name for name in glob.glob(pattern)
                     if os.path.isfile(name) and name.lower().endswith(STRUCTURE_SUFFIXES)), key=natural_key)
+    if config.review_rows is not None:
+        names = _review_files(names, config.review_rows)
     reference = native_path(config.b)
     pairs = reference_pairs([name for name in names if not _same_file(name, reference)], reference)
+    return _select_pairs(pairs, config.ids)
+
+
+def _review_files(names, rows):
+    available = {os.path.normcase(native_path(name)): native_path(name) for name in names}
+    keys = tuple(dict.fromkeys(os.path.normcase(native_path(name)) for _, name in rows))
+    if any(key not in available for key in keys):
+        raise ValueError("The current pairing cannot find every review file. Reopen Batch from the review or check the inputs.")
+    return [available[key] for key in keys]
+
+
+def _select_pairs(pairs, ids):
     indexed = {pair.identifier: pair for pair in pairs}
-    return tuple(indexed[value] for value in select_ids(indexed, config.ids))
+    return tuple(indexed[value] for value in select_ids(indexed, ids))
 
 
 def _resolver(config):
@@ -131,6 +149,11 @@ def _resolved(resolver, raw, base, identifier, side):
     return native_path(result.resolved_path)
 
 
+def csv_review_key(entry):
+    payload = json.dumps(entry.raw_values, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return entry.ordinal, entry.source_path, hashlib.sha256(payload).hexdigest()
+
+
 def _csv_inputs(config, event):
     if config.mode == "paired" and not config.id_column:
         raise ValueError("Paired CSV processing requires an explicit ID column")
@@ -140,8 +163,15 @@ def _csv_inputs(config, event):
                                delimiter=config.delimiter).load(cancel_event=event)
     if config.mode == "paired" and config.b not in dataset.columns:
         raise ValueError("B column is not an exact CSV header: " + config.b)
+    entries = dataset.entries
+    if config.review_rows is not None:
+        ordinals = {key[0] for key in config.review_rows}
+        indexed_rows = {csv_review_key(entry): entry for entry in entries if entry.ordinal in ordinals}
+        if any(row not in indexed_rows for row in config.review_rows):
+            raise ValueError("The review rows have changed in the CSV. Reload the review and open Batch again.")
+        entries = tuple(indexed_rows[row] for row in config.review_rows)
     indexed = {}
-    for entry in dataset.entries:
+    for entry in entries:
         _cancelled(event)
         if entry.validation_errors:
             raise ValueError("CSV row %s: %s" % (entry.row_number, "; ".join(entry.validation_errors)))

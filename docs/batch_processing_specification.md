@@ -1,12 +1,12 @@
 # Batch Processing：批量处理结构
 
-对自己的结构目录或 CSV 运行相同的成对操作：打开 **Plugin → PymolPlugins: Batch Processing**，选择固定参考或按 ID 配对，先点 **Preview pairs**，核对后点 **Run batch**。结果写入单独输出目录及 JSON 报告。直接跳到 [操作步骤](#usage)；后面的合同和验收保留 0.6.0 的历史背景。
+对自己的结构目录或 CSV 运行相同的成对操作：打开 **Plugin → PymolPlugins → Pair and export files…**，选择固定参考或按 ID 配对，先点 **Preview pairs**，核对后点 **Run batch**。结果写入单独输出目录及 JSON 报告。直接跳到 [操作步骤](#usage)；后面的合同和验收保留 0.6.0 的历史背景。
 
 窗口默认嵌入 PyMOL；可在窗口模式菜单切换浮动，当前计划、预览和运行状态保留。详见 [窗口模式](workspace_window_modes.md)。
 
 ## Usage
 
-打开 **Plugin → PymolPlugins: Batch Processing**，或在 PyMOL 控制台运行 `pp_batch`。也可从 Annotator 的 **Data → Batch processing...** 进入；它带入当前数据源和路径映射，不移动审阅位置。
+打开 **Plugin → PymolPlugins → Pair and export files…**，或在 PyMOL 控制台运行 `pp_batch`。也可从 Annotator 的 **Review tools → Pair and export files…** 进入。默认带入当前审阅范围或显式多选行。需要处理整张表时选择 **Entire source**，再重新预览。源表的过滤、抽样和当前审阅位置仍可在原窗口继续查看。
 
 ### 所有结构对同一参考
 

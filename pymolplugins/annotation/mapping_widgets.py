@@ -5,6 +5,7 @@ import traceback
 from pymol.Qt import QtCore, QtWidgets
 
 from .mapping_store import read_mapping_store_readonly, remove_mapping_profile, upsert_mapping_profile, validate_mapping_profile
+from .model import format_numeric_cell
 from .path_resolver import PathResolver
 from .panel_style import StatusLabel
 
@@ -306,21 +307,37 @@ class MappingProfileDialog(QtWidgets.QDialog):
 
 
 class MappingPreviewDialog(QtWidgets.QDialog):
-    def __init__(self, payload, parent=None):
+    def __init__(self, payload, parent=None, *, column_kinds=None):
         super().__init__(parent)
-        self.setWindowTitle("Path mapping preview")
+        self.setWindowTitle("CSV preview · file paths and scores")
         self.resize(1050, 470)
         layout = QtWidgets.QVBoxLayout(self)
         counts = ", ".join("%s: %s" % item for item in payload.get("status_counts", {}).items())
         layout.addWidget(QtWidgets.QLabel("%s of %s rows. %s" %
                                           (len(payload.get("rows", [])), payload.get("row_count", 0), counts)))
-        self.table = _table(["Row", "Raw CSV path", "Computer path", "Status", "Details"])
-        for index, value in enumerate(payload.get("rows", [])):
+        columns = payload.get("display_columns", ())
+        column_kinds = column_kinds or {}
+        self.table = _table(["Status", *columns, "Raw CSV path", "Computer path", "Details"])
+        rows = payload.get("rows", [])
+        path_start = 1 + len(columns)
+        for index, value in enumerate(rows):
             self.table.insertRow(index)
-            for column, key in enumerate(("row_number", "raw_path", "resolved_path", "status", "error")):
+            _cell(self.table, index, 0, value.get("status") or "")
+            metadata = value.get("metadata", {})
+            for column, name in enumerate(columns, 1):
+                raw = metadata.get(name, "")
+                _cell(self.table, index, column, format_numeric_cell(raw, column_kinds.get(name, "")))
+                self.table.item(index, column).setToolTip(str(raw))
+            for column, key in enumerate(("raw_path", "resolved_path", "error"), path_start):
                 _cell(self.table, index, column, value.get(key) or "")
+        self.table.setVerticalHeaderLabels([str(row.get("row_number") or "") for row in rows])
+        gutter = self.table.verticalHeader()
+        gutter.setObjectName("sourceRowGutter")
+        gutter.setDefaultAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        gutter.setSectionsClickable(False)
+        gutter.setMaximumWidth(56)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.table.setColumnWidth(1, 330)
-        self.table.setColumnWidth(2, 330)
+        self.table.setColumnWidth(path_start, 290)
+        self.table.setColumnWidth(path_start + 1, 290)
         layout.addWidget(self.table, 1)
         layout.addWidget(_button("Close", self.close))

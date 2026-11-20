@@ -24,7 +24,7 @@ INSTALL_TEXT = """# 安装 PymolPlugins（{version}）
 1. 在 PyMOL 打开 **Plugin > Plugin Manager > Install New Plugin**。
 2. 选择下载的原始 ZIP；不要解压。安装完成后完全退出并重启 PyMOL。
 3. 打开 **Plugin > PymolPlugins > Getting Started** 查看五步入门向导与功能介绍。
-   向导中的按钮可直接打开数据和审阅界面；Structure Annotator 右上角 **?** 也可随时重开向导。
+   向导中的按钮可直接打开数据和审阅界面；Structure Annotator 右上角 **Help** 也可随时重开向导。
 4. 在 **Open from** 选择 **This computer**，或选择已有的 SSH **Host** 别名。
 5. 在 **Path** 粘贴真实的结构文件夹、CSV 或 TSV 路径；也可以用 **Browse…**。
 6. 点 **Open**。一般不用改 **Import options**。如需 **Structure column**，
@@ -110,10 +110,10 @@ review.json 的 steps 列表定义命名对象和命令的执行顺序。固定�
 
 - **Plugin > PymolPlugins > Show presets…**（或 `pp_view`）用于调整已加载分子的显示。
 - 在 PyMOL 控制台运行 `pp_help` 查看常用命令。
-- **Plugin > PymolPlugins > Batch Processing**（或 `pp_batch`）用于批量结构处理。
+- **Plugin > PymolPlugins > Pair and export files…**（或 `pp_batch`）用于批量结构处理。
 - **Settings > Automation > Viewing presets…** 提供保持相机、界面表面、固定参考叠合、候选 Cα 对齐，以及PPI、PLI、寡聚体、膜蛋白、DNA/RNA、cartoon和surface草稿；不需要API。参考预设需选择已加载的固定 Review steps 对象。原生 align 会创建或更新 _align1/_align2；对齐只移动候选，需检查复合物的链对应。
 - **AI command drafts… > AI settings…** 可选择原Codex或自定义API地址/Key/模型及Responses/Chat Completions格式。Remember key使用Windows账户加密，否则Key仅保留到PyMOL退出。
-- 预设和AI都先预览、编辑、确认插入，再点 **Apply commands**；生成不执行。
+- 预设和AI都先预览、编辑、确认插入，再点 **Save commands**；生成不执行。
 - 可选 PLIP/PyRosetta workers 和 ANVIL 不包含在 ZIP 中。
 """
 

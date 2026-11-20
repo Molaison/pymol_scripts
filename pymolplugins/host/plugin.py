@@ -727,29 +727,27 @@ def __init_plugin__(app=None):
     from pymolplugins.navigation.qt_keys import install_qt_navigation_keys
     from .toolbar import install_toolbar
 
+    entries = (
+        ("Review structures…", "Review", "Open, label and export review data", show_structure_annotator_from_toolkit),
+        ("Change scene view…", "Scene view", "Change a loaded object's view or the scene lighting", pp_view),
+        ("Click to focus", "Click to focus", "Inspect contacts around a point in the scene", toggle_interactive_focus),
+        ("Align loaded objects…", "Align objects", "Compare objects already in the PyMOL scene", show_comparison_from_toolkit),
+        ("Pair and export files…", "Batch files", "Pair input files and write processed structures", show_batch_processing_from_toolkit),
+        ("RFD4 · Proteina", "RFD4", "Open the RFD4 Studio workflow", show_rfd4_from_toolkit),
+    )
+    for label, _, _, callback in entries:
+        addmenuitemqt("PymolPlugins|" + label, callback)
     for label, callback in (
-        ("Structure views…", pp_view),
-        ("Interactive focus", toggle_interactive_focus),
-        ("Compare & align…", show_comparison_from_toolkit),
-        ("Structure Annotator", show_structure_annotator_from_toolkit),
-        ("Batch Processing", show_batch_processing_from_toolkit),
-        ("RFD4 · Proteina", show_rfd4_from_toolkit),
         ("Getting Started", pp_wizard),
-        ("Command Help", pp_help),
+        ("Command Help…", lambda: pp_wizard("tools")),
         ("Maintenance|Updates", show_updates_from_toolkit),
         ("Maintenance|Doctor", pp_doctor),
         ("Maintenance|Capabilities", pp_capabilities),
         ("Maintenance|Reload toolkit", pp_load),
     ):
         addmenuitemqt("PymolPlugins|" + label, callback)
-    install_toolbar((
-        ("Annotator", "Structure Annotator", show_structure_annotator_from_toolkit),
-        ("Views", "Structure views", pp_view),
-        ("Focus", "Interactive focus", toggle_interactive_focus),
-        ("Compare", "Compare & align", show_comparison_from_toolkit),
-        ("Batch", "Batch Processing", show_batch_processing_from_toolkit),
-        ("RFD4", "RFD4 · Proteina", show_rfd4_from_toolkit),
-    ))
+    install_toolbar(((text, tip, callback) for _, text, tip, callback in entries),
+                    focus_callback=toggle_interactive_focus)
     install_qt_navigation_keys()
     from .updater_widgets import start_update_check
     start_update_check()

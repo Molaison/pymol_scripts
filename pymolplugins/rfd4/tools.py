@@ -21,6 +21,8 @@ class ViewTools(QtWidgets.QDialog):
         self.tool.addItems(["PyMOL 显示", "配色与光照", "Molaison Contacts", "Molaison 按序列选择",
                             "服务端相互作用分析"])
         layout.addWidget(self.tool)
+        self.scope = CompactLabel()
+        layout.addWidget(self.scope)
         self.stack = QtWidgets.QStackedWidget()
         self.tool.currentIndexChanged.connect(self.stack.setCurrentIndex)
         layout.addWidget(self.stack)
@@ -71,7 +73,7 @@ class ViewTools(QtWidgets.QDialog):
         self.apply_button = apply
         apply.clicked.connect(self.apply)
         row.addWidget(apply)
-        undo = QtWidgets.QPushButton("撤销")
+        undo = QtWidgets.QPushButton("清除接触标记")
         undo.setAutoDefault(False)
         undo.setToolTip("清除本窗口生成的接触组")
         self.undo_button = undo
@@ -81,10 +83,20 @@ class ViewTools(QtWidgets.QDialog):
         self.status = CompactLabel()
         layout.addWidget(self.status)
         self.tool.currentIndexChanged.connect(self._tool_changed)
+        self.visible.toggled.connect(lambda: self._tool_changed(self.tool.currentIndex()))
+        self._tool_changed(0)
+        from pymolplugins.annotation.panel_style import apply_style
+        apply_style(self, "rfd4ViewTools")
 
     def _tool_changed(self, mode):
-        self.apply_button.setVisible(mode != 1)
-        self.undo_button.setVisible(mode != 1)
+        actions = ("显示当前表示" if self.visible.isChecked() else "隐藏当前表示", "",
+                   "计算接触", "查找并选择序列", "生成相互作用报告")
+        scopes = ("当前结构的表示方式 · 序列条影响整个场景", "配色针对当前结构 · 光照影响整个场景",
+                  "在当前结构上创建接触标记", "在当前结构中创建 PyMOL 选择", "分析当前结构 · 结果写入任务详情")
+        self.scope.setText(scopes[mode])
+        self.apply_button.setText(actions[mode])
+        self.apply_button.setVisible(bool(actions[mode]))
+        self.undo_button.setVisible(mode == 2)
 
     def _open_appearance(self, tab):
         from pymolplugins.host.show_presets import show_presets
@@ -152,7 +164,7 @@ class ViewTools(QtWidgets.QDialog):
                     lambda: self.panel.api.request("POST", "/api/sessions/%s/interactions/analyze" % sid, payload),
                     done, "正在分析结构相互作用…")
                 return
-            self.status.setText("查看工具已应用。")
+            self.status.setText(self.apply_button.text() + " · 完成")
         except Exception as error:
             self.status.setText(str(error))
             self.status.set_error()

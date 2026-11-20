@@ -277,10 +277,10 @@ def _cylinders(api, source, kind, pairs, color, radius, dash, *, zoom=-1):
         return name
 
 
-def _dots(api, source, kind, points, color, radius):
+def _dots(api, source, kind, points, color, radius, *, opacity=0.78):
     from pymol.cgo import ALPHA, COLOR, SPHERE
 
-    body = [ALPHA, 0.78, COLOR, *color]
+    body = [ALPHA, opacity, COLOR, *color]
     for xyz in points:
         body.extend((SPHERE, *map(float, xyz), radius))
     if len(body) > 6:

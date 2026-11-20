@@ -3,7 +3,7 @@
 from traceback import print_exc
 
 
-def install_toolbar(entries):
+def install_toolbar(entries, focus_callback=None):
     try:
         from pymol.gui import get_qtwindow
         from pymol.Qt import QtCore, QtWidgets
@@ -30,6 +30,9 @@ def install_toolbar(entries):
     for text, description, callback in entries:
         action = toolbar.addAction(text)
         action.setToolTip(description)
+        if callback is focus_callback:
+            action.setCheckable(True)
+            action.setObjectName("pymolplugins-focus")
         action.triggered.connect(lambda _checked, run=callback: launch(run))
     area = QtCore.Qt.TopToolBarArea
     main_toolbar = getattr(window, "topToolBar", None)
@@ -37,3 +40,19 @@ def install_toolbar(entries):
         window.addToolBarBreak(area)
         main_toolbar.visibilityChanged.connect(toolbar.setVisible)
     window.addToolBar(area, toolbar)
+
+
+def set_focus_active(active):
+    try:
+        from pymol.gui import get_qtwindow
+        from pymol.Qt import QtWidgets
+    except ImportError:
+        return
+    window = get_qtwindow()
+    if isinstance(window, QtWidgets.QMainWindow):
+        toolbar = window.findChild(QtWidgets.QToolBar, "pymolplugins-toolbar")
+        if toolbar:
+            for action in toolbar.actions():
+                if action.objectName() == "pymolplugins-focus":
+                    action.setChecked(active)
+                    return

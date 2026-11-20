@@ -356,7 +356,7 @@ class AICommandDialog(QtWidgets.QDialog):
         layout.addWidget(self.previews, 1)
         footer = QtWidgets.QHBoxLayout()
         self.insert_button = QtWidgets.QPushButton("Insert draft…")
-        self.insert_button.setToolTip("Replace selected command drafts only. Use Apply commands in Settings to enable them.")
+        self.insert_button.setToolTip("Replace selected command drafts only. Use Save commands in Saved review commands when ready.")
         self.insert_button.setEnabled(False)
         self.insert_button.clicked.connect(self.insert)
         self.apply_view_button = QtWidgets.QPushButton("Apply and view…")
@@ -623,7 +623,7 @@ class AICommandDialog(QtWidgets.QDialog):
              "On-open Review steps will execute. After-label commands are saved for future labels."
              if execute else
              "Replace drafts for %d selected triggers? Other editors are unchanged.\n"
-             "Nothing will execute. You must still use Apply commands in Settings." % len(drafts)),
+             "Nothing will execute. Use Save commands in Saved review commands when ready." % len(drafts)),
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
         if answer != QtWidgets.QMessageBox.Yes:
             return

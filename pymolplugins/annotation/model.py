@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
+from decimal import Decimal, InvalidOperation
 import math
 import re
 from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple
@@ -108,6 +109,26 @@ def display_value(raw: str, kind: str) -> object:
     if kind == COLUMN_NUMBER:
         return float(stripped)
     return text
+
+
+def format_numeric_cell(raw: object, kind: str = COLUMN_NUMBER) -> str:
+    """Format decimal scores for display and leave raw data in the dataset."""
+    text = "" if raw is None else str(raw)
+    if kind != COLUMN_NUMBER or not text.strip():
+        return text
+    try:
+        value = Decimal(text.strip())
+    except InvalidOperation:
+        return text
+    if not value.is_finite():
+        return text
+    if not value:
+        return "0.00"
+    exponent = value.adjusted()
+    if exponent < -3 or exponent >= 8:
+        mantissa, power = format(value, ".2e").split("e")
+        return f"{mantissa}e{int(power):+03d}"
+    return format(value, f".{max(2, 2 - exponent)}f")
 
 
 @dataclass(frozen=True)
