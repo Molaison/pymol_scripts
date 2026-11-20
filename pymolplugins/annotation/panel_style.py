@@ -1,5 +1,6 @@
 """Shared visual hierarchy for annotation and batch workspaces."""
 
+from pathlib import Path
 import re
 import sys
 
@@ -61,8 +62,29 @@ QToolButton[role='icon'] {
     min-width: 34px; max-width: 34px; min-height: 34px; max-height: 34px;
 }
 QToolButton[role='icon']:hover { background: #eef1f4; }
-QToolButton[role='icon']::menu-indicator { image: none; width: 0; }
-QToolButton::menu-button { background: transparent; border: 0; }
+QComboBox {
+    min-height: 28px; padding: 0 27px 0 7px;
+    background: white; border: 1px solid #d8dce0; border-radius: 4px;
+}
+QComboBox:focus { border-color: #356ae6; }
+QComboBox:disabled { background: #f5f7fa; color: #9ba6b6; }
+QComboBox::drop-down {
+    subcontrol-origin: padding; subcontrol-position: top right;
+    width: 26px; border: 0; background: transparent;
+}
+QToolButton::menu-button { background: transparent; border: 0; width: 24px; }
+QToolButton::menu-indicator, QPushButton::menu-indicator {
+    subcontrol-origin: padding; subcontrol-position: center right; right: 3px;
+}
+QComboBox::down-arrow, QToolButton::menu-arrow,
+QToolButton::menu-indicator, QPushButton::menu-indicator {
+    width: 16px; height: 16px; image: url("DROPDOWN_ICON");
+}
+QComboBox::down-arrow:disabled, QToolButton::menu-arrow:disabled,
+QToolButton::menu-indicator:disabled, QPushButton::menu-indicator:disabled {
+    image: url("DROPDOWN_DISABLED_ICON");
+}
+QToolButton[role='icon']::menu-indicator { image: none; width: 0; height: 0; }
 QPushButton[role='segment'] { padding: 8px 16px; }
 QPushButton[role='segment']:checked { background: #eaf0ff; border-color: #9db4e5; color: #2854ab; }
 QLineEdit, QPlainTextEdit {
@@ -74,7 +96,7 @@ QLineEdit:disabled { background: #f5f7fa; color: #9ba6b6; }
 QLabel[role='error'], QPlainTextEdit[role='error'] {
     color: #982e36; background: #fff0f1; border: 0; padding: 10px; border-radius: 6px;
 }
-QComboBox, QSpinBox { min-height: 28px; }
+QSpinBox { min-height: 28px; }
 QTableWidget QComboBox, QTableWidget QSpinBox { min-height: 24px; }
 QTableWidget QLineEdit { padding: 2px 5px; }
 QPlainTextEdit#commandEditor { font-family: Consolas; font-size: 10pt; }
@@ -156,9 +178,12 @@ _STYLE_COLORS = re.compile(r"#[0-9a-f]{6}\b|#fff\b|\bwhite\b")
 
 def workspace_style():
     """Return the workspace style using the effective macOS application palette."""
+    icons = Path(__file__).resolve().parents[1] / "host" / "icons"
+    style = STYLE.replace("DROPDOWN_ICON", (icons / "chevron-down.png").as_posix())
+    style = style.replace("DROPDOWN_DISABLED_ICON", (icons / "chevron-down-disabled.png").as_posix())
     if sys.platform != "darwin":
-        return STYLE
-    style = STYLE.replace("font-family: 'Segoe UI'; ", "").replace("Consolas", "Menlo")
+        return style
+    style = style.replace("font-family: 'Segoe UI'; ", "").replace("Consolas", "Menlo")
     # Use the Windows logical font heights without relying on Cocoa's point DPI.
     for points, pixels in ((9, 12), (10, 13), (12, 16), (15, 20)):
         style = style.replace(f"font-size: {points}pt", f"font-size: {pixels}px")
