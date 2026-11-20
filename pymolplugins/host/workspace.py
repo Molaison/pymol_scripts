@@ -6,6 +6,8 @@ import traceback
 
 from pymol.Qt import QtCore, QtGui, QtWidgets
 
+from .ui_icons import set_tool_icon
+
 
 _MODES = {"docked": "Embedded in PyMOL", "floating": "Floating window"}
 _FIT_MARGIN = 24
@@ -80,7 +82,7 @@ class WindowModeButton(QtWidgets.QToolButton):
         self.setFixedSize(34, 34)
         self.setAccessibleName("Window mode")
         self.setToolTip("Window mode")
-        self.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_TitleBarNormalButton))
+        set_tool_icon(self, "window")
         self.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         menu = QtWidgets.QMenu(self)
         action_group_class = getattr(QtWidgets, "QActionGroup", None) or QtGui.QActionGroup

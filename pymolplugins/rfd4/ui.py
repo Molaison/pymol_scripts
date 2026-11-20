@@ -1,6 +1,8 @@
 """Small native Qt components; never change the application's stylesheet."""
 from pymol.Qt import QtCore, QtGui, QtWidgets
 
+from pymolplugins.host.ui_icons import set_tool_icon
+
 
 class CompactLabel(QtWidgets.QLabel):
     """Keep the complete text for scripts/tooltips without widening the panel."""
@@ -76,13 +78,13 @@ class Disclosure(QtWidgets.QToolButton):
         self.setCheckable(True)
         self.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
         self.setText(title)
-        self.setArrowType(QtCore.Qt.RightArrow)
+        set_tool_icon(self, "right")
         widget.hide()
         self.toggled.connect(self._toggle)
 
     def _toggle(self, checked):
         self.content.setVisible(checked)
-        self.setArrowType(QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow)
+        set_tool_icon(self, "down" if checked else "right")
 
 
 def collapsible(title, widget, layout):

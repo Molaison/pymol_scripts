@@ -189,7 +189,7 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
                 self._paint_checkbox(painter, row, name, format_proportion(count, profile.total), state)
             if self.has_other(index, profile):
                 row = QtCore.QRect(rect.x(), rect.y() + line * len(profile.categories), rect.width(), line)
-                self._paint_checkbox(painter, row, "Other ▸", format_proportion(profile.other, profile.total),
+                self._paint_checkbox(painter, row, "Other…", format_proportion(profile.other, profile.total),
                                      self._other_state(index, profile))
 
     def _paint_checkbox(self, painter, row, title, value, state):

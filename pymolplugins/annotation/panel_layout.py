@@ -2,6 +2,8 @@
 
 from pymol.Qt import QtCore, QtWidgets
 
+from pymolplugins.host.ui_icons import set_tool_icon
+
 from .qt_widgets import CollapsibleSection, ColumnPicker, qt_enum
 from .review_widgets import ScoreFooter
 from .panel_style import ElidedLabel, StatusLabel, apply_style, card
@@ -87,7 +89,7 @@ def _header(panel, layout):
     header.setSpacing(4)
     panel.back_button = QtWidgets.QToolButton()
     panel.back_button.setText("Back")
-    panel.back_button.setArrowType(QtCore.Qt.LeftArrow)
+    set_tool_icon(panel.back_button, "left")
     panel.back_button.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
     panel.back_button.setProperty("role", "quiet")
     panel.back_button.clicked.connect(panel._back_to_review)
@@ -734,8 +736,8 @@ def _loading_settings(panel, layout):
 def _navigation(panel, layout):
     panel.prev_btn = QtWidgets.QToolButton()
     panel.next_btn = QtWidgets.QToolButton()
-    panel.prev_btn.setArrowType(QtCore.Qt.LeftArrow)
-    panel.next_btn.setArrowType(QtCore.Qt.RightArrow)
+    set_tool_icon(panel.prev_btn, "left")
+    set_tool_icon(panel.next_btn, "right")
     panel.prev_btn.clicked.connect(panel._prev)
     panel.next_btn.clicked.connect(panel._next)
     panel.prev_btn.setAccessibleName("Previous structure")

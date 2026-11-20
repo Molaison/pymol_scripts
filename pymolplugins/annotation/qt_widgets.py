@@ -5,6 +5,8 @@ import re
 
 from pymol import cmd
 from pymol.Qt import QtCore, QtGui, QtWidgets
+
+from pymolplugins.host.ui_icons import set_tool_icon
 from .filter_values import FilterValueCatalog
 from .filtering import COMPARISON_OPERATORS, TEXT_OPERATORS, column_expression
 from .history_store import fuzzy_matches
@@ -474,4 +476,4 @@ class CollapsibleSection(QtWidgets.QWidget):
 
     def set_expanded(self, expanded):
         self.content.setVisible(bool(expanded))
-        self.toggle.setArrowType(qt_enum("ArrowType", "DownArrow" if expanded else "RightArrow"))
+        set_tool_icon(self.toggle, "down" if expanded else "right")

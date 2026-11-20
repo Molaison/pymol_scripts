@@ -10,6 +10,8 @@ import math
 import sys
 
 from pymol.Qt import QtCore, QtWidgets
+
+from pymolplugins.host.ui_icons import set_tool_icon
 from .ui import CompactLabel, collapsible
 
 
@@ -161,7 +163,7 @@ class _FormEditor(QtWidgets.QWidget):
     def _note(self, text):
         if self._help_button is None:
             self._help_button = QtWidgets.QToolButton()
-            self._help_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxInformation))
+            set_tool_icon(self._help_button, "info")
             self._help_button.setAccessibleName("编辑说明")
             self._form.addRow(self._help_button)
             help_button = self._help_button

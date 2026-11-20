@@ -279,9 +279,9 @@ class SourceLocationControls(QtWidgets.QWidget):
         self.connection.blockSignals(True)
         try:
             self.connection.clear()
-            self.connection.addItem(self.style().standardIcon(QtWidgets.QStyle.SP_ComputerIcon), "This computer")
+            self.connection.addItem("This computer")
             for profile in profiles:
-                self.connection.addItem(self.style().standardIcon(QtWidgets.QStyle.SP_DriveNetIcon), profile)
+                self.connection.addItem(profile)
             self.connection.setCurrentText(chosen or "This computer")
             self.completion.set_columns(["This computer"] + profiles)
         finally:

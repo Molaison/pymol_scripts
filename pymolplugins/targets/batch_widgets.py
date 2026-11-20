@@ -13,6 +13,7 @@ from pymolplugins.annotation.mapping_store import read_mapping_store_readonly
 from pymolplugins.annotation.panel_style import apply_style
 from pymolplugins.annotation.qt_widgets import CollapsibleSection
 from pymolplugins.annotation.sources.csv_source import read_csv_header
+from pymolplugins.host.ui_icons import set_tool_icon
 from pymolplugins.host.workspace import WindowModeButton, show_workspace, workspace_closed
 from .batch_runner import BatchRunner
 from .batch_sources import BatchConfig, native_path, prepare_batch
@@ -68,11 +69,12 @@ class PairTableModel(QtCore.QAbstractTableModel):
             self.dataChanged.emit(self.index(max(0, start), 0), self.index(min(end, len(self.rows) - 1), 5))
 
 
-def _line_with_browse(dialog, callback):
+def _line_with_browse(callback):
     line = QtWidgets.QLineEdit()
     button = QtWidgets.QToolButton()
-    button.setIcon(dialog.style().standardIcon(QtWidgets.QStyle.SP_DirOpenIcon))
+    set_tool_icon(button, "folder")
     button.setToolTip("Browse")
+    button.setAccessibleName("Browse")
     button.setProperty("role", "icon")
     button.setFixedSize(34, 34)
     button.clicked.connect(callback)
@@ -97,8 +99,9 @@ def _columns(dialog, form):
         columns.addWidget(QtWidgets.QLabel(title))
         columns.addWidget(widget, 1)
     dialog.headers_button = QtWidgets.QToolButton()
-    dialog.headers_button.setIcon(dialog.style().standardIcon(QtWidgets.QStyle.SP_BrowserReload))
+    set_tool_icon(dialog.headers_button, "reload")
     dialog.headers_button.setToolTip("Read CSV columns")
+    dialog.headers_button.setAccessibleName("Read CSV columns")
     dialog.headers_button.setProperty("role", "icon")
     dialog.headers_button.setFixedSize(34, 34)
     dialog.headers_button.clicked.connect(dialog.read_headers)
@@ -153,11 +156,11 @@ def _input_page(dialog):
     row.addWidget(dialog.mode, 1)
     form.addRow("Input / pairing", selectors)
     _pattern_options(dialog, form)
-    dialog.a_edit, a_row = _line_with_browse(dialog, dialog.browse_a)
+    dialog.a_edit, a_row = _line_with_browse(dialog.browse_a)
     dialog.a_label = QtWidgets.QLabel("Candidate files")
     form.addRow(dialog.a_label, a_row)
     _columns(dialog, form)
-    dialog.b_edit, dialog.b_file_row = _line_with_browse(dialog, dialog.browse_b)
+    dialog.b_edit, dialog.b_file_row = _line_with_browse(dialog.browse_b)
     dialog.b_column = QtWidgets.QComboBox()
     dialog.b_column.setEditable(True)
     dialog.b_stack = QtWidgets.QStackedWidget()
@@ -170,7 +173,7 @@ def _input_page(dialog):
     dialog.ids.setPlaceholderText("1-20,25")
     dialog.ids.setToolTip("Empty selects all IDs. Comma-separated IDs and numeric ranges are accepted.")
     form.addRow("Limit to IDs", dialog.ids)
-    dialog.output, output_row = _line_with_browse(dialog, dialog.browse_output)
+    dialog.output, output_row = _line_with_browse(dialog.browse_output)
     form.addRow("Output directory", output_row)
     dialog.save_b = QtWidgets.QCheckBox("Also save processed reference")
     dialog.on_error = QtWidgets.QComboBox()
@@ -251,13 +254,13 @@ def _footer(dialog, layout):
     dialog.error_box.hide()
     layout.addWidget(dialog.error_box)
     row = QtWidgets.QHBoxLayout()
-    for name, title, icon, callback in (
-        ("preview_button", "Preview pairs", QtWidgets.QStyle.SP_FileDialogDetailedView, dialog.preview),
-        ("stop_button", "Stop", QtWidgets.QStyle.SP_MediaStop, dialog.stop),
-        ("export_button", "Export results", QtWidgets.QStyle.SP_DialogSaveButton, dialog.export_results),
-        ("run_button", "Run batch", QtWidgets.QStyle.SP_MediaPlay, dialog.run_batch),
+    for name, title, callback in (
+        ("preview_button", "Preview pairs", dialog.preview),
+        ("stop_button", "Stop", dialog.stop),
+        ("export_button", "Export results", dialog.export_results),
+        ("run_button", "Run batch", dialog.run_batch),
     ):
-        button = QtWidgets.QPushButton(dialog.style().standardIcon(icon), title)
+        button = QtWidgets.QPushButton(title)
         button.setAutoDefault(False)
         button.clicked.connect(callback)
         setattr(dialog, name, button)
