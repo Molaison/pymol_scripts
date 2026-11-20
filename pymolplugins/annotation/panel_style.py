@@ -57,6 +57,7 @@ QToolButton[role='view'] { background: transparent; border-color: transparent; c
 QToolButton[role='view']:hover { background: #edf2fa; }
 QToolButton[role='view']:checked { background: #eaf0ff; border-color: #9db4e5; color: #2854ab; }
 QToolButton[role='view']:disabled { color: #9ba1a8; }
+QToolButton[popupMode='1'], QToolButton[popupMode='2'] { padding-right: 28px; }
 QToolButton[role='icon'] {
     background: transparent; border: 0; padding: 0;
     min-width: 34px; max-width: 34px; min-height: 34px; max-height: 34px;
