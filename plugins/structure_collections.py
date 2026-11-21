@@ -461,7 +461,7 @@ class CollectionPreview:
         width, height = cmd.get_viewport()
         target_view = core.collection_view(manifest, max(width, 64), max(height, 64))
         try:
-            cmd.load(row["path"], staged, quiet=1)
+            core.load_structure(cmd, row["path"], staged)
             expected = row.get("coordinate_signature")
             sort_for_validation = (
                 expected is not None and cmd.get_setting_boolean("retain_order", staged)

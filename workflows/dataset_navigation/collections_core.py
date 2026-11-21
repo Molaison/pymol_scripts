@@ -28,6 +28,38 @@ ORIENTATION_KEYS = ("target", "binder", "orientation", "reference",
                     "frame_selection", "symmetry_axis")
 STALE_POSE = "源结构坐标已变化，请重新应用朝向后再导出。"
 SAMPLE_CSV_COLUMNS = ("id", "path", "stratum", "nearest_rmsd")
+PDB_SUSPECT_COORDINATES = re.compile(
+    rb"(?:^|(?<=\r))(?:ATOM  |HETATM)[^\r\n]{24}"
+    rb"(?=[^\r\n]{0,21}(?:nan|inf|0x|e[+-]?\d))([^\r\n]{1,24})",
+    re.MULTILINE | re.IGNORECASE,
+)
+PDB_COORDINATE_EXPONENT = re.compile(rb"e[+-]?\d")
+HEX_COORDINATE_PREFIX = re.compile(r"0x(?:[0-9a-f]+(?:\.[0-9a-f]*)?|\.[0-9a-f]+)(?:p[+-]?\d+)?", re.ASCII)
+DECIMAL_COORDINATE_PREFIX = re.compile(r"(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?", re.ASCII)
+CIF_WHITESPACE = b" \t\r\n\v\f"
+CIF_NONFINITE_MARKER = re.compile(rb"nan|inf")
+CIF_LARGE_EXPONENT = re.compile(rb"e\+?0*[1-9]\d")
+CIF_DIGIT_MASK = bytes.maketrans(b"123456789", b"000000000")
+CIF_COORDINATE_TAG = re.compile(
+    rb"_(?:atom_site[._](?:cartn|fract)|chem_comp_atom[._](?:pdbx_)?model_cartn)_[xyz]"
+)
+CIF_COORDINATE_KEYS = frozenset(
+    f"{prefix}{axis}{suffix}"
+    for prefix, suffix in (
+        ("_atom_site_cartn_", ""), ("_atom_site_fract_", ""),
+        ("_chem_comp_atom_model_cartn_", ""), ("_chem_comp_atom_pdbx_model_cartn_", "_ideal"),
+    )
+    for axis in "xyz"
+)
+CIF_COORDINATE_TAGS = {key.encode("ascii") for key in CIF_COORDINATE_KEYS}
+CIF_TOKEN_MARKS = re.compile(rb"['\";#_]")
+CIF_CONTROL_TOKEN = re.compile(
+    rb"'[^\n]*?'(?=\s|$)|\"[^\n]*?\"(?=\s|$)|^;.*?^;|#[^\n]*"
+    rb"|(?P<control>_\S+|(?:data_|save_)\S*|(?:global_|loop_|stop_)(?=\s|$))"
+    rb"|(?P<uncertain>['\"]|^;)",
+    re.MULTILINE | re.DOTALL,
+)
+CIF_HEADER_GAP = re.compile(rb"(?:\s|#[^\n]*)*")
 
 
 def orientation_config(config):
@@ -71,6 +103,9 @@ def read_json(path):
 
 
 import numpy as np
+
+# The midpoint beyond finite float32 rounds to infinity.
+NATIVE_COORDINATE_OVERFLOW = float.fromhex("0x1.ffffffp127")
 
 
 def _retry_windows_report_io(operation):
@@ -436,6 +471,181 @@ def selection(obj, expression, ca=False):
     return result + " and polymer.protein and name CA and state 1" if ca else result
 
 
+def _nonfinite_coordinate(value, convert=float):
+    token = value.strip().lower().lstrip("+-")
+    if token.startswith(("nan", "inf")):
+        return True
+    hexadecimal = token.startswith("0x")
+    if not hexadecimal and len(token) < 39 and "e" not in token:
+        return False
+    try:
+        if hexadecimal:
+            prefix = HEX_COORDINATE_PREFIX.match(token)
+            if prefix is None:
+                return False
+            number = float.fromhex(prefix[0])
+        else:
+            number = convert(token)
+    except OverflowError:
+        return True
+    except ValueError:
+        # The native loader also accepts a numeric prefix followed by other text.
+        prefix = DECIMAL_COORDINATE_PREFIX.match(token)
+        if prefix is None:
+            return False
+        number = float(prefix[0])
+    return not math.isfinite(number) or number >= NATIVE_COORDINATE_OVERFLOW
+
+
+def _check_pdb_coordinates(contents):
+    folded = contents.lower()
+    if (b"nan" not in folded and b"inf" not in folded and b"0x" not in folded
+            and not PDB_COORDINATE_EXPONENT.search(folded)):
+        return
+    for record in PDB_SUSPECT_COORDINATES.finditer(contents):
+        fields = record[1]
+        for offset in (0, 8, 16):
+            field = fields[offset:offset + 8].decode("ascii", errors="replace")
+            if _nonfinite_coordinate(field):
+                raise ValueError("PDB 包含非有限坐标。")
+
+
+def _may_have_nonfinite_cif_token(contents):
+    if b"nan" in contents or b"inf" in contents:
+        if any(mark.start() == 0 or contents[mark.start() - 1] in b" \t\r\n'\";+-"
+               for mark in CIF_NONFINITE_MARKER.finditer(contents)):
+            return True
+    return (b"0x" in contents or CIF_LARGE_EXPONENT.search(contents) is not None
+            or b"0" * 30 in contents.translate(CIF_DIGIT_MASK))
+
+
+def _cif_token_start(contents, mark):
+    if mark == 0 or contents[mark - 1] in CIF_WHITESPACE:
+        return mark
+    if contents[mark] != ord("_"):
+        return None
+    # A reserved word ends its fixed prefix at the underscore.
+    if mark >= 4 and contents[mark - 4:mark] in (b"data", b"save", b"loop", b"stop"):
+        start = mark - 4
+    elif mark >= 6 and contents[mark - 6:mark] == b"global":
+        start = mark - 6
+    else:
+        return None
+    return start if start == 0 or contents[start - 1] in CIF_WHITESPACE else None
+
+
+def _cif_coordinate_region_has_candidate(contents):
+    """Check coordinate item regions without tokenizing their ordinary rows."""
+    if not contents.isascii():
+        return True
+    contents = contents.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    loop_header = coordinate_region = False
+    last_control = resume = 0
+    for mark in CIF_TOKEN_MARKS.finditer(contents):
+        if mark.start() < resume:
+            continue
+        start = _cif_token_start(contents, mark.start())
+        if start is None or start < resume:
+            continue
+        match = CIF_CONTROL_TOKEN.match(contents, start)
+        if match is None:
+            continue
+        resume = match.end()
+        if match.lastgroup == "uncertain":
+            return True
+        if (contents[start] == ord(";") and resume < len(contents)
+                and contents[resume] not in CIF_WHITESPACE):
+            return True
+        key = match["control"]
+        if key is None:
+            continue
+        gap = contents[last_control:start]
+        if coordinate_region and _may_have_nonfinite_cif_token(gap):
+            return True
+        is_coordinate_key = key.replace(b".", b"_") in CIF_COORDINATE_TAGS
+        if key == b"loop_":
+            loop_header, coordinate_region = True, False
+        elif loop_header and key.startswith(b"_") and CIF_HEADER_GAP.fullmatch(gap):
+            coordinate_region = coordinate_region or is_coordinate_key
+        else:
+            loop_header, coordinate_region = False, is_coordinate_key
+        last_control = resume
+    return coordinate_region and _may_have_nonfinite_cif_token(contents[last_control:])
+
+
+def _cif_coordinate_values(text):
+    from chempy.cif import token_re
+
+    # Use PyMOL's CIF tokenizer, then visit only coordinate items and columns.
+    tokens = [token for token in token_re.findall(text) if token[0] != "#"]
+    controls = [index for index, token in enumerate(tokens)
+                if token.startswith(("_", "data_", "save_"))
+                or token in ("loop_", "stop_", "global_")]
+    controls.append(len(tokens))
+    boundaries = iter(controls)
+    position = next(boundaries)
+    while position < len(tokens):
+        key = tokens[position]
+        end = next(boundaries)
+        if key == "loop_":
+            first_key = position + 1
+            first_value = first_key
+            while end == first_value and end < len(tokens) and tokens[end].startswith("_"):
+                first_value += 1
+                end = next(boundaries)
+            width = first_value - first_key
+            for column, tag in enumerate(tokens[first_key:first_value]):
+                if tag.replace(".", "_") in CIF_COORDINATE_KEYS:
+                    yield from tokens[first_value + column:end:width]
+        elif key.replace(".", "_") in CIF_COORDINATE_KEYS and position + 1 < end:
+            yield tokens[position + 1]
+        position = end
+
+
+def _check_cif_coordinates(contents):
+    folded = contents.lower()
+    # Values cannot precede their coordinate tags. Skip markers in leading metadata.
+    coordinate_tag = CIF_COORDINATE_TAG.search(folded)
+    if coordinate_tag is None or not _may_have_nonfinite_cif_token(folded[coordinate_tag.start():]):
+        return
+    if not _cif_coordinate_region_has_candidate(folded):
+        return
+
+    from chempy.cif import scifloat, unquote
+
+    text = folded.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+    values = list(_cif_coordinate_values(text))
+    if not _may_have_nonfinite_cif_token(" ".join(values).encode("utf-8")):
+        return
+    if any(_nonfinite_coordinate(unquote(value), scifloat) for value in values):
+        raise ValueError("mmCIF 包含非有限坐标。")
+
+
+def load_structure(cmd, path, obj):
+    """Check the exact structure bytes before entering the native loader."""
+    from pymol.importing import filename_to_format
+
+    path = str(path)
+    _, _, file_format, _ = filename_to_format(path)
+    if file_format not in ("pdb", "cif"):
+        cmd.load(path, obj, quiet=1)
+        return
+    contents = cmd.file_read(cmd.exp_path(path))
+    if file_format == "pdb":
+        _check_pdb_coordinates(contents)
+        cmd.read_pdbstr(contents, obj, discrete=-1, quiet=1)
+    else:
+        _check_cif_coordinates(contents)
+        cmd.load_raw(contents, "cif", obj, quiet=1)
+
+
+def _finite_coordinates(cmd, obj):
+    coords = cmd.get_coords(f"model {obj}", 1)
+    if coords is None or not np.isfinite(coords).all():
+        raise ValueError("结构的第 1 状态没有坐标或包含非有限坐标。")
+    return coords
+
+
 def ca_coordinates(cmd, expression, cache):
     if expression not in cache:
         cache[expression] = {atom.index: atom.coord for atom in cmd.get_model(expression, 1).atom}
@@ -485,6 +695,7 @@ def structural_distance(cmd, mobile, reference, config, atom_cache=None):
 
 
 def candidate_pose(cmd, obj, config):
+    _finite_coordinates(cmd, obj)
     mode = config.get("orientation", "target")
     required = [config.get("diversity_selection") or config.get("binder", "chain B")]
     if mode in ("target", "binder"):
@@ -535,7 +746,7 @@ def select_diverse(cmd, queues, config, selected=None, progress=None):
             while queue:
                 row = queue.pop()
                 try:
-                    cmd.load(row["path"], "col_candidate", quiet=1)
+                    load_structure(cmd, row["path"], "col_candidate")
                     row["matrix"] = candidate_pose(cmd, "col_candidate", config).tolist()
                     decision = check_diversity(cmd, row, config, selected)
                     if decision == "duplicate":
@@ -642,7 +853,7 @@ def _screening_signature(cmd, obj, config):
 
 def apply_pose(cmd, obj, matrix, *, expected_coordinates=None, bounds=None):
     matrix = np.asarray(matrix)
-    coords = cmd.get_coords(f"model {obj}", 1)
+    coords = _finite_coordinates(cmd, obj)
     if expected_coordinates is not None and coordinate_signature(coords) != expected_coordinates:
         raise ValueError(STALE_POSE)
     coords = coords @ matrix[:3, :3].T + matrix[:3, 3]
@@ -670,8 +881,11 @@ def common_view(low, high, width, height, rotation=None):
 
 
 def collection_view(manifest, width, height):
+    bounds = manifest["bounds"]
+    if not np.isfinite(bounds).all():
+        raise ValueError("集合的结构边界包含非有限坐标，请重新应用朝向。")
     saved = manifest.get("view")
-    return common_view(*manifest["bounds"], width, height, rotation=saved[:9] if saved else None)
+    return common_view(*bounds, width, height, rotation=saved[:9] if saved else None)
 
 
 def preview_size(width, height):
@@ -768,7 +982,7 @@ def _create_collection(config, output, progress):
         command = instance.cmd
         command.set("max_threads", 1)
         if reference:
-            command.load(reference, "col_reference", quiet=1)
+            load_structure(command, reference, "col_reference")
         selected, rejected, invalid, unverified = select_diverse(command, queues, config, progress=progress)
         reference = reference or (selected[0]["path"] if selected else None)
         if selected and config.get("orientation", "target") in ("target", "binder"):
@@ -808,9 +1022,9 @@ def _load_saved_sample(command, row, obj):
     expected = row.get("coordinate_signature")
     if expected is None:
         raise ValueError(f"{row['id']}：旧清单缺少坐标签名，请先重新应用朝向。")
-    command.load(row["path"], obj, quiet=1)
-    coords = command.get_coords(f"model {obj}", 1)
-    if coords is None or coordinate_signature(coords) != expected:
+    load_structure(command, row["path"], obj)
+    coords = _finite_coordinates(command, obj)
+    if coordinate_signature(coords) != expected:
         raise ValueError(f"{row['id']}：{STALE_POSE}")
 
 
@@ -824,11 +1038,11 @@ def reorient_samples(command, manifest, progress=None):
             if not saved_reference or not Path(saved_reference).is_absolute():
                 raise ValueError("旧清单没有记录参考结构的绝对路径，请重新选择参考结构后应用朝向。")
             reference = saved_reference
-        command.load(reference, "col_reference", quiet=1)
+        load_structure(command, reference, "col_reference")
     valid, failed = [], []
     for index, row in enumerate(manifest["samples"]):
         try:
-            command.load(row["path"], "col_candidate", quiet=1)
+            load_structure(command, row["path"], "col_candidate")
             row["matrix"] = candidate_pose(command, "col_candidate", config).tolist()
             command.set_name("col_candidate", f"col_keep_{len(valid)}")
             valid.append(row)
@@ -871,7 +1085,7 @@ def replace_sample(command, manifest, index, progress=None):
         expected = manifest.get("reference_frame_signature")
         if not reference or expected is None:
             raise ValueError("清单缺少参考结构朝向签名，请先重新应用朝向。")
-        command.load(reference, "col_reference", quiet=1)
+        load_structure(command, reference, "col_reference")
         if _reference_frame_signature(command, config) != expected:
             raise ValueError("参考结构的对齐数据已变化，请先重新应用朝向。")
     for position, row in enumerate(samples):
@@ -1041,7 +1255,7 @@ def render_worker(manifest_path, indices, directory, width, height, threads, rep
                     snapshot = Path(staging) / Path(row["path"]).name
                     with snapshot.open("wb") as staged:
                         source_sha256 = _file_sha256(row["path"], copy_to=staged)
-                    cmd.load(str(snapshot), "col_render", quiet=1)
+                    load_structure(cmd, snapshot, "col_render")
                 apply_pose(cmd, "col_render", row["matrix"],
                            expected_coordinates=row.get("coordinate_signature"), bounds=manifest["bounds"])
                 style_structure(cmd, "col_render", manifest["config"], render=True)
@@ -1184,6 +1398,9 @@ def current_images(manifest, directory, width=None, height=None, *, verify_conte
                    allow_legacy=False, control=None):
     report = Path(directory) / "03_export.json"
     if not report.exists() or not manifest["samples"]:
+        return {}
+    # Legacy bounds must be rebuilt before their previews can be reused.
+    if not np.isfinite(manifest["bounds"]).all():
         return {}
     previous = read_json(report)
     width, height = width or previous["width"], height or previous["height"]

@@ -3,6 +3,7 @@
 import argparse
 from collections import Counter
 import csv
+import gzip
 import json
 import os
 from pathlib import Path
@@ -82,6 +83,155 @@ class CollectionsSampling(unittest.TestCase):
             self.assertEqual(manifest["occupied_strata"], 2)
             self.assertEqual({row["id"]: row["stratum"] for row in manifest["samples"]},
                              {"low.pdb": [0], "high.pdb": [1]})
+
+    def test_nonfinite_native_coordinates_do_not_exclude_valid_samples(self):
+        good_lines = FIXTURE.read_text(encoding="ascii").splitlines(keepends=True)
+        for mode, atom in (("target", "CA"), ("pca", "N")):
+            with self.subTest(mode=mode, atom=atom), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                shutil.copyfile(FIXTURE, root / "valid.pdb")
+                bad_lines = good_lines.copy()
+                index = next(i for i, line in enumerate(good_lines)
+                             if line.startswith("ATOM") and line[12:16].strip() == atom)
+                line = good_lines[index]
+                bad_lines[index] = line[:30] + "     nan" + line[38:]
+                bad = root / "invalid.pdb"
+                bad.write_text("".join(bad_lines), encoding="ascii")
+                scores = root / "scores.json"
+                scores.write_text(json.dumps([
+                    {"path": bad.name, "quality": 0},
+                    {"path": "valid.pdb", "quality": 1},
+                ]), encoding="utf-8")
+                config = {"scores": str(scores), "metrics": [{"name": "quality", "bins": 2}],
+                          "count": 1, "seed": 0, "rmsd": 0.2, "orientation": mode,
+                          "target": "polymer.protein", "binder": "polymer.protein"}
+                output = root / "collection"
+                core.create_collection(config, output)
+                manifest = json.loads((output / "01_collection.json").read_text(encoding="utf-8"),
+                                      parse_constant=lambda token: self.fail(f"Nonfinite JSON: {token}"))
+                self.assertEqual([row["id"] for row in manifest["samples"]], ["valid.pdb"])
+                self.assertEqual(Path(manifest["reference"]).name, "valid.pdb")
+                self.assertEqual([item["path"] for item in manifest["invalid_structures"]], [str(bad)])
+                self.assertIn("非有限", manifest["invalid_structures"][0]["reason"])
+
+                with pymol2.PyMOL() as instance:
+                    cmd = instance.cmd
+                    cmd.set("max_threads", 1)
+                    cmd.load(str(root / "valid.pdb"), "source", quiet=1)
+                    coords = cmd.get_coords("source", 1)
+                    coords[0, 0] = float("nan")
+                    cmd.load_coords(coords, "source", 1)
+                    saved = core.coordinate_signature(coords)
+                    with self.assertRaisesRegex(ValueError, "非有限"):
+                        core.apply_pose(cmd, "source", manifest["samples"][0]["matrix"],
+                                        expected_coordinates=saved)
+                    self.assertEqual(core.coordinate_signature(cmd.get_coords("source", 1)), saved)
+
+    def test_nonfinite_legacy_bounds_do_not_reach_the_camera(self):
+        row = {"path": str(FIXTURE), "matrix": [], "image": "sample.png"}
+        legacy = {"bounds": [[float("nan"), -14, -12], [float("nan"), 14, 12]],
+                  "samples": [row], "config": {}}
+        with self.assertRaisesRegex(ValueError, "结构边界.*重新应用朝向"):
+            core.collection_view(legacy, 640, 480)
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            image = directory / row["image"]
+            image.touch()
+            core.write_json(directory / "03_export.json",
+                            {"width": 640, "height": 480, "results": [{"ok": True, "image": str(image)}]})
+            self.assertEqual(core.current_images(legacy, directory), {})
+
+    def test_native_numeric_prefixes_cannot_overflow_coordinates(self):
+        pdb = next(line for line in FIXTURE.read_bytes().splitlines() if line.startswith(b"ATOM"))
+        cases = ((b"0x1p+128", True), (b"0x1p128z", True), (b"1e40junk", True), (b"0x1p2", False))
+        for token, overflows in cases:
+            formats = ((core._check_pdb_coordinates, pdb[:30] + token.rjust(8) + pdb[38:]),
+                       (core._check_cif_coordinates, b"data_control\n_atom_site.Cartn_x " + token + b"\n"))
+            for check, structure in formats:
+                with self.subTest(token=token, check=check.__name__):
+                    if overflows:
+                        with self.assertRaisesRegex(ValueError, "非有限坐标"):
+                            check(structure)
+                    else:
+                        check(structure)
+
+    def test_pdb_exponents_allowing_a_trailing_decimal_point_are_preflighted(self):
+        contents = FIXTURE.read_bytes()
+        lines = contents.splitlines(keepends=True)
+        row = next(i for i, line in enumerate(lines) if line.startswith(b"ATOM"))
+        atom = lines[row]
+        with tempfile.TemporaryDirectory() as temporary, pymol2.PyMOL() as instance:
+            root = Path(temporary)
+            cmd = instance.cmd
+            for axis, token in enumerate((b"1.e39", b"-1.e39", b"1.e+39")):
+                start = 30 + axis * 8
+                lines[row] = atom[:start] + token.rjust(8) + atom[start + 8:]
+                data = b"".join(lines)
+                for suffix in (".pdb", ".pdb.gz"):
+                    with self.subTest(axis=axis, token=token, suffix=suffix):
+                        path = root / f"overflow{suffix}"
+                        path.write_bytes(gzip.compress(data) if suffix.endswith(".gz") else data)
+                        with patch.object(cmd, "read_pdbstr",
+                                          side_effect=AssertionError("overflow reached the native loader")) as read:
+                            with self.assertRaisesRegex(ValueError, "PDB.*非有限坐标"):
+                                core.load_structure(cmd, path, "overflow")
+                        read.assert_not_called()
+            lines[row] = atom[:30] + b"1.e+1".rjust(8) + atom[38:]
+            path = root / "finite.pdb"
+            path.write_bytes(b"".join(lines))
+            core.load_structure(cmd, path, "finite")
+            self.assertEqual(float(cmd.get_coords("model finite", 1)[0, 0]), 10.0)
+
+    def test_mmcif_checks_coordinate_columns_before_native_load(self):
+        prefix = b"data_limit\n_atom_site.Cartn_x "
+        core._check_cif_coordinates(prefix + b"3.4028235e38\n")
+        with self.assertRaisesRegex(ValueError, "mmCIF.*非有限坐标"):
+            core._check_cif_coordinates(prefix + b"3.4028235677973366e38\n")
+
+        for separator in (b";\n", b";text touching the terminator\n"):
+            with self.subTest(separator=separator):
+                scalar = (b"data_control\n_struct.details\n;\n"
+                          b"_struct.title contains a literal tag\n" + separator
+                          + b"_atom_site.Cartn_x 'nan'\n")
+                with self.assertRaisesRegex(ValueError, "mmCIF.*非有限坐标"):
+                    core._check_cif_coordinates(scalar)
+
+        with tempfile.TemporaryDirectory() as temporary, pymol2.PyMOL() as instance:
+            root = Path(temporary)
+            cmd = instance.cmd
+            cmd.set("max_threads", 1)
+            cmd.load(str(FIXTURE), "control", quiet=1)
+            source = root / "source.cif"
+            cmd.save(str(source), "control", state=1, quiet=1)
+            control_signature = core.coordinate_signature(cmd.get_coords("control", 1))
+            lines = source.read_text(encoding="utf-8").splitlines()
+            # Literals in text items are harmless both before and after the coordinate table.
+            block = next(i for i, line in enumerate(lines) if line.startswith("data_"))
+            lines.insert(block + 1, "_struct.title 'NaN is a text label'")
+            lines.extend(("_struct.details", ";", "Infinity is a text label",
+                          "_atom_site.Cartn_x NaN", ";"))
+            source.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            core.load_structure(cmd, source, "valid")
+            self.assertEqual(core.coordinate_signature(cmd.get_coords("valid", 1)), control_signature)
+
+            fields = [line.lower() for line in lines if line.startswith("_atom_site.")]
+            x_column = fields.index("_atom_site.cartn_x")
+            atom = next(i for i, line in enumerate(lines) if line.startswith("ATOM"))
+            original = lines[atom].split()
+            unsafe_values = (("nan", ".cif"), ("'+inf'", ".cif.gz"), ("1e40", ".cif"),
+                             ("1e40junk", ".cif.gz"), ("0x1p+128", ".cif"))
+            for token, suffix in unsafe_values:
+                with self.subTest(token=token, suffix=suffix):
+                    values = original.copy()
+                    values[x_column] = token
+                    # CIF loop values can wrap independently of their physical lines.
+                    lines[atom] = " ".join(values[:x_column]) + "\n" + " ".join(values[x_column:])
+                    content = ("\n".join(lines) + "\n").encode("utf-8")
+                    invalid = root / f"invalid{suffix}"
+                    invalid.write_bytes(gzip.compress(content) if suffix.endswith(".gz") else content)
+                    with self.assertRaisesRegex(ValueError, "mmCIF.*非有限坐标"):
+                        core.load_structure(cmd, invalid, "invalid")
+                    self.assertNotIn("invalid", cmd.get_names("objects"))
 
     def test_repeated_metric_keeps_independent_strata_and_saved_boundaries(self):
         specs = [{"name": "quality", "bins": 2}, {"name": "quality", "bins": 4}]

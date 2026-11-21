@@ -95,6 +95,36 @@ def check_legacy_root_recovery(plugin, qt_widgets, application, output):
         panel.task.executor.shutdown()
 
 
+def check_legacy_bounds_recovery(plugin, qt_widgets, application, manifest_path, output):
+    directory = output / "06_legacy_bounds"
+    shutil.copytree(manifest_path.parent / "previews", directory / "previews")
+    legacy_path = directory / "01_collection.json"
+    legacy = core.read_json(manifest_path)
+    legacy["bounds"][0][0] = float("nan")
+    core.save_collection(legacy_path, legacy)
+    before = legacy_path.read_bytes()
+    panel = plugin.CollectionDialog()
+    try:
+        panel.load_manifest(legacy_path)
+        assert panel.samples.count() == len(legacy["samples"])
+        assert all(panel.samples.item(index).icon().isNull() for index in range(panel.samples.count()))
+        view = plugin.cmd.get_view()
+        with patch.object(qt_widgets.QMessageBox, "warning", return_value=qt_widgets.QMessageBox.Ok) as warning:
+            panel.guarded(lambda: panel.preview(0))
+        assert "非有限坐标" in warning.call_args.args[2]
+        np.testing.assert_array_equal(plugin.cmd.get_view(), view)
+        assert legacy_path.read_bytes() == before
+
+        panel.actions.refresh(reapply=True)
+        finish_collection_task(application, panel)
+        repaired = core.read_json(legacy_path)
+        assert np.isfinite(repaired["bounds"]).all()
+        assert [row["id"] for row in repaired["samples"]] == [row["id"] for row in legacy["samples"]]
+    finally:
+        panel.close()
+        panel.task.executor.shutdown()
+
+
 def finish_collection_task(application, panel):
     deadline = time.monotonic() + 20
     while panel.task.future is not None and time.monotonic() < deadline:
@@ -698,7 +728,9 @@ if args.stage in ("qt", "all") and (args.hidden_qt_child or os.name != "nt"):
     assert not panel.task.control.processes and not panel.isVisible()
     panel.task.executor.shutdown()
     check_legacy_root_recovery(plugin, QtWidgets, application, args.output)
+    check_legacy_bounds_recovery(plugin, QtWidgets, application, manifest_path, args.output)
     results["qt"] = {"score_selection": "PASS", "manifest_sample_count": 3,
+                     "legacy_invalid_bounds_can_be_reoriented": "PASS",
                      "legacy_root_requires_explicit_choice": "PASS",
                      "preview_restore_capture": "PASS", "cmd_run_registration": "PASS",
                      "preview_failures_keep_scene": "PASS",
