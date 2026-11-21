@@ -266,7 +266,14 @@ def _resolve_structure_path(root, value):
 
 
 def _quantile_edges(values, bins):
-    cuts = np.unique(np.quantile(values, np.arange(1, bins) / bins))
+    fractions = np.arange(1, bins) / bins
+    with np.errstate(over="ignore", invalid="ignore"):
+        estimates = np.quantile(values, fractions)
+    overflowed = ~np.isfinite(estimates)
+    if overflowed.any():
+        # Halving the inputs keeps the gaps within the float64 range.
+        estimates[overflowed] = 2 * np.quantile(values * 0.5, fractions[overflowed])
+    cuts = np.unique(estimates)
     minimum = values.min()
     if cuts.size and cuts[0] == minimum:
         cuts = cuts[1:]
@@ -282,23 +289,23 @@ def make_strata(rows, specs, seed, saved_edges=None):
     ordered = isinstance(saved_edges, list)
     if ordered and len(saved_edges) != len(specs):
         raise ValueError("保存的分层边界与打分指标数量不一致。")
-    axes, groups = [], {}
+    axes, assignments, groups = [], [], {}
     for index, spec in enumerate(specs):
         bins = int(spec.get("bins", 3))
         if bins < 1:
             raise ValueError("每个打分的层数必须至少为 1。")
         name = spec["name"]
+        values = np.asarray([row["scores"][name] for row in rows])
         if ordered:
             cuts = saved_edges[index]
         elif saved_edges is not None and name in saved_edges:
             cuts = saved_edges[name]
         else:
-            values = np.array([row["scores"][name] for row in rows])
             cuts = _quantile_edges(values, bins)
         axes.append((name, cuts))
-    for row in rows:
-        cell = tuple(int(np.searchsorted(cuts, row["scores"][name], side="right"))
-                     for name, cuts in axes)
+        assignments.append(np.searchsorted(cuts, values, side="right").tolist())
+    for index, row in enumerate(rows):
+        cell = tuple(positions[index] for positions in assignments)
         row["stratum"] = list(cell)
         groups.setdefault(cell, []).append(row)
     rng = random.Random(int(seed))

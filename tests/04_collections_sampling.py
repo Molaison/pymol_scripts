@@ -51,6 +51,37 @@ class CollectionsSampling(unittest.TestCase):
         self.assertEqual(candidate["stratum"], originals[3]["stratum"])
         self.assertNotEqual(candidate["stratum"], originals[0]["stratum"])
 
+    def test_extreme_finite_scores_keep_a_finite_cut_in_the_saved_collection(self):
+        with tempfile.TemporaryDirectory() as temporary, pymol2.PyMOL() as instance:
+            root = Path(temporary)
+            cmd = instance.cmd
+            cmd.set("max_threads", 1)
+            cmd.load(str(FIXTURE), "fixture")
+            coords = cmd.get_coords("fixture", 1)
+            cmd.save(str(root / "low.pdb"), "fixture")
+            cmd.load_coords(coords * [1.8, 1.4, 1.35], "fixture", 1)
+            cmd.save(str(root / "high.pdb"), "fixture")
+            scores = root / "scores.json"
+            scores.write_text(json.dumps([
+                {"path": "low.pdb", "quality": -1e308},
+                {"path": "high.pdb", "quality": 1e308},
+            ]), encoding="utf-8")
+            config = {"scores": str(scores), "metrics": [{"name": "quality", "bins": 2}],
+                      "count": 2, "seed": 8, "rmsd": 0.15, "orientation": "pca",
+                      "target": "polymer.protein", "binder": "polymer.protein"}
+            output = root / "collection"
+            core.create_collection(config, output)
+
+            def reject_nonfinite(value):
+                self.fail(f"non-finite manifest token: {value}")
+
+            manifest = json.loads((output / "01_collection.json").read_text(encoding="utf-8"),
+                                  parse_constant=reject_nonfinite)
+            self.assertEqual(manifest["quantile_edges"], {"quality": [0.0]})
+            self.assertEqual(manifest["occupied_strata"], 2)
+            self.assertEqual({row["id"]: row["stratum"] for row in manifest["samples"]},
+                             {"low.pdb": [0], "high.pdb": [1]})
+
     def test_repeated_metric_keeps_independent_strata_and_saved_boundaries(self):
         specs = [{"name": "quality", "bins": 2}, {"name": "quality", "bins": 4}]
         rows = [{"scores": {"quality": score}} for score in range(12)]

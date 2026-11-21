@@ -441,18 +441,40 @@ class CollectionPreview:
         panel.require_manifest()
         if not 0 <= index < len(panel.manifest["samples"]):
             raise ValueError("样本编号超出范围。")
-        if panel.previous_scene is None:
-            panel.previous_scene = (cmd.get_names("objects", enabled_only=1), cmd.get_view())
-            self.object_name = cmd.get_unused_name("collections_preview")
-        cmd.delete(self.object_name)
-        row = panel.manifest["samples"][index]
-        cmd.load(row["path"], self.object_name, quiet=1)
-        core.apply_pose(cmd, self.object_name, row["matrix"])
-        core.style_structure(cmd, self.object_name, panel.manifest["config"])
-        cmd.disable("all")
-        cmd.enable(self.object_name)
+        manifest = panel.manifest
+        row = manifest["samples"][index]
+        enabled = cmd.get_names("objects", enabled_only=1)
+        view = cmd.get_view()
+        staged = cmd.get_unused_name("collections_preview")
         width, height = cmd.get_viewport()
-        cmd.set_view(core.collection_view(panel.manifest, max(width, 64), max(height, 64)))
+        target_view = core.collection_view(manifest, max(width, 64), max(height, 64))
+        try:
+            cmd.load(row["path"], staged, quiet=1)
+            expected = row.get("coordinate_signature")
+            sort_for_validation = (
+                expected is not None and cmd.get_setting_boolean("retain_order", staged)
+                and core.coordinate_signature(cmd.get_coords(f"model {staged}", 1)) != expected
+            )
+            if sort_for_validation:
+                cmd.set("retain_order", 0, staged)
+            core.apply_pose(cmd, staged, row["matrix"],
+                            expected_coordinates=expected, bounds=manifest["bounds"])
+            if sort_for_validation:
+                cmd.set("retain_order", 1, staged)
+            core.style_structure(cmd, staged, manifest["config"])
+        except Exception:
+            cmd.delete(staged)
+            cmd.set_view(view)
+            raise
+
+        if panel.previous_scene is None:
+            panel.previous_scene = (enabled, view)
+        if self.object_name is not None and self.object_name != staged:
+            cmd.delete(self.object_name)
+        self.object_name = staged
+        cmd.disable("all")
+        cmd.enable(staged)
+        cmd.set_view(target_view)
         panel.status.setText(f"预览 {index + 1}: {row['id']}。保存当前朝向后会自动刷新缩略图。")
 
     def restore(self):

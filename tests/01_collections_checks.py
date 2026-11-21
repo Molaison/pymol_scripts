@@ -367,7 +367,7 @@ if args.stage in ("qt", "all") and (args.hidden_qt_child or os.name != "nt"):
     assert panel.samples.count() == 3
     assert panel.rendering.orientation.currentData() == panel.manifest["config"]["orientation"]
     assert panel.sampling.count.value() == panel.manifest["config"]["count"]
-    from pymol import cmd
+    from pymol import CmdException, cmd
     if sys.platform == "darwin":
         from pymol2 import SingletonPyMOL
         pymol_instance = SingletonPyMOL()
@@ -378,6 +378,53 @@ if args.stage in ("qt", "all") and (args.hidden_qt_child or os.name != "nt"):
     original_enabled = cmd.get_names("objects", enabled_only=1)
     panel.preview(0)
     assert cmd.get_names("objects", enabled_only=1) == [panel.scene.object_name]
+    current_preview = panel.scene.object_name
+    current_coordinates = cmd.get_coords(current_preview, 1).copy()
+    current_view = tuple(cmd.get_view())
+    next_sample = panel.manifest["samples"][1]
+    next_path = next_sample["path"]
+    try:
+        with tempfile.TemporaryDirectory() as temporary:
+            unavailable = str(Path(temporary) / "missing.pdb")
+            for invalid_path in (panel.manifest["samples"][0]["path"], unavailable):
+                next_sample["path"] = invalid_path
+                try:
+                    panel.preview(1)
+                except (ValueError, CmdException):
+                    pass
+                else:
+                    raise AssertionError(f"Unexpectedly previewed {invalid_path}")
+                assert panel.scene.object_name == current_preview
+                assert cmd.get_names("objects", enabled_only=1) == [current_preview]
+                np.testing.assert_array_equal(cmd.get_coords(current_preview, 1), current_coordinates)
+                np.testing.assert_array_equal(cmd.get_view(), current_view)
+    finally:
+        next_sample["path"] = next_path
+
+    import pymol2
+
+    with tempfile.TemporaryDirectory() as temporary, pymol2.PyMOL() as analysis:
+        source = Path(temporary) / "reordered.pdb"
+        analysis.cmd.fragment("ala", "fixture")
+        atoms = [line for line in analysis.cmd.get_pdbstr("fixture").splitlines() if line.startswith("ATOM")]
+        source.write_text("\n".join(reversed(atoms)) + "\nEND\n", encoding="ascii")
+        analysis.cmd.load(str(source), "worker_order")
+        signature = core.coordinate_signature(analysis.cmd.get_coords("worker_order", 1))
+        analysis.cmd.set("retain_order", 1, "worker_order")
+        source_coordinates = analysis.cmd.get_coords("worker_order", 1)
+        assert core.coordinate_signature(source_coordinates) != signature
+        original_retain_order = cmd.get_setting_boolean("retain_order")
+        panel.manifest["samples"][1] = dict(next_sample, path=str(source),
+                                             coordinate_signature=signature, matrix=np.eye(4).tolist())
+        cmd.set("retain_order", 1)
+        try:
+            panel.preview(1)
+            assert cmd.get_setting_boolean("retain_order")
+            np.testing.assert_array_equal(cmd.get_coords(panel.scene.object_name, 1), source_coordinates)
+        finally:
+            cmd.set("retain_order", original_retain_order)
+            panel.manifest["samples"][1] = next_sample
+    panel.preview(0)
     panel.capture_view()
     assert "view" in json.loads(manifest_path.read_text(encoding="utf-8"))
     def finish_ui_task():
@@ -431,6 +478,8 @@ if args.stage in ("qt", "all") and (args.hidden_qt_child or os.name != "nt"):
     panel.task.executor.shutdown()
     results["qt"] = {"score_selection": "PASS", "manifest_sample_count": 3,
                      "preview_restore_capture": "PASS", "cmd_run_registration": "PASS",
+                     "preview_failures_keep_scene": "PASS",
+                     "preview_with_retained_atom_order": "PASS",
                      "form_restore_and_apply": "PASS", "capture_refreshes_thumbnails": "PASS",
                      "pin_ui": "PASS", "close_cancels_and_joins_workers": "PASS",
                      "native_groupbox_style_without_tabs": "PASS",
