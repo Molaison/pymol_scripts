@@ -337,10 +337,12 @@ class CollectionActions:
     def apply_pending(self, path, options, configuration, control, reapply=False):
         manifest = core.read_json(path)
         if reapply or core.orientation_config(manifest["config"]) != configuration:
-            manifest = core.revise_external(path, {"action": "orient", "config": configuration},
-                                            options["python"], control)
-        manifest["config"].update({key: options[key] for key in ("workers", "width", "height")})
-        core.save_collection(path, manifest)
+            core.revise_external(path, {"action": "orient", "config": configuration},
+                                 options["python"], control)
+        with core.edit_collection(path) as manifest:
+            if core.orientation_config(manifest["config"]) != configuration:
+                raise ValueError("Collection 朝向已变化，请刷新设置后重试。")
+            manifest["config"].update({key: options[key] for key in ("workers", "width", "height")})
         return manifest
 
     def render(self, path, options, control, preview=True, retry=False):
@@ -396,8 +398,13 @@ class CollectionActions:
             raise ValueError("替换时请选择一个样本。")
         path, options = panel.manifest_path, self.rendering_options()
         panel.pending_path = path
+        selected = [panel.manifest["samples"][index] for index in indices]
+        request = {"action": action, "selected_samples": [core.sample_identity(row) for row in selected]}
+        if action == "pin":
+            request["pinned"] = not all(row.get("pinned", False) for row in selected)
+
         def work(control):
-            core.revise_external(path, {"action": action, "indices": indices}, options["python"], control)
+            core.revise_external(path, request, options["python"], control)
             result = self.render(path, options, control, retry=True)
             return path, result
         panel.task.start(work, panel.finished)
@@ -409,9 +416,19 @@ class CollectionActions:
             raise ValueError("请先双击样本，在统一坐标系中调整朝向。")
         if core.orientation_config(panel.manifest["config"]) != panel.rendering.configuration():
             raise ValueError("请先应用表单中的朝向修改，再手动转动样本。")
-        panel.manifest["view"] = list(cmd.get_view())
-        core.save_collection(panel.manifest_path, panel.manifest)
-        self.refresh()
+        path, options = panel.manifest_path, self.rendering_options()
+        with core.edit_collection(path) as manifest:
+            if core.view_frame(manifest) != core.view_frame(panel.manifest):
+                raise ValueError("样本或朝向已变化，请刷新预览后重新保存。")
+            manifest["view"] = list(cmd.get_view())
+            manifest["config"].update({key: options[key] for key in ("workers", "width", "height")})
+        panel.manifest = manifest
+        panel.pending_path = path
+
+        def work(control):
+            return path, self.render(path, options, control)
+
+        panel.task.start(work, panel.finished)
 
 
 class CollectionPreview:

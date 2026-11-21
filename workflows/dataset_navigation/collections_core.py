@@ -39,6 +39,10 @@ class ExportInProgress(RuntimeError):
     """Another export already owns this output directory."""
 
 
+class CollectionEditInProgress(RuntimeError):
+    """Another operation is modifying this Collection directory."""
+
+
 class TaskControl:
     """Cancellation and progress shared by a task's coordinator and UI thread."""
 
@@ -74,6 +78,20 @@ def write_json(path, value):
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
+
+
+def _publish_task_progress(path, phase, completed, total):
+    """Keep optional progress from interrupting a worker on a Windows sharing conflict."""
+    try:
+        write_json(path, {"phase": phase, "completed": completed, "total": total})
+    except PermissionError:
+        if os.name != "nt":
+            raise
+        path = Path(path)
+        try:
+            path.with_suffix(path.suffix + ".tmp").unlink(missing_ok=True)
+        except PermissionError:
+            pass
 
 
 def _is_rosetta_score_header(parts):
@@ -595,8 +613,27 @@ def save_collection(path, manifest):
     write_samples_csv(Path(path).parent, manifest)
 
 
-def create_collection(config, output, progress=None):
+@contextmanager
+def edit_collection(manifest_path):
+    """Read and save the manifest under the same directory lock."""
+    manifest_path = Path(manifest_path).resolve()
+    with _collection_edit_lock(manifest_path.parent):
+        manifest = read_json(manifest_path)
+        yield manifest
+        save_collection(manifest_path, manifest)
+
+
+def create_collection(config, output, progress=None, *, require_new=False):
     """Select samples, freeze their poses, and save a reproducible manifest."""
+    output = Path(output).resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    with _collection_edit_lock(output):
+        if require_new and (output / "01_collection.json").exists():
+            raise ValueError("此目录已存在 collection，请选择新目录。")
+        return _create_collection(config, output, progress)
+
+
+def _create_collection(config, output, progress):
     import pymol2
 
     rows, skipped = prepare_rows(config)
@@ -613,8 +650,6 @@ def create_collection(config, output, progress=None):
                 "samples": selected, "quantile_edges": edges, "occupied_strata": len(queues),
                 "eligible": len(rows), "rejected_duplicates": rejected, "skipped": skipped,
                 "invalid_structures": invalid, "unverified_candidates": unverified, "bounds": bounds}
-    output = Path(output)
-    output.mkdir(parents=True, exist_ok=True)
     save_collection(output / "01_collection.json", manifest)
     return manifest
 
@@ -692,18 +727,53 @@ def replace_sample(command, manifest, index, progress=None):
 
 def revise_collection(manifest_path, request, progress=None):
     """Apply an orientation or sample edit, committing only a usable result."""
+    with edit_collection(manifest_path) as manifest:
+        _revise_collection(manifest, request, progress)
+    return manifest
+
+
+def sample_identity(sample):
+    """Identify a selected sample by its saved identifier and source path."""
+    return [sample["id"], sample["path"]]
+
+
+def view_frame(manifest):
+    """Values that define the coordinate frame shown in the structure preview."""
+    samples = [(sample_identity(row), row["matrix"], row.get("coordinate_signature"))
+               for row in manifest["samples"]]
+    return orientation_config(manifest["config"]), manifest.get("reference"), manifest["bounds"], samples
+
+
+def _selected_indices(manifest, request):
+    if "selected_samples" not in request:
+        return request.get("indices", [])
+    indices = []
+    for selected in request["selected_samples"]:
+        matches = [index for index, row in enumerate(manifest["samples"])
+                   if sample_identity(row) == selected]
+        if len(matches) != 1:
+            raise ValueError("所选样本已变化，请刷新后重新选择。")
+        indices.append(matches[0])
+    return indices
+
+
+def _revise_collection(manifest, request, progress):
     import pymol2
 
-    manifest = read_json(manifest_path)
     action = request["action"]
-    indices = request.get("indices", [])
+    indices = _selected_indices(manifest, request)
     for index in indices:
         if not 0 <= index < len(manifest["samples"]):
             raise ValueError("样本编号超出范围。")
         if action in ("remove", "replace") and manifest["samples"][index].get("pinned"):
             raise ValueError("请先解除固定，再删除或替换该样本。")
     if action == "pin":
-        pinned = not all(manifest["samples"][index].get("pinned", False) for index in indices)
+        if "pinned" in request:
+            pinned = request["pinned"]
+            if not isinstance(pinned, bool):
+                raise ValueError("固定状态必须为 true 或 false。")
+        else:
+            pinned = not all(manifest["samples"][index].get("pinned", False) for index in indices)
         for index in indices:
             manifest["samples"][index]["pinned"] = pinned
     else:
@@ -729,8 +799,6 @@ def revise_collection(manifest_path, request, progress=None):
                 instance.cmd.delete("all")
             reorient_samples(instance.cmd, manifest, progress)
         manifest["reference"] = manifest["config"].get("reference") or manifest.get("reference")
-    save_collection(manifest_path, manifest)
-    return manifest
 
 
 def style_structure(cmd, obj, config, render=False):
@@ -828,9 +896,16 @@ def run_process(arguments, log_path, control=None, progress_path=None, *, publis
                         process.kill()
                         process.wait()
                     raise CancelledError("已取消，后台进程已退出。")
-                if control and progress_path and Path(progress_path).exists():
-                    state = read_json(progress_path)
-                    control.report(state["phase"], state["completed"], state["total"])
+                if control and progress_path:
+                    try:
+                        state = read_json(progress_path)
+                    except FileNotFoundError:
+                        pass
+                    except PermissionError:
+                        if os.name != "nt":
+                            raise
+                    else:
+                        control.report(state["phase"], state["completed"], state["total"])
                 try:
                     process.wait(timeout=0.1)
                 except subprocess.TimeoutExpired:
@@ -851,26 +926,28 @@ def run_process(arguments, log_path, control=None, progress_path=None, *, publis
 def analyze_external(config, output, python=None, control=None):
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
-    if (output / "01_collection.json").exists():
-        raise ValueError("此目录已存在 collection，请选择新目录。")
-    write_json(output / "00_config.json", config)
-    progress_path = output / "01_progress.json"
-    write_json(progress_path, {"phase": "采样", "completed": 0, "total": 0})
-    run_process([python or worker_python(), str(Path(__file__).resolve()), "analyze",
-                 "--config", str(output / "00_config.json"), "--output", str(output),
-                 "--progress", str(progress_path)], output / "01_analysis.log", control, progress_path)
-    return json.loads((output / "01_collection.json").read_text(encoding="utf-8"))
+    with _collection_request_lock(output):
+        if (output / "01_collection.json").exists():
+            raise ValueError("此目录已存在 collection，请选择新目录。")
+        write_json(output / "00_config.json", config)
+        progress_path = output / "01_progress.json"
+        _publish_task_progress(progress_path, "采样", 0, 0)
+        run_process([python or worker_python(), str(Path(__file__).resolve()), "analyze",
+                     "--config", str(output / "00_config.json"), "--output", str(output), "--require-new",
+                     "--progress", str(progress_path)], output / "01_analysis.log", control, progress_path)
+        return json.loads((output / "01_collection.json").read_text(encoding="utf-8"))
 
 
 def revise_external(manifest_path, request, python=None, control=None):
     directory = Path(manifest_path).resolve().parent
-    request_path, progress_path = directory / "00_edit.json", directory / "01_progress.json"
-    write_json(request_path, request)
-    write_json(progress_path, {"phase": "调整 collection", "completed": 0, "total": 0})
-    run_process([python or worker_python(), str(Path(__file__).resolve()), "revise",
-                 "--manifest", str(Path(manifest_path).resolve()), "--request", str(request_path),
-                 "--progress", str(progress_path)], directory / "01_edit.log", control, progress_path)
-    return read_json(manifest_path)
+    with _collection_request_lock(directory):
+        request_path, progress_path = directory / "00_edit.json", directory / "01_progress.json"
+        write_json(request_path, request)
+        _publish_task_progress(progress_path, "调整 collection", 0, 0)
+        run_process([python or worker_python(), str(Path(__file__).resolve()), "revise",
+                     "--manifest", str(Path(manifest_path).resolve()), "--request", str(request_path),
+                     "--progress", str(progress_path)], directory / "01_edit.log", control, progress_path)
+        return read_json(manifest_path)
 
 
 def render_signature(manifest, row, width, height):
@@ -1024,10 +1101,30 @@ def run_render_chunks(manifest, pending, directory, workers, size, python, retai
     return results, processes, threads
 
 
-@contextmanager
 def export_directory_lock(directory):
     """Own publication of one output directory for this export."""
-    lock_path = directory / ".export.lock"
+    return _operation_lock(
+        directory / ".export.lock",
+        ExportInProgress(f"此目录已有导出任务，请等待任务结束（{directory}）。"),
+    )
+
+
+def _collection_edit_lock(directory):
+    return _operation_lock(
+        directory / ".manifest-edit.lock",
+        CollectionEditInProgress(f"此目录已有修改任务，请等待任务结束（{directory}）。"),
+    )
+
+
+def _collection_request_lock(directory):
+    return _operation_lock(
+        directory / ".collection-request.lock",
+        CollectionEditInProgress(f"此目录已有修改任务，请等待任务结束（{directory}）。"),
+    )
+
+
+@contextmanager
+def _operation_lock(lock_path, conflict):
     # Keep the lock file in place so all processes lock the same file.
     with lock_path.open("a+b") as lock:
         try:
@@ -1043,7 +1140,7 @@ def export_directory_lock(directory):
         except OSError as error:
             if error.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
                 raise
-            raise ExportInProgress(f"此目录已有导出任务，请等待任务结束（{directory}）。") from error
+            raise conflict from error
         yield
 
 
@@ -1109,6 +1206,7 @@ def main():
     analysis.add_argument("--config", required=True)
     analysis.add_argument("--output", required=True)
     analysis.add_argument("--progress")
+    analysis.add_argument("--require-new", action="store_true", help=argparse.SUPPRESS)
     revise = subparsers.add_parser("revise")
     revise.add_argument("--manifest", required=True)
     revise.add_argument("--request", required=True)
@@ -1132,10 +1230,10 @@ def main():
     args = parser.parse_args()
     def progress(completed, total):
         if getattr(args, "progress", None):
-            write_json(args.progress, {"phase": "采样" if args.action == "analyze" else "调整朝向",
-                                       "completed": completed, "total": total})
+            phase = "采样" if args.action == "analyze" else "调整朝向"
+            _publish_task_progress(args.progress, phase, completed, total)
     if args.action == "analyze":
-        create_collection(read_json(args.config), args.output, progress)
+        create_collection(read_json(args.config), args.output, progress, require_new=args.require_new)
     elif args.action == "revise":
         revise_collection(args.manifest, read_json(args.request), progress)
     elif args.action == "render":
