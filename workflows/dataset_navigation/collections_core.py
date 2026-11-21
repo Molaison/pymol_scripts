@@ -233,6 +233,12 @@ def _read_delimited_scores(stream, delimiter):
     return rows
 
 
+def relative_source_fields(config):
+    """Return saved dataset paths whose original base directory is unknown."""
+    return tuple(name for name in ("scores", "root")
+                 if config.get(name) and not Path(config[name]).is_absolute())
+
+
 def prepare_rows(config):
     """Resolve structure paths and filter rows against selected numeric scores."""
     score_path = Path(config["scores"]).resolve()
@@ -715,6 +721,9 @@ def create_collection(config, output, progress=None, *, require_new=False):
 def _create_collection(config, output, progress):
     import pymol2
 
+    config = {**config, "scores": str(Path(config["scores"]).resolve())}
+    if config.get("root"):
+        config["root"] = str(Path(config["root"]).resolve())
     rows, skipped = prepare_rows(config)
     queues, edges = make_strata(rows, config["metrics"], config.get("seed", 0))
     reference = str(Path(config["reference"]).resolve()) if config.get("reference") else None
@@ -911,7 +920,19 @@ def _revise_collection(manifest, request, progress):
             removed = [row for index, row in enumerate(manifest["samples"]) if index in indices]
             manifest["samples"] = [row for index, row in enumerate(manifest["samples"]) if index not in indices]
             manifest.setdefault("excluded_paths", []).extend(row["path"] for row in removed)
-        elif action != "replace":
+        elif action == "replace":
+            config = manifest["config"]
+            relative_fields = relative_source_fields(config)
+            if relative_fields:
+                supplied = request.get("source_paths", {})
+                resolved = {}
+                for name in relative_fields:
+                    path = supplied.get(name)
+                    if not path or not Path(path).is_absolute():
+                        raise ValueError("旧清单未记录打分表或结构目录的绝对路径。请在数据与采样中重新选择，然后重试替换。")
+                    resolved[name] = str(Path(path).resolve())
+                manifest["config"] = {**config, **resolved}
+        else:
             raise ValueError(f"未知修改: {action}")
         if not manifest["samples"]:
             raise ValueError("请保留至少一个样本。")

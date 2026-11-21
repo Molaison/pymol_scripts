@@ -4,6 +4,7 @@ import argparse
 from collections import Counter
 import csv
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -534,6 +535,64 @@ class CollectionsSampling(unittest.TestCase):
             rows, skipped = core.prepare_rows(config)
             self.assertEqual([row["id"] for row in rows], ["retained.pdb"])
             self.assertEqual([item["row"] for item in skipped], [2])
+
+    def test_replacement_uses_saved_data_sources_and_recovers_legacy_paths_explicitly(self):
+        with tempfile.TemporaryDirectory() as temporary, pymol2.PyMOL() as fixture:
+            root = Path(temporary)
+            original, unrelated = root / "original", root / "unrelated"
+            for base in (original, unrelated):
+                (base / "models").mkdir(parents=True)
+            cmd = fixture.cmd
+            cmd.set("max_threads", 1)
+            cmd.load(str(FIXTURE), "source")
+            coords = cmd.get_coords("source", 1)
+            shutil.copyfile(FIXTURE, original / "models/first.pdb")
+            correct = original / "models/alternate.pdb"
+            cmd.load_coords(coords * [1.1, 1.6, 1.8], "source", 1)
+            cmd.save(str(correct), "source")
+            wrong = unrelated / "models/unrelated.pdb"
+            cmd.load_coords(coords * [2.0, 1.5, 1.2], "source", 1)
+            cmd.save(str(wrong), "source")
+            shutil.copyfile(wrong, original / correct.name)
+            scores = original / "scores.json"
+            scores.write_text(json.dumps([{"path": "first.pdb", "quality": 0.8}]), encoding="utf-8")
+            (unrelated / scores.name).write_text(
+                json.dumps([{"path": wrong.name, "quality": 0.82}]), encoding="utf-8")
+            config = {"scores": scores.name, "root": "models", "metrics": [{"name": "quality"}],
+                      "count": 1, "seed": 1, "rmsd": 0.1, "orientation": "pca",
+                      "target": "polymer.protein", "binder": "polymer.protein"}
+            current_path = root / "current/01_collection.json"
+            legacy_path = root / "legacy/01_collection.json"
+            legacy_path.parent.mkdir()
+            request = {"action": "replace", "indices": [0]}
+            cwd = Path.cwd()
+            try:
+                os.chdir(original)
+                saved = core.create_collection(config, current_path.parent)
+                self.assertEqual(saved["config"]["scores"], str(scores))
+                self.assertEqual(saved["config"]["root"], str(original / "models"))
+                legacy = {**saved, "config": {**saved["config"], **config}}
+                core.save_collection(legacy_path, legacy)
+                scores.write_text(json.dumps([{"path": "first.pdb", "quality": 0.8},
+                                              {"path": correct.name, "quality": 0.82}]), encoding="utf-8")
+                os.chdir(unrelated)
+                changed = core.revise_collection(current_path, request)
+                self.assertEqual(changed["samples"][0]["path"], str(correct))
+                report = legacy_path.parent / "02_samples.csv"
+                before = (legacy_path.read_bytes(), report.read_bytes())
+                with self.assertRaisesRegex(ValueError, "绝对路径"):
+                    core.revise_collection(legacy_path, request)
+                self.assertEqual((legacy_path.read_bytes(), report.read_bytes()), before)
+                with self.assertRaisesRegex(ValueError, "绝对路径"):
+                    core.revise_collection(legacy_path, {**request,
+                        "source_paths": {"scores": str(scores), "root": ""}})
+                self.assertEqual((legacy_path.read_bytes(), report.read_bytes()), before)
+                rebound = core.revise_collection(
+                    legacy_path, {**request, "source_paths": {"scores": str(scores), "root": str(original / "models")}})
+                self.assertEqual(rebound["samples"][0], changed["samples"][0])
+                self.assertEqual(rebound["config"], changed["config"])
+            finally:
+                os.chdir(cwd)
 
     def test_ca_reuse_across_pairs_preserves_decision_after_reloading_candidate(self):
         with pymol2.PyMOL() as instance:

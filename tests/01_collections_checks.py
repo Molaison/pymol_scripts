@@ -28,6 +28,81 @@ from workflows.dataset_navigation import collections_core as core
 args.output.mkdir(parents=True, exist_ok=True)
 results = {}
 
+def legacy_root_fixture(output):
+    import pymol2
+
+    dataset = output / "05_legacy_source"
+    models = dataset / "models"
+    models.mkdir(parents=True, exist_ok=True)
+    alternate = models / "alternate.pdb"
+    decoy = dataset / alternate.name
+    with pymol2.PyMOL() as instance:
+        cmd = instance.cmd
+        cmd.set("max_threads", 1)
+        cmd.load(str(repository / "data/helical_bundle.pdb"), "fixture")
+        coords = cmd.get_coords("fixture", 1)
+        for path, scale in ((models / "pinned.pdb", [1, 1, 1]), (models / "other.pdb", [1.25, 1.5, 1.8]),
+                            (alternate, [0.8, 2.8, 0.95]), (decoy, [1.8, 0.9, 2.3])):
+            cmd.load_coords(coords * scale, "fixture", 1)
+            cmd.save(str(path), "fixture")
+    scores = dataset / "scores.json"
+    entries = [{"path": "pinned.pdb", "quality": 0.91}, {"path": "other.pdb", "quality": 0.95}]
+    core.write_json(scores, entries)
+    collection = dataset / "collection"
+    manifest = collection / "01_collection.json"
+    initial = core.create_collection({"scores": str(scores), "root": str(models),
+                                      "metrics": [{"name": "quality"}], "count": 2,
+                                      "rmsd": 0.15, "orientation": "pca", "binder": "polymer.protein"}, collection)
+    pinned = next(index for index, row in enumerate(initial["samples"]) if row["id"] == "pinned.pdb")
+    initial["samples"][pinned]["pinned"] = True
+    initial["config"]["root"] = "models"
+    core.save_collection(manifest, initial)
+    core.write_json(scores, [*entries, {"path": alternate.name, "quality": 0.94}])
+    return manifest, alternate, initial, pinned
+
+
+def check_legacy_root_recovery(plugin, qt_widgets, application, output):
+    manifest, alternate, initial, pinned = legacy_root_fixture(output)
+    csv_path = manifest.parent / "02_samples.csv"
+    before = (manifest.read_bytes(), csv_path.read_bytes())
+    panel = plugin.CollectionDialog()
+    try:
+        panel.load_manifest(manifest)
+        panel.samples.clearSelection()
+        panel.samples.item(1 - pinned).setSelected(True)
+        panel.sampling.root.clear()
+        panel.sampling.load_button.click()
+        displayed_default = panel.sampling.root.text()
+        with patch.object(qt_widgets.QMessageBox, "warning", return_value=qt_widgets.QMessageBox.Ok):
+            panel.actions.edit("replace")
+            finish_collection_task(application, panel)
+        rejected = core.read_json(manifest)
+        assert before == (manifest.read_bytes(), csv_path.read_bytes()), (
+            f"Loading score columns supplied root {displayed_default!r} and replaced with "
+            f"{rejected['samples'][1 - pinned]['path']!r}")
+        assert not displayed_default
+        panel.sampling.root.setText(str(alternate.parent))
+        panel.samples.clearSelection()
+        panel.samples.item(1 - pinned).setSelected(True)
+        with patch.object(qt_widgets.QMessageBox, "warning", return_value=qt_widgets.QMessageBox.Ok):
+            panel.actions.edit("replace")
+            finish_collection_task(application, panel)
+        restored = core.read_json(manifest)
+        assert restored["samples"][pinned] == initial["samples"][pinned]
+        assert restored["samples"][1 - pinned]["path"] == str(alternate), panel.status.text()
+    finally:
+        panel.close()
+        panel.task.executor.shutdown()
+
+
+def finish_collection_task(application, panel):
+    deadline = time.monotonic() + 20
+    while panel.task.future is not None and time.monotonic() < deadline:
+        application.processEvents()
+        time.sleep(0.01)
+    assert panel.task.future is None, "UI task did not finish"
+
+
 # %% Numeric contract: joint strata, ties, rigid transforms and stable axes.
 if args.stage in ("math", "all"):
     rng = np.random.default_rng(28)
@@ -545,11 +620,7 @@ if args.stage in ("qt", "all") and (args.hidden_qt_child or os.name != "nt"):
     panel.capture_view()
     assert "view" in json.loads(manifest_path.read_text(encoding="utf-8"))
     def finish_ui_task():
-        deadline = time.monotonic() + 20
-        while panel.task.future is not None and time.monotonic() < deadline:
-            application.processEvents()
-            time.sleep(0.01)
-        assert panel.task.future is None, "UI task did not finish"
+        finish_collection_task(application, panel)
     finish_ui_task()
     assert len(core.current_images(panel.manifest, manifest_path.parent / "previews")) == 3
     panel.restore_scene()
@@ -626,7 +697,9 @@ if args.stage in ("qt", "all") and (args.hidden_qt_child or os.name != "nt"):
     finish_ui_task()
     assert not panel.task.control.processes and not panel.isVisible()
     panel.task.executor.shutdown()
+    check_legacy_root_recovery(plugin, QtWidgets, application, args.output)
     results["qt"] = {"score_selection": "PASS", "manifest_sample_count": 3,
+                     "legacy_root_requires_explicit_choice": "PASS",
                      "preview_restore_capture": "PASS", "cmd_run_registration": "PASS",
                      "preview_failures_keep_scene": "PASS",
                      "preview_with_retained_atom_order": "PASS",

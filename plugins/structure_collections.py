@@ -139,6 +139,7 @@ class SamplingForm(QtWidgets.QGroupBox):
         form.addRow("", self.load_button)
         form.addRow("结构路径列", self.path_column)
         self.root.setToolTip("打分表中的相对结构路径从此目录解析")
+        self.root.setPlaceholderText("新建时留空使用打分文件所在目录")
         form.addRow("结构根目录", root_widget)
         form.addRow("保存目录", output_widget)
         layout.addLayout(form)
@@ -183,10 +184,8 @@ class SamplingForm(QtWidgets.QGroupBox):
             if index >= 0:
                 self.path_column.setCurrentIndex(index)
                 break
-        score_parent = Path(self.scores.text().strip()).resolve().parent
-        if not self.root.text():
-            self.root.setText(str(score_parent))
         if not self.output.text():
+            score_parent = Path(self.scores.text().strip()).resolve().parent
             stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             self.output.setText(str(score_parent / "collections" / f"collection_{stamp}"))
 
@@ -412,6 +411,9 @@ class CollectionActions:
         request = {"action": action, "selected_samples": [core.sample_identity(row) for row in selected]}
         if action == "pin":
             request["pinned"] = not all(row.get("pinned", False) for row in selected)
+        elif action == "replace" and core.relative_source_fields(panel.manifest["config"]):
+            request["source_paths"] = {"scores": panel.sampling.scores.text().strip(),
+                                       "root": panel.sampling.root.text().strip()}
 
         def work(control):
             core.revise_external(path, request, options["python"], control)
