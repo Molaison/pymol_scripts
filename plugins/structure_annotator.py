@@ -864,7 +864,9 @@ def _cached_unzipped_path(src_path: str) -> str:
     return os.path.join(cache_dir, f"{uuid4().hex}_{base}")
 
 
-def _request_decompressed_path(index: int, version: Optional[FileVersion] = None) -> Optional[str]:
+def _request_decompressed_path(
+    index: int, version: Optional[FileVersion] = None, *, submit: bool = True
+) -> Optional[str]:
     if not STATE.files:
         return None
     index = index % len(STATE.files)
@@ -889,6 +891,12 @@ def _request_decompressed_path(index: int, version: Optional[FileVersion] = None
         _bg_decompressed_paths.pop(index, None)
 
     fut = _bg_decompress_futures.get(index)
+    if not submit:
+        if fut is not None and fut.cancel():
+            _bg_decompress_futures.pop(index)
+            _bg_decompress_versions.pop(index, None)
+        return None
+
     if fut is not None:
         # Retain completed attempts so a failed or consumed result is not resubmitted.
         if _bg_decompress_versions.get(index) == version or not fut.done():
@@ -929,14 +937,27 @@ def _decompression_failed_for_current_version(index: int) -> bool:
     return requested_version == _source_version(STATE.files[index])
 
 
+def _remove_completed_decompression(future, cache_dir) -> None:
+    if not future.cancelled() and future.exception() is None:
+        result = future.result()
+        if result:
+            _remove_cached_path(result[1])
+    if cache_dir and cache_dir != _bg_cache_dir:
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+
 def _evict_decompressed_except(keep_indices: set) -> None:
-    for idx, (_, path) in list(_bg_decompressed_paths.items()):
-        if idx in keep_indices:
-            continue
-        _remove_cached_path(path)
-        _bg_decompressed_paths.pop(idx, None)
-        _bg_decompress_futures.pop(idx, None)
-        _bg_decompress_versions.pop(idx, None)
+    cached_indices = _bg_decompress_futures.keys() | _bg_decompressed_paths.keys()
+    for index in cached_indices - keep_indices:
+        cached = _bg_decompressed_paths.pop(index, None)
+        future = _bg_decompress_futures.pop(index, None)
+        _bg_decompress_versions.pop(index, None)
+        if cached:
+            _remove_cached_path(cached[1])
+        elif future is not None and not future.cancel():
+            future.add_done_callback(
+                lambda done, cache_dir=_bg_cache_dir: _remove_completed_decompression(done, cache_dir)
+            )
 
 
 def _run_pymol_commands(template: str, context: Dict[str, str]) -> None:
@@ -972,11 +993,10 @@ def _desired_indices_ahead() -> List[int]:
 
 
 def _evict_unneeded_objects() -> None:
-    if STATE.keep_previous:
-        return
     if not STATE.files:
         _delete_managed_objects()
         STATE.current_object = None
+        _evict_decompressed_except(set())
         return
 
     if not STATE.preload_enabled or int(STATE.preload_ahead or 0) <= 0:
@@ -984,8 +1004,9 @@ def _evict_unneeded_objects() -> None:
     else:
         desired = set(_desired_indices_ahead())
 
-    _delete_managed_objects(desired)
-    _evict_decompressed_except(desired)
+    if not STATE.keep_previous:
+        _delete_managed_objects(desired)
+    _evict_decompressed_except(desired if STATE.background_decompress_gz else set())
 
 
 class _NoStructureLoaded(ValueError):
@@ -1059,7 +1080,7 @@ def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True,
     if force or obj_name is None or STATE.object_versions.get(index) != version:
         load_path = path
         if _is_gz_path(path) and STATE.background_decompress_gz:
-            requested = _request_decompressed_path(index, version)
+            requested = _request_decompressed_path(index, version, submit=not allow_gz_fallback)
             if requested and os.path.exists(_long_path(requested)):
                 load_path = requested
             elif not allow_gz_fallback:

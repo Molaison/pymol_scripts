@@ -2,6 +2,7 @@
 
 import argparse
 import builtins
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import csv
 import errno
@@ -14,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from threading import Event
 import unittest
 from unittest.mock import patch
 
@@ -838,6 +840,101 @@ class AnnotatorProvenance(unittest.TestCase):
                     self.annotator["sa_undo"]()
                     self.assertEqual(labels(str(source)).get("quality"), "Original label",
                                      "Undo restored the donor's label")
+
+    def test_foreground_gzip_load_does_not_start_a_second_decompression(self):
+        shutil.copyfile(FIXTURE, self.root / "01_current.pdb")
+        target = self.root / "02_target.pdb.gz"
+        target.write_bytes(gzip.compress(FIXTURE.read_bytes()))
+        self.state.background_decompress_gz = True
+        self.annotator["sa_load_dir"](str(self.root))
+        self.addCleanup(self.annotator["_reset_bg_cache"])
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            self.annotator["_bg_executor"] = executor
+            with patch.object(executor, "submit", wraps=executor.submit) as submit:
+                self.annotator["sa_next"]()
+                self.assertEqual(self.state.current_file(), str(target))
+                self.assertGreater(self.cmd.count_atoms(self.state.current_object), 0)
+                submit.assert_not_called()
+
+    def test_foreground_gzip_load_cancels_its_queued_preload(self):
+        shutil.copyfile(FIXTURE, self.root / "000.pdb")
+        data = gzip.compress(FIXTURE.read_bytes())
+        first = self.root / "001.pdb.gz"
+        second = self.root / "002.pdb.gz"
+        first.write_bytes(data)
+        second.write_bytes(data)
+        self.state.background_decompress_gz = True
+        self.state.preload_enabled = True
+        self.state.preload_ahead = 1
+        self.addCleanup(self.annotator["_reset_bg_cache"])
+        release = Event()
+        decompress = self.annotator["_decompress_gz_to_cache"]
+        finished = []
+
+        def record_decompression(source, destination, version):
+            result = decompress(source, destination, version)
+            finished.append(Path(source).name)
+            return result
+
+        self.annotator["_decompress_gz_to_cache"] = record_decompression
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            self.annotator["_bg_executor"] = executor
+            executor.submit(release.wait, 10)
+            try:
+                self.annotator["sa_load_dir"](str(self.root))
+                self.annotator["sa_next"]()
+                self.assertEqual(self.state.current_file(), str(first))
+                self.assertGreater(self.cmd.count_atoms(self.state.current_object), 0)
+            finally:
+                release.set()
+
+        self.assertEqual(finished, [second.name])
+        self.annotator["_process_preload_tick"]()
+        self.assertEqual(self.cmd.get_names("objects", enabled_only=1), [self.state.current_object])
+        self.assertTrue(any("002" in obj for obj in self.cmd.get_names("objects")))
+
+    def test_gzip_preload_drops_work_for_structures_skipped_by_goto(self):
+        shutil.copyfile(FIXTURE, self.root / "000.pdb")
+        data = gzip.compress(FIXTURE.read_bytes())
+        for index in range(1, 16):
+            (self.root / f"{index:03}.pdb.gz").write_bytes(data)
+        self.state.background_decompress_gz = True
+        self.state.preload_enabled = True
+        self.state.preload_ahead = 2
+        self.addCleanup(self.annotator["_reset_bg_cache"])
+        started, release = Event(), Event()
+        finished = []
+        decompress = self.annotator["_decompress_gz_to_cache"]
+
+        def decompress_with_first_worker_held(source, destination, version):
+            if not started.is_set():
+                started.set()
+                if not release.wait(timeout=10):
+                    raise TimeoutError("test did not release the first preload")
+            result = decompress(source, destination, version)
+            finished.append(Path(source).name)
+            return result
+
+        self.annotator["_decompress_gz_to_cache"] = decompress_with_first_worker_held
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            self.annotator["_bg_executor"] = executor
+            try:
+                self.annotator["sa_load_dir"](str(self.root))
+                self.assertTrue(started.wait(timeout=10))
+                for index in (4, 8, 12):
+                    self.annotator["sa_goto"](index + 1)
+                    self.assertEqual(self.state.index, index)
+            finally:
+                release.set()
+
+        self.assertEqual(finished, ["001.pdb.gz", "013.pdb.gz", "014.pdb.gz"])
+        cache = Path(self.annotator["_bg_cache_dir"])
+        self.assertEqual(len(list(cache.iterdir())), 2)
+        self.annotator["_process_preload_tick"]()
+        self.assertEqual(self.state.index, 12)
+        self.assertEqual(self.cmd.get_names("objects", enabled_only=1), [self.state.current_object])
+        self.assertTrue(any("013" in obj for obj in self.cmd.get_names("objects")))
 
     def test_background_gzip_cache_discards_replaced_source_before_navigation(self):
         dataset = self.root / "dataset"
