@@ -8,13 +8,20 @@ import shutil
 import tempfile
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, Iterator, List, Optional, Tuple
 import traceback
 import sys
+from uuid import uuid4
 
 STRUCTURE_PATTERN = r"^.+\.(?:pdb|cif)(?:\.gz)?$"
 OBJECT_PREFIX = "sa"
 REMARK_PREFIX = "REMARK 950 PYMOL_ANNOTATOR"
+PDB_ANNOTATION_MARKER = re.compile(rf"^{re.escape(REMARK_PREFIX)}(?=[ \t]+)")
+CIF_ANNOTATION_MARKER = re.compile(r"^#[ \t]*PYMOL_ANNOTATOR(?=[ \t]+)")
+WRITER_TIMESTAMP_PATTERN = re.compile(
+    r"[ \t]+ts=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+    r"(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\Z"
+)
 
 
 def _long_path(path: str) -> str:
@@ -102,52 +109,97 @@ def _write_text_file(path: str, text: str) -> None:
         fh.write(text)
 
 
-def _strip_existing_pdb_remark(lines: List[str], label_key: str) -> List[str]:
-    prefix = f"{REMARK_PREFIX} {label_key}="
+def _iter_text_lines(path: str) -> Iterator[str]:
+    """Yield a structure file one line at a time, including compressed files."""
+    path = _long_path(path)
+    if path.lower().endswith(".gz"):
+        with gzip.open(path, "rt", encoding="utf-8", errors="replace", newline="") as fh:
+            yield from fh
+        return
+    with open(path, "rt", encoding="utf-8", errors="replace", newline="") as fh:
+        yield from fh
+
+
+def _parse_annotation_record(line: str, marker) -> Optional[Tuple[str, str]]:
+    """Parse one complete annotator line without imposing a value token shape."""
+    marker_match = marker.match(line)
+    if not marker_match:
+        return None
+
+    payload = line[marker_match.end():].rstrip("\r\n")
+    match = re.match(r"[ \t]+([^ \t=]+)=(.*)\Z", payload)
+    if not match:
+        return None
+
+    value = match.group(2)
+    timestamp_match = WRITER_TIMESTAMP_PATTERN.search(value)
+    if timestamp_match:
+        value = value[: timestamp_match.start()]
+    return match.group(1), value
+
+
+def _iter_annotation_records(path: str, marker) -> Iterator[Tuple[str, str]]:
+    """Stream annotation records from a structure file using one marker."""
+    for line in _iter_text_lines(path):
+        record = _parse_annotation_record(line, marker)
+        if record is not None:
+            yield record
+
+
+def _read_annotation_records(path: str, marker) -> Dict[str, str]:
+    result = {}
+    try:
+        for key, value in _iter_annotation_records(path, marker):
+            result[key] = value
+    except Exception:
+        pass
+    return result
+
+
+def _strip_existing_annotations(lines: List[str], marker, label_key: str) -> List[str]:
     filtered = []
     for line in lines:
-        if line.startswith(prefix):
-            continue
-        filtered.append(line)
+        record = _parse_annotation_record(line, marker)
+        if record is None or record[0] != label_key:
+            filtered.append(line)
     return filtered
+
+
+def _insert_annotation_line(
+    lines: List[str], index: int, annotation: str, has_trailing_newline: bool
+) -> None:
+    """Insert a standalone record while preserving the file's final newline state."""
+    if index > 0 and not lines[index - 1].endswith(("\n", "\r")):
+        lines[index - 1] += "\n"
+    if index == len(lines) and not has_trailing_newline:
+        annotation = annotation.rstrip("\r\n")
+    lines.insert(index, annotation)
+
+
+def _join_text_with_trailing_state(lines: List[str], has_trailing_newline: bool) -> str:
+    text = "".join(lines)
+    if has_trailing_newline:
+        if not text.endswith(("\n", "\r")):
+            text += "\n"
+    elif text.endswith("\r\n"):
+        text = text[:-2]
+    elif text.endswith(("\n", "\r")):
+        text = text[:-1]
+    return text
 
 
 def read_pdb_annotations(path: str) -> Dict[str, str]:
     """Read all PYMOL_ANNOTATOR remarks from a PDB file."""
-    result = {}
-    try:
-        text = _read_text_file(path)
-        pattern = re.compile(rf"^{re.escape(REMARK_PREFIX)}\s+(\S+)=(\S+)")
-        for line in text.splitlines():
-            m = pattern.match(line)
-            if m:
-                key, value = m.group(1), m.group(2)
-                result[key] = value
-    except Exception:
-        pass
-    return result
+    return _read_annotation_records(path, PDB_ANNOTATION_MARKER)
 
 
 def read_cif_annotations(path: str) -> Dict[str, str]:
     """Read all PYMOL_ANNOTATOR comments from a CIF file."""
-    result = {}
-    try:
-        text = _read_text_file(path)
-        # Pattern: # PYMOL_ANNOTATOR key=value ts=...
-        pattern = re.compile(rf"^#\s*{re.escape(REMARK_PREFIX.split()[-1])}\s+(\S+)=(\S+)")
-        for line in text.splitlines():
-            m = pattern.match(line)
-            if m:
-                key, value = m.group(1), m.group(2)
-                result[key] = value
-    except Exception:
-        pass
-    return result
+    return _read_annotation_records(path, CIF_ANNOTATION_MARKER)
 
 
 def read_structure_annotations(path: str) -> Dict[str, str]:
     """Read existing annotations from a structure file."""
-    path = _resolve_annotation_path(path)
     lower = path.lower()
     if lower.endswith(".pdb") or lower.endswith(".pdb.gz"):
         return read_pdb_annotations(path)
@@ -159,54 +211,31 @@ def read_structure_annotations(path: str) -> Dict[str, str]:
 def has_annotation_fast(path: str, label_key: str) -> bool:
     """
     Fast check if a structure file has a specific annotation.
-    Uses simple string matching instead of full parsing.
-    For PDB files, only reads the header portion since REMARK lines are at the top.
+    Streams records in file order and stops as soon as the requested key matches.
     """
-    try:
-        path = _long_path(path)
-        lower = path.lower()
-        pdb_marker = f"{REMARK_PREFIX} {label_key}="
-        # CIF uses comment format: # PYMOL_ANNOTATOR key=value
-        cif_marker = f"# PYMOL_ANNOTATOR {label_key}="
-
-        if lower.endswith(".gz"):
-            # For gzip, read in chunks to avoid loading entire file
-            with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
-                # Read up to 512KB for header check
-                content = fh.read(512 * 1024)
-                if pdb_marker in content:
-                    return True
-                if lower.endswith(".cif.gz") and cif_marker in content:
-                    return True
-                # CIF annotations may be at end, need to read more
-                if lower.endswith(".cif.gz"):
-                    rest = fh.read()
-                    if cif_marker in rest:
-                        return True
-        else:
-            # For non-gzip PDB, REMARK is at top, read limited portion
-            if lower.endswith(".pdb"):
-                with open(path, "rt", encoding="utf-8", errors="replace") as fh:
-                    # REMARKs are at file start, 256KB should be enough
-                    content = fh.read(256 * 1024)
-                    return pdb_marker in content
-            else:
-                # CIF: annotations may be at end, read full file
-                with open(path, "rt", encoding="utf-8", errors="replace") as fh:
-                    content = fh.read()
-                    return cif_marker in content
-
+    lower = path.lower()
+    if lower.endswith(".pdb") or lower.endswith(".pdb.gz"):
+        marker = PDB_ANNOTATION_MARKER
+    elif lower.endswith(".cif") or lower.endswith(".cif.gz"):
+        marker = CIF_ANNOTATION_MARKER
+    else:
         return False
+
+    try:
+        for key, _value in _iter_annotation_records(path, marker):
+            if key == label_key:
+                return True
     except Exception:
         return False
+    return False
 
 
 def write_pdb_annotation(path: str, label_key: str, label_value: str) -> None:
     text = _read_text_file(path)
-    has_trailing_newline = text.endswith("\n")
+    has_trailing_newline = text.endswith(("\n", "\r"))
     lines = text.splitlines(keepends=True)
 
-    lines = _strip_existing_pdb_remark(lines, label_key)
+    lines = _strip_existing_annotations(lines, PDB_ANNOTATION_MARKER, label_key)
 
     timestamp = datetime.datetime.now().isoformat(timespec="seconds")
     remark = f"{REMARK_PREFIX} {label_key}={label_value} ts={timestamp}\n"
@@ -217,36 +246,26 @@ def write_pdb_annotation(path: str, label_key: str, label_value: str) -> None:
         if stripped == "END" or stripped == "ENDMDL":
             insert_at = idx
             break
-    lines.insert(insert_at, remark)
+    _insert_annotation_line(lines, insert_at, remark, has_trailing_newline)
 
-    out = "".join(lines)
-    if has_trailing_newline and not out.endswith("\n"):
-        out += "\n"
+    out = _join_text_with_trailing_state(lines, has_trailing_newline)
     _write_text_file(path, out)
-
-
-def _strip_existing_cif_comment(lines: List[str], label_key: str) -> List[str]:
-    """Remove existing PYMOL_ANNOTATOR comment for the given label_key."""
-    prefix = f"# PYMOL_ANNOTATOR {label_key}="
-    return [line for line in lines if not line.startswith(prefix)]
 
 
 def write_cif_annotation(path: str, label_key: str, label_value: str) -> None:
     """Write annotation as a CIF comment to avoid breaking strict parsers like Rosetta."""
     text = _read_text_file(path)
-    has_trailing_newline = text.endswith("\n")
+    has_trailing_newline = text.endswith(("\n", "\r"))
     lines = text.splitlines(keepends=True)
 
-    lines = _strip_existing_cif_comment(lines, label_key)
+    lines = _strip_existing_annotations(lines, CIF_ANNOTATION_MARKER, label_key)
 
     timestamp = datetime.datetime.now().isoformat(timespec="seconds")
     # Use comment format similar to PDB REMARK
     comment = f"# PYMOL_ANNOTATOR {label_key}={label_value} ts={timestamp}\n"
-    lines.append(comment)
+    _insert_annotation_line(lines, len(lines), comment, has_trailing_newline)
 
-    out = "".join(lines)
-    if has_trailing_newline and not out.endswith("\n"):
-        out += "\n"
+    out = _join_text_with_trailing_state(lines, has_trailing_newline)
     _write_text_file(path, out)
 
 
@@ -264,18 +283,16 @@ def annotate_structure_file(path: str, label_key: str, label_value: str) -> None
 def remove_structure_annotation(path: str, label_key: str) -> None:
     """Delete a single PYMOL_ANNOTATOR entry from a structure file (used for undo)."""
     text = _read_text_file(path)
-    has_trailing_newline = text.endswith("\n")
+    has_trailing_newline = text.endswith(("\n", "\r"))
     lines = text.splitlines(keepends=True)
     lower = path.lower()
     if lower.endswith(".pdb") or lower.endswith(".pdb.gz"):
-        lines = _strip_existing_pdb_remark(lines, label_key)
+        lines = _strip_existing_annotations(lines, PDB_ANNOTATION_MARKER, label_key)
     elif lower.endswith(".cif") or lower.endswith(".cif.gz"):
-        lines = _strip_existing_cif_comment(lines, label_key)
+        lines = _strip_existing_annotations(lines, CIF_ANNOTATION_MARKER, label_key)
     else:
         raise ValueError(f"Unsupported file type: {path}")
-    out = "".join(lines)
-    if has_trailing_newline and not out.endswith("\n"):
-        out += "\n"
+    out = _join_text_with_trailing_state(lines, has_trailing_newline)
     _write_text_file(path, out)
 
 
@@ -297,8 +314,7 @@ class AnnotatorState:
     preload_ahead: int = 2
     preload_interval_ms: int = 250
     background_decompress_gz: bool = True
-    managed_objects: List[str] = field(default_factory=list)
-    object_name_overrides: Dict[int, str] = field(default_factory=dict)
+    object_marks: Dict[int, str] = field(default_factory=dict)
     current_object: Optional[str] = None
     undo_history: List[dict] = field(default_factory=list)
     annotated_indices: set = field(default_factory=set)
@@ -319,8 +335,8 @@ if not hasattr(STATE, "undo_history"):
     STATE.undo_history = []
 if not hasattr(STATE, "annotated_indices"):
     STATE.annotated_indices = set()
-if not hasattr(STATE, "object_name_overrides"):
-    STATE.object_name_overrides = {}
+if not hasattr(STATE, "object_marks"):
+    STATE.object_marks = {}
 
 
 def _structure_dedupe_key(file_path: str) -> str:
@@ -376,17 +392,6 @@ def _list_structure_files(
     return files
 
 
-def _resolve_annotation_path(path: str) -> str:
-    if not path:
-        return path
-    lower = path.lower()
-    if lower.endswith(".gz"):
-        return path
-    if STATE.prefer_gz and os.path.exists(path + ".gz"):
-        return path + ".gz"
-    return path
-
-
 def _object_name_for_index(path: str, index: int) -> str:
     base = os.path.basename(path)
     base_lower = base.lower()
@@ -396,49 +401,31 @@ def _object_name_for_index(path: str, index: int) -> str:
             base_lower = base_lower[: -len(ext)]
             break
     base_token = _sanitize_token(base, "structure")
-    name = f"{OBJECT_PREFIX}_{index + 1:05d}_{base_token}"
-    return STATE.object_name_overrides.get(index, name)
+    return f"{OBJECT_PREFIX}_{index + 1:05d}_{base_token}"
 
 
-def _object_exists(object_name: str) -> bool:
+def _tracked_objects(indices=None) -> Dict[int, str]:
+    if not STATE.object_marks:
+        return {}
+    selections = set(cmd.get_names("selections"))
+    tracked = {}
+    requested = STATE.object_marks if indices is None else indices
+    for index in requested:
+        marker = STATE.object_marks.get(index)
+        if marker in selections:
+            names = cmd.get_object_list(marker)
+            if len(names) == 1:
+                tracked[index] = names[0]
+    return tracked
+
+
+def _enabled_managed_objects(indices=None) -> Dict[int, str]:
+    """Find displayed models through their atom selections."""
     try:
-        return object_name in set(cmd.get_object_list())
+        enabled = set(cmd.get_names("objects", enabled_only=1))
+        return {index: obj for index, obj in _tracked_objects(indices).items() if obj in enabled}
     except Exception:
-        return False
-
-
-def _get_enabled_managed_object() -> Optional[str]:
-    """Get the currently enabled managed object in PyMOL, if any."""
-    try:
-        enabled = cmd.get_names("objects", enabled_only=1)
-        for obj in enabled:
-            if obj in STATE.managed_objects:
-                return obj
-        return None
-    except Exception:
-        return None
-
-
-def _verify_current_object_enabled() -> bool:
-    """
-    Verify that STATE.current_object is actually enabled in PyMOL.
-    Returns True if matched, False if mismatch detected.
-    """
-    if not STATE.current_object:
-        return False
-    try:
-        enabled = cmd.get_names("objects", enabled_only=1)
-        return STATE.current_object in enabled
-    except Exception:
-        return False
-
-
-def _get_index_for_object(obj_name: str) -> Optional[int]:
-    """Extract the index from an object name like 'sa_00001_filename'."""
-    m = re.match(rf"^{re.escape(OBJECT_PREFIX)}_(\d+)_", obj_name)
-    if m:
-        return int(m.group(1)) - 1
-    return None
+        return {}
 
 
 _bg_executor = globals().get("_bg_executor", None)
@@ -572,16 +559,12 @@ def _run_pymol_commands(template: str, context: Dict[str, str]) -> None:
             traceback.print_exc()
 
 
-def _delete_managed_objects(keep: bool) -> None:
-    if keep:
-        return
-    for obj in list(STATE.managed_objects):
-        try:
-            cmd.delete(obj)
-        except Exception:
-            pass
-    STATE.managed_objects.clear()
-    STATE.current_object = None
+def _delete_managed_objects(keep_indices=()) -> None:
+    removed = STATE.object_marks.keys() - set(keep_indices)
+    for obj in _tracked_objects(removed).values():
+        cmd.delete(obj)
+    for index in removed:
+        cmd.delete(STATE.object_marks.pop(index))
 
 
 def _desired_indices_ahead() -> List[int]:
@@ -595,7 +578,8 @@ def _evict_unneeded_objects() -> None:
     if STATE.keep_previous:
         return
     if not STATE.files:
-        _delete_managed_objects(False)
+        _delete_managed_objects()
+        STATE.current_object = None
         return
 
     if not STATE.preload_enabled or int(STATE.preload_ahead or 0) <= 0:
@@ -603,30 +587,7 @@ def _evict_unneeded_objects() -> None:
     else:
         desired = set(_desired_indices_ahead())
 
-    keep_objects = []
-    for obj in list(STATE.managed_objects):
-        if not _object_exists(obj):
-            continue
-        keep_objects.append(obj)
-    STATE.managed_objects = keep_objects
-
-    loaded_by_index = {}
-    for obj in STATE.managed_objects:
-        m = re.match(rf"^{re.escape(OBJECT_PREFIX)}_(\d+)_", obj)
-        if not m:
-            continue
-        idx = int(m.group(1)) - 1
-        loaded_by_index[idx] = obj
-
-    for idx, obj in list(loaded_by_index.items()):
-        if idx not in desired:
-            try:
-                cmd.delete(obj)
-            except Exception:
-                pass
-            if obj in STATE.managed_objects:
-                STATE.managed_objects.remove(obj)
-
+    _delete_managed_objects(desired)
     _evict_decompressed_except(desired)
 
 
@@ -635,14 +596,9 @@ def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> O
         return None
     index = index % len(STATE.files)
     path = STATE.files[index]
-    obj_name = _object_name_for_index(path, index)
-
-    exists = _object_exists(obj_name)
-    if exists and obj_name not in STATE.managed_objects:
-        obj_name = cmd.get_unused_name(obj_name)
-        STATE.object_name_overrides[index] = obj_name
-        exists = False
-    if not exists:
+    loaded = _tracked_objects(None if focus else (index,))
+    obj_name = loaded.get(index)
+    if obj_name is None:
         load_path = path
         if _is_gz_path(path) and STATE.background_decompress_gz:
             requested = _request_decompressed_path(index)
@@ -655,11 +611,19 @@ def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> O
         if not os.path.exists(load_path_resolved):
             print(f"Structure Annotator: file not found: {load_path}")
             return None
+        obj_name = cmd.get_unused_name(_object_name_for_index(path, index), alwaysnumber=0)
         cmd.load(load_path_resolved, obj_name, quiet=1)
-        cmd.sync()  # Wait for all async operations to complete
-        cmd.refresh()  # Then refresh display state
-    if obj_name not in STATE.managed_objects:
-        STATE.managed_objects.append(obj_name)
+        cmd.sync()
+        cmd.refresh()
+        marker = f"_sa_owner_{uuid4().hex}"
+        if not cmd.select(marker, f"model {obj_name}", enable=0, quiet=1):
+            cmd.delete(marker)
+            cmd.delete(obj_name)
+            return None
+        old_marker = STATE.object_marks.get(index)
+        if old_marker:
+            cmd.delete(old_marker)
+        STATE.object_marks[index] = marker
 
     if not focus:
         try:
@@ -668,8 +632,8 @@ def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> O
             pass
         return obj_name
 
-    for other in list(STATE.managed_objects):
-        if other != obj_name and _object_exists(other):
+    for other_index, other in loaded.items():
+        if other_index != index:
             try:
                 cmd.disable(other)
             except Exception:
@@ -680,12 +644,6 @@ def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> O
         pass
 
     STATE.current_object = obj_name
-
-    # Extra safety check: ensure object is truly available before step_cmd
-    if not _object_exists(obj_name):
-        print(f"Structure Annotator: waiting for object {obj_name} to be ready...")
-        cmd.sync()
-        cmd.refresh()
 
     context = {
         "object": obj_name,
@@ -725,11 +683,8 @@ def _kick_preload() -> None:
         return
 
     desired = _desired_indices_ahead()
-    pending = []
-    for idx in desired:
-        obj = _object_name_for_index(STATE.files[idx], idx)
-        if obj not in STATE.managed_objects or not _object_exists(obj):
-            pending.append(idx)
+    loaded = _tracked_objects(desired)
+    pending = [idx for idx in desired if idx not in loaded]
 
     _preload_generation += 1
     _preload_queue = pending
@@ -771,8 +726,9 @@ def _load_current_structure() -> None:
         print("Structure Annotator: no dataset loaded")
         return
     if not STATE.keep_previous and not STATE.preload_enabled:
-        _delete_managed_objects(False)
+        _delete_managed_objects()
 
+    STATE.current_object = None
     _ensure_loaded(STATE.index, focus=True, allow_gz_fallback=True)
     _evict_unneeded_objects()
     _kick_preload()
@@ -786,7 +742,7 @@ def _rescan_annotated_indices() -> None:
     label_key = normalize_label_key(STATE.label_name)
     for idx, path in enumerate(STATE.files):
         try:
-            if has_annotation_fast(_resolve_annotation_path(path), label_key):
+            if has_annotation_fast(path, label_key):
                 STATE.annotated_indices.add(idx)
         except Exception:
             pass
@@ -810,8 +766,8 @@ def sa_load_dir(path: str = ".", pattern: str = STRUCTURE_PATTERN) -> None:
             _preload_panel_timer.stop()
         _preload_queue.clear()
         _reset_bg_cache()
-        _delete_managed_objects(False)
-        STATE.object_name_overrides.clear()
+        _delete_managed_objects()
+        STATE.current_object = None
         STATE.dataset_dir, STATE.pattern, STATE.files = path, pattern, files
         STATE.index = 0
         STATE.undo_history.clear()
@@ -865,29 +821,17 @@ def sa_annotate(value: str) -> None:
     """
     try:
         path = STATE.current_file()
-        obj_name = STATE.current_object
-        if not path or not obj_name:
+        if not path:
             print("Structure Annotator: nothing to annotate")
             return
-
-        # Verify the displayed object matches STATE before annotating
-        if not _verify_current_object_enabled():
-            actual_enabled = _get_enabled_managed_object()
-            if actual_enabled and actual_enabled != obj_name:
-                actual_idx = _get_index_for_object(actual_enabled)
-                print(f"Structure Annotator: MISMATCH DETECTED!")
-                print(f"  Widget shows: {obj_name} (index {STATE.index})")
-                print(f"  PyMOL shows:  {actual_enabled} (index {actual_idx})")
-                print(f"  Annotation ABORTED to prevent labeling wrong file.")
-                print(f"  Please click Reload or use navigation to sync state.")
-                return
-            elif not actual_enabled:
-                print("Structure Annotator: WARNING - expected object not enabled in PyMOL")
-                print(f"  Expected: {obj_name}")
-                print(f"  Continuing with annotation based on widget state...")
+        obj_name = _enabled_managed_objects((STATE.index,)).get(STATE.index)
+        if not obj_name:
+            print("Structure Annotator: the current structure is not displayed. Click Reload before annotating.")
+            return
+        STATE.current_object = obj_name
 
         label_key = normalize_label_key(STATE.label_name)
-        anno_path = _resolve_annotation_path(path)
+        anno_path = path
         prev_value = read_structure_annotations(anno_path).get(label_key)
         annotate_structure_file(anno_path, label_key, value)
 
@@ -1014,7 +958,7 @@ def sa_export_csv(out_path: str = "") -> Optional[str]:
             )
         rows = []
         for path in STATE.files:
-            annotations = read_structure_annotations(_resolve_annotation_path(path))
+            annotations = read_structure_annotations(path)
             rows.append((os.path.basename(path), annotations.get(label_key, ""), path))
 
         with open(_long_path(out_path), "w", newline="", encoding="utf-8") as fh:
@@ -1315,15 +1259,9 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
 
     def _reload(self) -> None:
         self._sync_to_state()
-        # If there's a mismatch, sync STATE to match PyMOL's actual enabled object
-        if STATE.current_object and not _verify_current_object_enabled():
-            actual_enabled = _get_enabled_managed_object()
-            if actual_enabled and actual_enabled != STATE.current_object:
-                actual_idx = _get_index_for_object(actual_enabled)
-                if actual_idx is not None and 0 <= actual_idx < len(STATE.files):
-                    print(f"Structure Annotator: syncing to PyMOL state (index {actual_idx})")
-                    STATE.index = actual_idx
-                    STATE.current_object = actual_enabled
+        active = _enabled_managed_objects() if STATE.current_object else {}
+        if active and STATE.index not in active:
+            STATE.index = next(iter(active))
         _load_current_structure()
         self._refresh_status()
 
@@ -1477,16 +1415,8 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
             else:
                 btn.setStyleSheet("")
 
-        # Check for mismatch between widget state and PyMOL state
-        if STATE.current_object:
-            if not _verify_current_object_enabled():
-                actual_enabled = _get_enabled_managed_object()
-                if actual_enabled and actual_enabled != STATE.current_object:
-                    actual_idx = _get_index_for_object(actual_enabled)
-                    status_text += f"\n\nWARNING: PyMOL shows different object!"
-                    status_text += f"\nWidget: {STATE.current_object}"
-                    status_text += f"\nPyMOL:  {actual_enabled} (idx {actual_idx})"
-                    status_text += f"\nClick Reload to sync."
+        if STATE.current_object and STATE.index not in _enabled_managed_objects((STATE.index,)):
+            status_text += "\n\nCurrent structure is unavailable. Click Reload before annotating."
 
         self.status_label.setText(status_text)
 
