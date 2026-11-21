@@ -238,6 +238,58 @@ class AnnotatorProvenance(unittest.TestCase):
         reader = self.annotator["read_structure_annotations"]
         self.assertNotIn("quality", reader(str(source)))
 
+    def test_undo_cannot_transfer_old_labels_to_a_replacement_model(self):
+        dataset = self.root / "dataset"
+        dataset.mkdir()
+        source = dataset / "model.pdb"
+        shutil.copyfile(FIXTURE, source)
+        write = self.annotator["annotate_structure_file"]
+        read = self.annotator["read_structure_annotations"]
+        write(str(source), "quality", "Original label")
+        self.annotator["sa_load_dir"](str(dataset))
+        self.annotator["sa_annotate"]("Reviewed")
+
+        replacement, new_count = self.replacement_structure()
+        write(str(replacement), "quality", "Replacement label")
+        replacement.replace(source)
+        replacement_bytes = source.read_bytes()
+        self.annotator["sa_undo"]()
+        self.assertEqual(source.read_bytes(), replacement_bytes)
+
+        self.annotator["sa_goto"](1)
+        self.assertEqual(self.cmd.count_atoms(self.state.current_object), new_count)
+        self.annotator["sa_annotate"]("Second review")
+        self.annotator["sa_undo"]()
+        self.assertEqual(read(str(source))["quality"], "Replacement label")
+
+        replacement_bytes = source.read_bytes()
+        self.annotator["sa_undo"]()
+        self.assertEqual(source.read_bytes(), replacement_bytes)
+
+    def test_undo_keeps_active_label_progress_and_restores_interleaved_edits(self):
+        sources = [self.root / name for name in ("first.pdb", "second.pdb")]
+        write = self.annotator["annotate_structure_file"]
+        read = self.annotator["read_structure_annotations"]
+        for source in sources:
+            shutil.copyfile(FIXTURE, source)
+            write(str(source), "confidence", "Yes")
+        self.annotator["sa_load_dir"](str(self.root))
+        self.annotator["sa_annotate"]("First review")
+        self.annotator["sa_next"]()
+        self.annotator["sa_annotate"]("Second review")
+        self.annotator["sa_goto"](1)
+        self.annotator["sa_annotate"]("Third review")
+        self.state.label_name = "confidence"
+        self.annotator["_rescan_annotated_indices"]()
+
+        for target, expected in ((sources[0], "First review"), (sources[1], None), (sources[0], None)):
+            with self.subTest(target=target.name, expected=expected):
+                self.annotator["sa_undo"]()
+                self.assertEqual(read(str(target)).get("quality"), expected)
+                self.assertEqual(len(self.state.annotated_indices), 2)
+        with Path(self.annotator["sa_export_csv"]()).open(newline="", encoding="utf-8") as report:
+            self.assertEqual([row["confidence"] for row in csv.DictReader(report)], ["Yes", "Yes"])
+
     def test_undo_keeps_user_edits_to_the_preloaded_model(self):
         self.state.preload_enabled = True
         for earlier_label in (None, "Earlier label"):
@@ -402,6 +454,36 @@ class AnnotatorProvenance(unittest.TestCase):
         self.annotator["sa_annotate"]("Current source")
         reader = self.annotator["read_structure_annotations"]
         self.assertEqual(reader(str(source))["quality"], "Current source")
+
+    def test_corrupt_gzip_does_not_block_the_next_valid_preload(self):
+        shutil.copyfile(FIXTURE, self.root / "a_current.pdb")
+        (self.root / "b_broken.pdb.gz").write_bytes(b"bad gzip fixture")
+        data = gzip.compress(FIXTURE.read_bytes())
+        (self.root / "c_valid.pdb.gz").write_bytes(data)
+        (self.root / "d_valid.pdb.gz").write_bytes(data)
+        self.state.preload_enabled = True
+        self.state.preload_ahead = 3
+        self.state.background_decompress_gz = True
+        self.annotator["sa_load_dir"](str(self.root))
+        self.addCleanup(self.annotator["_reset_bg_cache"])
+        self.addCleanup(self.annotator["_bg_executor"].shutdown, wait=True)
+        futures = self.annotator["_bg_decompress_futures"]
+        futures[2].result(timeout=10)
+        futures[3].result(timeout=10)
+        with self.assertRaises(gzip.BadGzipFile):
+            futures[1].result(timeout=10)
+
+        self.annotator["_process_preload_tick"]()
+        first_tick = self.cmd.get_names("objects")
+        loaded = next((name for name in first_tick if "c_valid" in name), None)
+        self.assertIsNotNone(loaded)
+        self.assertFalse(any("d_valid" in name for name in first_tick))
+
+        self.annotator["_process_preload_tick"]()
+        self.assertTrue(any("d_valid" in name for name in self.cmd.get_names("objects")))
+        self.assertEqual(self.cmd.get_names("objects", enabled_only=1), [self.state.current_object])
+        self.annotator["sa_goto"](3)
+        self.assertEqual(self.state.current_object, loaded)
 
     def test_legacy_pdb_markers_beyond_the_old_probe_boundary_are_still_skipped(self):
         self.cmd.load(str(FIXTURE), "template")

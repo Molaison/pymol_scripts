@@ -682,6 +682,16 @@ def _collect_ready_decompressed(indexes: List[int]) -> None:
                 _bg_decompressed_paths.pop(idx, None)
 
 
+def _decompression_failed_for_current_version(index: int) -> bool:
+    fut = _bg_decompress_futures.get(index)
+    if fut is None or not fut.done() or fut.cancelled() or fut.exception() is None:
+        return False
+    requested_version = _bg_decompress_versions.get(index)
+    if requested_version is None or not (0 <= index < len(STATE.files)):
+        return False
+    return requested_version == _source_version(STATE.files[index])
+
+
 def _evict_decompressed_except(keep_indices: set) -> None:
     for idx, (_, path) in list(_bg_decompressed_paths.items()):
         if idx in keep_indices:
@@ -865,22 +875,29 @@ def _process_preload_tick() -> None:
     if not _preload_queue:
         return
     _collect_ready_decompressed(list(_preload_queue))
-
-    idx = _preload_queue[0]
-    try:
-        loaded = _ensure_loaded(idx, focus=False, allow_gz_fallback=False)
-        if loaded is None:
-            _schedule_preload_tick()
+    while _preload_queue:
+        idx = _preload_queue[0]
+        if _decompression_failed_for_current_version(idx):
+            path = STATE.files[idx]
+            _preload_queue.pop(0)
+            print(f"Structure Annotator: skipping unreadable gzip during preload: {path}")
+            continue
+        try:
+            loaded = _ensure_loaded(idx, focus=False, allow_gz_fallback=False)
+            if loaded is None:
+                _schedule_preload_tick()
+                return
+            _preload_queue.pop(0)
+            _evict_unneeded_objects()
+            if _preload_queue:
+                _schedule_preload_tick()
             return
-        _preload_queue.pop(0)
-        _evict_unneeded_objects()
-    except Exception as e:
-        print(f"Structure Annotator preload error: {e}")
-        traceback.print_exc()
-        _preload_queue = []
-        return
-    if _preload_queue:
-        _schedule_preload_tick()
+        except Exception as e:
+            print(f"Structure Annotator preload error: {e}")
+            traceback.print_exc()
+            _preload_queue = []
+            return
+    return
 
 
 def _load_current_structure() -> None:
@@ -1008,6 +1025,8 @@ def sa_annotate(value: str) -> None:
             "label_key": label_key,
             "prev_value": prev_value,
             "value": value,
+            "before_version": version,
+            "written_version": written_version,
         })
         if len(STATE.undo_history) > 100:
             STATE.undo_history.pop(0)
@@ -1042,20 +1061,33 @@ def sa_undo() -> None:
         label_key = entry["label_key"]
         prev_value = entry["prev_value"]
         index = entry["index"]
-        version = _source_version(path)
+        version = entry.get("written_version")
+        if version is None:
+            print("Structure Annotator: this Undo entry has no source version. Load a dataset to reset history.")
+            return
+        if _source_version(path) != version:
+            print("Structure Annotator: restore the annotated file before retrying Undo.")
+            return
 
         if prev_value is None:
             written_version = remove_structure_annotation(path, label_key, expected_version=version)
-            STATE.annotated_indices.discard(index)
             restored = "(none)"
         else:
             written_version = annotate_structure_file(path, label_key, prev_value, expected_version=version)
-            STATE.annotated_indices.add(index)
             restored = prev_value
 
-        if version is not None and STATE.object_versions.get(index) == version:
+        if normalize_label_key(STATE.label_name) == label_key:
+            if prev_value is None:
+                STATE.annotated_indices.discard(index)
+            else:
+                STATE.annotated_indices.add(index)
+        if STATE.object_versions.get(index) == version:
             STATE.object_versions[index] = written_version
         STATE.undo_history.pop()
+        for earlier in reversed(STATE.undo_history):
+            if earlier.get("written_version") == entry["before_version"]:
+                earlier["written_version"] = written_version
+                break
         print(f"Undo: {os.path.basename(path)} {label_key} -> {restored}")
         # Return to the file we just changed so the user can see the result.
         if 0 <= index < len(STATE.files):
@@ -1449,7 +1481,10 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         self._refresh_status()
 
     def _undo(self) -> None:
+        previous_key = normalize_label_key(STATE.label_name)
         self._sync_to_state()
+        if normalize_label_key(STATE.label_name) != previous_key:
+            _rescan_annotated_indices()
         sa_undo()
         self._refresh_status()
 
@@ -1476,7 +1511,6 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         self._sync_to_state()
         if STATE.files:
             _rescan_annotated_indices()
-            STATE.undo_history.clear()
         self._refresh_status()
 
     def _rebuild_value_controls(self) -> None:
@@ -1538,6 +1572,7 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
             self.status_label.setToolTip("")
             self.goto_spin.setRange(1, 1)
             self.undo_btn.setEnabled(False)
+            self.undo_btn.setToolTip("")
             return
 
         # Keep the go-to control in range with the loaded dataset.
@@ -1546,6 +1581,11 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         self.goto_spin.setValue(STATE.index + 1)
         self.goto_spin.blockSignals(False)
         self.undo_btn.setEnabled(bool(STATE.undo_history))
+        if STATE.undo_history:
+            entry = STATE.undo_history[-1]
+            self.undo_btn.setToolTip(f"Undo {entry['label_key']} on {os.path.basename(entry['path'])}")
+        else:
+            self.undo_btn.setToolTip("")
 
         path = STATE.current_file() or ""
         basename = os.path.basename(path)
