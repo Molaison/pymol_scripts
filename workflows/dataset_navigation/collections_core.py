@@ -657,13 +657,15 @@ def ca_coordinates(cmd, expression, cache):
     return cache[expression]
 
 
-def matched_atoms(cmd, mobile, reference, expression, coverage=0.8, atom_cache=None):
+def matched_atoms(cmd, mobile, reference, expression, coverage=0.8, atom_cache=None, *, skip_unreachable=False):
     """Use native sequence/structure matching without rejecting high-RMSD atoms."""
     first, second = selection(mobile, expression, True), selection(reference, expression, True)
     cache = {} if atom_cache is None else atom_cache
     first_atoms = ca_coordinates(cmd, first, cache)
     second_atoms = ca_coordinates(cmd, second, cache)
-    if min(len(first_atoms), len(second_atoms)) < 3:
+    possible_pairs = min(len(first_atoms), len(second_atoms))
+    largest_selection = max(len(first_atoms), len(second_atoms))
+    if possible_pairs < 3 or (skip_unreachable and possible_pairs / largest_selection < coverage):
         return None
     # Native super can collapse repetitive/poly-Gly models to a single match.
     for method in (cmd.super, cmd.align):
@@ -675,7 +677,7 @@ def matched_atoms(cmd, mobile, reference, expression, coverage=0.8, atom_cache=N
             if mobile in indices and reference in indices:
                 points.append((first_atoms[indices[mobile]], second_atoms[indices[reference]]))
         cmd.delete("col_match")
-        if len(points) >= 3 and len(points) / max(len(first_atoms), len(second_atoms), 1) >= coverage:
+        if len(points) >= 3 and len(points) / largest_selection >= coverage:
             return np.array([x[0] for x in points]), np.array([x[1] for x in points])
     return None
 
@@ -683,8 +685,10 @@ def matched_atoms(cmd, mobile, reference, expression, coverage=0.8, atom_cache=N
 def structural_distance(cmd, mobile, reference, config, atom_cache=None):
     """Binder/selection shape RMSD or binder-pose RMSD after target alignment."""
     expression = config.get("diversity_selection") or config.get("binder", "chain B")
+    # Opting in to incomparable samples still requires the native matching checks.
     pairs = matched_atoms(cmd, mobile, reference, expression,
-                          float(config.get("coverage", 0.8)), atom_cache)
+                          float(config.get("coverage", 0.8)), atom_cache,
+                          skip_unreachable=not config.get("allow_unverified", False))
     if pairs is None:
         return None
     if config.get("diversity", "shape") == "pose":

@@ -970,6 +970,56 @@ class CollectionsSampling(unittest.TestCase):
             finally:
                 os.chdir(cwd)
 
+    def test_impossible_ca_coverage_skips_native_alignment(self):
+        with tempfile.TemporaryDirectory() as temporary, pymol2.PyMOL() as instance:
+            root = Path(temporary)
+            cmd = instance.cmd
+            cmd.set("max_threads", 1)
+            atoms = [line for line in FIXTURE.read_text(encoding="ascii").splitlines(keepends=True)
+                     if line.startswith("ATOM")]
+            residues = list(dict.fromkeys(line[22:26] for line in atoms))
+            for name, length in (("small", 8), ("large", 10)):
+                path = root / f"{name}.pdb"
+                included = set(residues[:length])
+                path.write_text("".join(line for line in atoms if line[22:26] in included) + "END\n",
+                                encoding="ascii")
+                core.load_structure(cmd, str(path), name)
+
+            with patch.object(cmd, "super", wraps=cmd.super) as super_align, patch.object(
+                cmd, "align", wraps=cmd.align
+            ) as sequence_align:
+                config = {"binder": "chain A", "coverage": 0.800001}
+                self.assertIsNone(core.structural_distance(cmd, "small", "large", config))
+                super_align.assert_not_called()
+                sequence_align.assert_not_called()
+
+                config["coverage"] = 0.8
+                result = core.structural_distance(cmd, "small", "large", config)
+                self.assertIsNotNone(result)
+                self.assertLess(result, 1e-5)
+                super_align.assert_called_once()
+
+    def test_allow_unverified_does_not_admit_native_alignment_errors(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            valid = root / "valid.pdb"
+            broken = root / "broken.pdb"
+            shutil.copyfile(FIXTURE, valid)
+            ca = [line for line in FIXTURE.read_text(encoding="ascii").splitlines(keepends=True)
+                  if line.startswith("ATOM") and line[12:16].strip() == "CA"]
+            broken.write_text("".join(line[:22] + "   1" + line[26:] for line in ca[:8]) + "END\n",
+                              encoding="ascii")
+            scores = root / "scores.json"
+            scores.write_text(json.dumps([
+                {"path": valid.name, "quality": 0}, {"path": broken.name, "quality": 1},
+            ]), encoding="utf-8")
+            config = {"scores": str(scores), "metrics": [{"name": "quality", "bins": 2}],
+                      "seed": 0, "count": 2, "orientation": "pca", "frame_selection": "chain A",
+                      "binder": "chain A", "allow_unverified": True}
+            manifest = core.create_collection(config, root / "out")
+            self.assertEqual([sample["path"] for sample in manifest["samples"]], [str(valid)])
+            self.assertEqual([entry["path"] for entry in manifest["invalid_structures"]], [str(broken)])
+
     def test_ca_reuse_across_pairs_preserves_decision_after_reloading_candidate(self):
         with pymol2.PyMOL() as instance:
             cmd = instance.cmd
