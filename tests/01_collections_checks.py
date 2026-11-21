@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from threading import Event, Thread
 import time
 from unittest.mock import patch
 
@@ -286,6 +287,55 @@ if args.stage in ("regression", "all"):
         assert retried["reused"] == 2 and all(row["ok"] for row in retried["results"])
         for index, timestamp in successful.items():
             assert Path(retried["results"][index]["image"]).stat().st_mtime_ns == timestamp
+
+        if os.name == "nt":
+            worker_directory = temporary / "worker-sharing"
+            worker_directory.mkdir()
+            receipt = worker_directory / "02_worker_01.json"
+            open_receipt, reader_ready, replace_blocked = Event(), Event(), Event()
+            replace = Path.replace
+            reader_errors = []
+            blocked = []
+
+            def read_while_publishing():
+                try:
+                    assert open_receipt.wait(10)
+                    with receipt.open(encoding="utf-8") as reader:
+                        assert json.load(reader)["results"] == []
+                        reader_ready.set()
+                        assert replace_blocked.wait(5)
+                except Exception as error:
+                    reader_errors.append(error)
+                    reader_ready.set()
+
+            def replace_after_reader_opens(source, destination):
+                if Path(destination) != receipt or not receipt.exists() or open_receipt.is_set():
+                    return replace(source, destination)
+                open_receipt.set()
+                assert reader_ready.wait(5) and not reader_errors
+                try:
+                    return replace(source, destination)
+                except PermissionError as error:
+                    blocked.append(error.winerror)
+                    replace_blocked.set()
+                    raise
+
+            reader = Thread(target=read_while_publishing, daemon=True)
+            worker_manifest = temporary / "worker-sharing.json"
+            core.write_json(worker_manifest, original_manifest)
+            reader.start()
+            try:
+                with patch.object(Path, "replace", replace_after_reader_opens):
+                    core.render_worker(worker_manifest, [0, 1], worker_directory,
+                                       160, 120, 1, receipt, run_id="worker-sharing",
+                                       scratch_dir=worker_directory)
+            finally:
+                reader.join(12)
+            assert not reader.is_alive() and not reader_errors
+            assert len(blocked) == 1 and blocked[0] in (5, 32), blocked
+            rendered = core.worker_report(receipt, "worker-sharing")["results"]
+            assert [row["index"] for row in rendered] == [0, 1]
+            assert all(row["ok"] and Path(row["image"]).is_file() for row in rendered)
 
         cancellation_directory = temporary / "cancel"
         cancellation_directory.mkdir()

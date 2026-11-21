@@ -73,12 +73,23 @@ def read_json(path):
 import numpy as np
 
 
-def write_json(path, value):
+def write_json(path, value, *, retry_sharing=False):
     """Atomically write a JSON result so progress readers see complete records."""
     path = Path(path)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(path)
+    deadline = time.monotonic() + 0.25 if retry_sharing and os.name == "nt" else 0
+    while True:
+        try:
+            temporary.replace(path)
+            return
+        except PermissionError as error:
+            # MoveFileExW can briefly refuse replacement while the coordinator
+            # is reading a live worker receipt. Keep the same staged JSON.
+            if (not deadline or getattr(error, "winerror", None) not in (5, 32)
+                    or time.monotonic() >= deadline):
+                raise
+            time.sleep(0.01)
 
 
 def _publish_task_progress(path, phase, completed, total):
@@ -884,7 +895,7 @@ def render_worker(manifest_path, indices, directory, width, height, threads, rep
     manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     view = collection_view(manifest, width, height)
     results = []
-    write_json(report_path, {"run_id": run_id, "results": []})
+    write_json(report_path, {"run_id": run_id, "results": []}, retry_sharing=True)
     with pymol2.PyMOL() as pm:
         cmd = pm.cmd
         cmd.set("max_threads", threads)
@@ -921,7 +932,7 @@ def render_worker(manifest_path, indices, directory, width, height, threads, rep
                 if temporary.exists():
                     temporary.unlink()
             write_json(report_path, {"run_id": run_id, "pid": os.getpid(), "started": started,
-                                     "finished": time.time(), "results": results})
+                                     "finished": time.time(), "results": results}, retry_sharing=True)
     return results
 
 
