@@ -221,6 +221,27 @@ class AnnotatorProvenance(unittest.TestCase):
         self.assertEqual((self.state.index, self.state.current_file(), self.state.current_object),
                          (2, str(good), preloaded))
 
+    def test_matching_subdirectories_do_not_block_opening_a_valid_dataset(self):
+        original = self.root / "original"
+        original.mkdir()
+        shutil.copyfile(FIXTURE, original / "current.pdb")
+        self.annotator["sa_load_dir"](str(original))
+        self.assertTrue(self.state.current_object)
+
+        incoming = self.root / "incoming"
+        incoming.mkdir()
+        (incoming / "00_directory.pdb").mkdir()
+        (incoming / "01_directory.pdb.gz").mkdir()
+        valid = incoming / "02_valid.pdb"
+        shutil.copyfile(FIXTURE, valid)
+
+        self.annotator["sa_load_dir"](str(incoming))
+
+        self.assertEqual(self.state.dataset_dir, str(incoming))
+        self.assertEqual(self.state.files, [str(valid)])
+        self.assertEqual(self.state.current_file(), str(valid))
+        self.assertGreater(self.cmd.count_atoms(self.state.current_object), 0)
+
     def test_empty_native_load_keeps_current_dataset_and_scene(self):
         source = self.root / "current.pdb"
         shutil.copyfile(FIXTURE, source)

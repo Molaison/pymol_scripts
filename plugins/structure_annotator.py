@@ -702,13 +702,20 @@ def _list_structure_files(
     compiled = re.compile(pattern)
     selected: Dict[str, str] = {}
     archives = []
-    for entry in os.listdir(path):
-        if not compiled.match(entry):
-            continue
-        if _is_gz_path(entry):
-            archives.append(entry)
-        else:
-            selected[entry] = os.path.join(path, entry)
+    with os.scandir(path) as entries:
+        for entry in entries:
+            if not compiled.match(entry.name):
+                continue
+            try:
+                if not entry.is_file():
+                    continue
+            except OSError:
+                # Keep paths whose type could not be checked for the loader to handle.
+                pass
+            if _is_gz_path(entry.name):
+                archives.append(entry.name)
+            else:
+                selected[entry.name] = entry.path
 
     plain_names = {entry.lower(): entry for entry in selected} if archives else {}
     for entry in archives:
