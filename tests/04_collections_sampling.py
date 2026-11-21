@@ -819,6 +819,36 @@ class CollectionsSampling(unittest.TestCase):
             cmd.load(rows[0]["path"], "selected")
             self.assertEqual(cmd.count_atoms("selected"), cmd.count_atoms("intended"))
 
+    def test_directory_only_score_paths_do_not_select_sibling_structures(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            root = directory / "models"
+            root.mkdir()
+            (root / "nested").mkdir()
+            valid = root / "valid.pdb"
+            shutil.copyfile(FIXTURE, valid)
+            ca_only = "".join(
+                line for line in FIXTURE.read_text(encoding="ascii").splitlines(keepends=True)
+                if line.startswith("ATOM") and line[12:16].strip() == "CA"
+            ) + "END\n"
+            (directory / "models.pdb").write_text(ca_only, encoding="ascii")
+            (root / "nested.pdb").write_text(ca_only, encoding="ascii")
+            scores = directory / "scores.json"
+            config = {"scores": str(scores), "root": str(root),
+                      "metrics": [{"name": "quality", "bins": 2}], "seed": 0,
+                      "count": 1, "rmsd": 0.1, "orientation": "pca",
+                      "frame_selection": "chain A", "binder": "chain A"}
+            for index, value in enumerate((".", "./", "nested/.", "nested/")):
+                with self.subTest(value=value):
+                    scores.write_text(json.dumps([
+                        {"id": "directory", "path": value, "quality": 0},
+                        {"id": "valid", "path": "valid", "quality": 1},
+                    ]), encoding="utf-8")
+                    manifest = core.create_collection(config, directory / f"out_{index}")
+                    self.assertEqual([sample["path"] for sample in manifest["samples"]], [str(valid)])
+                    self.assertEqual(manifest["eligible"], 1)
+                    self.assertEqual([row["row"] for row in manifest["skipped"]], [2])
+
     def test_missing_structure_path_cannot_use_a_literal_none_filename(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

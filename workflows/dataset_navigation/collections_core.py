@@ -326,7 +326,7 @@ def _resolve_structure_path(root, value):
     if path.is_file():
         return path
     extensions = (".pdb", ".cif", ".pdb.gz", ".cif.gz")
-    if not value.lower().endswith(extensions):
+    if not value.lower().endswith(extensions) and os.path.basename(value) not in ("", ".", ".."):
         for ext in extensions:
             candidate = Path(str(path) + ext)
             if candidate.is_file():
