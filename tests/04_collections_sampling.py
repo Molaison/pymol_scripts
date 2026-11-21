@@ -819,6 +819,35 @@ class CollectionsSampling(unittest.TestCase):
             cmd.load(rows[0]["path"], "selected")
             self.assertEqual(cmd.count_atoms("selected"), cmd.count_atoms("intended"))
 
+    def test_disappearing_structure_during_path_resolution_does_not_abort_sampling(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            disappearing = root / "disappearing.pdb"
+            valid = root / "valid.pdb"
+            shutil.copyfile(FIXTURE, disappearing)
+            shutil.copyfile(FIXTURE, valid)
+            scores = root / "scores.json"
+            scores.write_text(json.dumps([
+                {"path": disappearing.name, "quality": 0}, {"path": valid.name, "quality": 1},
+            ]), encoding="utf-8")
+            config = {"scores": str(scores), "metrics": [{"name": "quality", "bins": 2}],
+                      "seed": 0, "count": 1, "rmsd": 0.1, "orientation": "pca",
+                      "frame_selection": "chain A", "binder": "chain A"}
+            lookup = core._resolve_structure_path
+
+            def remove_after_lookup(directory, value):
+                found = lookup(directory, value)
+                if value == disappearing.name:
+                    disappearing.unlink()
+                return found
+
+            with patch.object(core, "_resolve_structure_path", remove_after_lookup):
+                collection = core.create_collection(config, root / "out")
+            self.assertEqual([sample["path"] for sample in collection["samples"]], [str(valid)])
+            self.assertEqual(collection["eligible"], 2)
+            self.assertEqual([failure["path"] for failure in collection["invalid_structures"]],
+                             [str(disappearing)])
+
     def test_directory_only_score_paths_do_not_select_sibling_structures(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

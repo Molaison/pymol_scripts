@@ -308,7 +308,12 @@ def prepare_rows(config):
                     raise
                 value = trimmed
                 path = _resolve_structure_path(root, value)
-            path = str(path.resolve())
+            # The file lookup already checked existence. Preserve the fallback if it changed.
+            try:
+                resolved = path.resolve(strict=True)
+            except OSError:
+                resolved = path.resolve()
+            path = str(resolved)
             if os.path.normcase(path) in seen:
                 raise ValueError("重复结构路径")
             seen.add(os.path.normcase(path))
