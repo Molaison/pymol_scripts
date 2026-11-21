@@ -137,7 +137,8 @@ class WorkflowRegressions(unittest.TestCase):
         with patch.object(core, "structural_distance", wraps=core.structural_distance) as compare:
             decision = core.check_diversity(self.cmd, {}, config, [{} for _ in range(12)])
         self.assertEqual(decision, "duplicate")
-        compare.assert_called_once_with(self.cmd, "col_candidate", "col_keep_0", config)
+        compare.assert_called_once()
+        self.assertEqual(compare.call_args.args[:4], (self.cmd, "col_candidate", "col_keep_0", config))
 
 
 if __name__ == "__main__":

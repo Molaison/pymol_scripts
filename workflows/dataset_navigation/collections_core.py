@@ -114,18 +114,6 @@ def prepare_rows(config):
     path_column = config.get("path_column", "path")
     for number, source in enumerate(read_scores(score_path), 2):
         try:
-            value = str(source[path_column]).strip()
-            if not value:
-                raise ValueError("结构路径为空")
-            path = Path(value)
-            path = path if path.is_absolute() else root / path
-            if not path.is_file() and not any(value.lower().endswith(x) for x in
-                                             (".pdb", ".cif", ".pdb.gz", ".cif.gz")):
-                path = next((Path(str(path) + ext) for ext in
-                             (".pdb", ".cif", ".pdb.gz", ".cif.gz")
-                             if Path(str(path) + ext).is_file()), path)
-            if not path.is_file():
-                raise ValueError(f"找不到结构文件: {path}")
             scores = {spec["name"]: float(source[spec["name"]]) for spec in specs}
             if not all(math.isfinite(score) for score in scores.values()):
                 raise ValueError("打分不是有限数值")
@@ -134,6 +122,10 @@ def prepare_rows(config):
                    for spec in specs):
                 skipped.append({"row": number, "reason": "分数范围筛选"})
                 continue
+            value = str(source[path_column]).strip()
+            if not value:
+                raise ValueError("结构路径为空")
+            path = _resolve_structure_path(root, value)
             path = str(path.resolve())
             if os.path.normcase(path) in seen:
                 raise ValueError("重复结构路径")
@@ -147,16 +139,44 @@ def prepare_rows(config):
     return rows, skipped
 
 
-def make_strata(rows, specs, seed):
+def _resolve_structure_path(root, value):
+    path = root / value
+    if path.is_file():
+        return path
+    extensions = (".pdb", ".cif", ".pdb.gz", ".cif.gz")
+    if not value.lower().endswith(extensions):
+        for ext in extensions:
+            candidate = Path(str(path) + ext)
+            if candidate.is_file():
+                return candidate
+    raise ValueError(f"找不到结构文件: {path}")
+
+
+def _quantile_edges(values, bins):
+    cuts = np.unique(np.quantile(values, np.arange(1, bins) / bins))
+    minimum = values.min()
+    if cuts.size and cuts[0] == minimum:
+        cuts = cuts[1:]
+        if cuts.size:
+            return cuts.tolist()
+        higher = values[values > minimum]
+        return [float(higher.min())] if higher.size else []
+    return cuts.tolist()
+
+
+def make_strata(rows, specs, seed, saved_edges=None):
     """Joint quantile cells; equal scores always belong to the same cell."""
     edges, groups = {}, {}
     for spec in specs:
         bins = int(spec.get("bins", 3))
         if bins < 1:
             raise ValueError("每个打分的层数必须至少为 1。")
-        values = [row["scores"][spec["name"]] for row in rows]
-        edges[spec["name"]] = np.unique(
-            np.quantile(values, np.arange(1, bins) / bins)).tolist()
+        name = spec["name"]
+        if saved_edges is not None and name in saved_edges:
+            edges[name] = saved_edges[name]
+        else:
+            values = np.array([row["scores"][name] for row in rows])
+            edges[name] = _quantile_edges(values, bins)
     for row in rows:
         cell = tuple(int(np.searchsorted(edges[spec["name"]],
                                          row["scores"][spec["name"]], side="right"))
@@ -254,14 +274,20 @@ def selection(obj, expression, ca=False):
     return result + " and polymer.protein and name CA" if ca else result
 
 
-def matched_atoms(cmd, mobile, reference, expression, coverage=0.8):
+def ca_coordinates(cmd, expression, cache):
+    if expression not in cache:
+        cache[expression] = {atom.index: atom.coord for atom in cmd.get_model(expression, 1).atom}
+    return cache[expression]
+
+
+def matched_atoms(cmd, mobile, reference, expression, coverage=0.8, atom_cache=None):
     """Use native sequence/structure matching without rejecting high-RMSD atoms."""
     first, second = selection(mobile, expression, True), selection(reference, expression, True)
-    first_model, second_model = cmd.get_model(first, 1), cmd.get_model(second, 1)
-    if min(len(first_model.atom), len(second_model.atom)) < 3:
+    cache = {} if atom_cache is None else atom_cache
+    first_atoms = ca_coordinates(cmd, first, cache)
+    second_atoms = ca_coordinates(cmd, second, cache)
+    if min(len(first_atoms), len(second_atoms)) < 3:
         return None
-    first_atoms = {atom.index: atom.coord for atom in first_model.atom}
-    second_atoms = {atom.index: atom.coord for atom in second_model.atom}
     # Native super can collapse repetitive/poly-Gly models to a single match.
     for method in (cmd.super, cmd.align):
         method(first, second, cycles=0, transform=0, object="col_match",
@@ -277,16 +303,16 @@ def matched_atoms(cmd, mobile, reference, expression, coverage=0.8):
     return None
 
 
-def structural_distance(cmd, mobile, reference, config):
+def structural_distance(cmd, mobile, reference, config, atom_cache=None):
     """Binder/selection shape RMSD or binder-pose RMSD after target alignment."""
     expression = config.get("diversity_selection") or config.get("binder", "chain B")
     pairs = matched_atoms(cmd, mobile, reference, expression,
-                          float(config.get("coverage", 0.8)))
+                          float(config.get("coverage", 0.8)), atom_cache)
     if pairs is None:
         return None
     if config.get("diversity", "shape") == "pose":
         anchors = matched_atoms(cmd, mobile, reference, config.get("target", "chain A"),
-                                float(config.get("coverage", 0.8)))
+                                float(config.get("coverage", 0.8)), atom_cache)
         if anchors is None:
             raise ValueError("结合姿态去重无法配准 target；请检查 target 选择与覆盖率。")
         rotation, shift = rigid_fit(*anchors)
@@ -315,8 +341,9 @@ def check_diversity(cmd, row, config, selected):
     threshold = float(config.get("rmsd", 2))
     shape = config.get("diversity", "shape") == "shape"
     comparable, incomparable = [], 0
+    atom_cache = {}
     for index in range(len(selected)):
-        distance = structural_distance(cmd, "col_candidate", f"col_keep_{index}", config)
+        distance = structural_distance(cmd, "col_candidate", f"col_keep_{index}", config, atom_cache)
         if distance is None:
             incomparable += 1
         elif shape and distance < threshold:
@@ -534,7 +561,7 @@ def replace_sample(command, manifest, index, progress=None):
     samples, config = manifest["samples"], dict(manifest["config"])
     original = samples[index]
     rows, _ = prepare_rows(config)
-    queues, _ = make_strata(rows, config["metrics"], config.get("seed", 0))
+    queues, _ = make_strata(rows, config["metrics"], config.get("seed", 0), manifest.get("quantile_edges"))
     excluded = {row["path"] for row in samples} | set(manifest.get("excluded_paths", []))
     queues = [[row for row in queue if row["path"] not in excluded] for queue in queues]
     queues.sort(key=lambda queue: not queue or queue[0]["stratum"] != original["stratum"])
