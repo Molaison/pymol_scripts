@@ -125,10 +125,81 @@ class CollectionsSampling(unittest.TestCase):
             self.assertEqual(manifest["samples"][0]["id"], "old.pdb")
             self.assertEqual(manifest["samples"][0]["stratum"], [1])
             write_scores(["old", "low1", "alternate", "low2", "low3"])
-            edited = core.revise_collection(root / "collection/01_collection.json", {"action": "replace", "indices": [0]})
+            path = root / "collection/01_collection.json"
+            request = {"action": "replace", "indices": [0]}
+            alternate = root / "alternate.pdb"
+            before, original_source = path.read_bytes(), alternate.read_bytes()
+            changed = False
+
+            def swap_after_selection(_completed, _total):
+                nonlocal changed
+                if not changed:
+                    alternate.write_bytes((root / "low2.pdb").read_bytes())
+                    changed = True
+
+            with self.assertRaisesRegex(ValueError, r"alternate\.pdb"):
+                core.revise_collection(path, request, progress=swap_after_selection)
+            self.assertTrue(changed)
+            self.assertEqual(path.read_bytes(), before)
+            alternate.write_bytes(original_source)
+            edited = core.revise_collection(path, request)
             self.assertEqual(edited["samples"][0]["id"], "alternate.pdb")
             self.assertEqual(edited["samples"][0]["stratum"], [1])
             self.assertEqual(edited["quantile_edges"], manifest["quantile_edges"])
+
+    def test_sample_edits_preserve_changed_retained_source_until_explicit_reorientation(self):
+        with tempfile.TemporaryDirectory() as temporary, pymol2.PyMOL() as instance:
+            root = Path(temporary)
+            cmd = instance.cmd
+            cmd.set("max_threads", 1)
+            cmd.load(str(FIXTURE), "fixture")
+            coords = cmd.get_coords("fixture", 1)
+            cmd.save(str(root / "kept.pdb"), "fixture")
+            cmd.load_coords(coords * [1.25, 1.5, 1.8], "fixture", 1)
+            cmd.save(str(root / "other.pdb"), "fixture")
+            scores = root / "scores.json"
+            entries = [{"path": "kept.pdb", "quality": 0.91}, {"path": "other.pdb", "quality": 0.95}]
+            scores.write_text(json.dumps(entries), encoding="utf-8")
+            config = {"scores": str(scores), "metrics": [{"name": "quality"}], "count": 2,
+                      "seed": 7, "rmsd": 0.15, "orientation": "pca",
+                      "target": "polymer.protein", "binder": "polymer.protein"}
+            collection = root / "collection"
+            initial = core.create_collection(config, collection)
+            manifest_path = collection / "01_collection.json"
+            kept_index = next(index for index, row in enumerate(initial["samples"]) if row["id"] == "kept.pdb")
+            pinned = core.revise_collection(manifest_path, {"action": "pin", "indices": [kept_index]})
+            saved_coordinate_signature = pinned["samples"][kept_index]["coordinate_signature"]
+
+            center = coords.mean(axis=0)
+            cmd.load_coords(center + 0.55 * (coords - center), "fixture", 1)
+            cmd.save(str(root / "kept.pdb"), "fixture")
+            cmd.load_coords(coords * [0.7, 2.7, 1.05], "fixture", 1)
+            cmd.save(str(root / "alternate.pdb"), "fixture")
+            scores.write_text(json.dumps([*entries, {"path": "alternate.pdb", "quality": 0.94}]),
+                              encoding="utf-8")
+            for action in ("remove", "replace"):
+                for legacy in (False, True):
+                    with self.subTest(action=action, legacy=legacy):
+                        copy = root / f"{action}_{legacy}"
+                        shutil.copytree(collection, copy)
+                        candidate_path, samples_csv = copy / "01_collection.json", copy / "02_samples.csv"
+                        if legacy:
+                            saved = core.read_json(candidate_path)
+                            for row in saved["samples"]:
+                                del row["coordinate_signature"]
+                            core.write_json(candidate_path, saved)
+                        before = (candidate_path.read_bytes(), samples_csv.read_bytes())
+                        message = "缺少坐标签名" if legacy else r"kept\.pdb"
+                        with self.assertRaisesRegex(ValueError, message):
+                            core.revise_collection(candidate_path, {"action": action, "indices": [1 - kept_index]})
+                        self.assertEqual((candidate_path.read_bytes(), samples_csv.read_bytes()), before)
+            legacy_path = root / "replace_True/01_collection.json"
+            refreshed = core.revise_collection(legacy_path, {"action": "orient", "config": {}})
+            kept = refreshed["samples"][kept_index]
+            self.assertTrue(kept["pinned"])
+            self.assertNotEqual(kept["coordinate_signature"], saved_coordinate_signature)
+            edited = core.revise_collection(legacy_path, {"action": "remove", "indices": [1 - kept_index]})
+            self.assertEqual([row["id"] for row in edited["samples"]], ["kept.pdb"])
 
     def test_scores_reject_rows_before_file_probes_and_keep_extension_lookup(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -153,6 +224,42 @@ class CollectionsSampling(unittest.TestCase):
             self.assertEqual(probes, ["retained", "retained.pdb"])
             self.assertEqual(rows[0]["path"], str((root / "retained.pdb").resolve()))
             self.assertEqual([item["row"] for item in skipped], [2, 3])
+
+    @unittest.skipUnless(sys.platform == "win32", "requires Windows file sharing modes")
+    def test_collection_save_preserves_both_files_when_publication_fails(self):
+        import ctypes
+        from ctypes import wintypes
+
+        api = ctypes.WinDLL("kernel32", use_last_error=True)
+        api.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                    wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        api.CreateFileW.restype = wintypes.HANDLE
+        api.CloseHandle.argtypes = [wintypes.HANDLE]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest_path, csv_path = root / "01_collection.json", root / "02_samples.csv"
+            manifest = {"config": {"metrics": [{"name": "quality"}]}, "samples": [
+                {"id": "old", "path": "old.pdb", "stratum": [0], "nearest_rmsd": None,
+                 "scores": {"quality": 0.8}}
+            ]}
+            core.save_collection(manifest_path, manifest)
+            original = (manifest_path.read_bytes(), csv_path.read_bytes())
+            manifest["samples"][0]["id"] = "updated"
+            for unavailable in (csv_path, manifest_path):
+                with self.subTest(unavailable=unavailable.name):
+                    # Read-only sharing keeps the file readable but disallows replacing it.
+                    handle = api.CreateFileW(str(unavailable), 0x80000000, 1, None, 3, 0, None)
+                    if handle == ctypes.c_void_p(-1).value:
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    try:
+                        with self.assertRaises(PermissionError):
+                            core.save_collection(manifest_path, manifest)
+                        self.assertEqual((manifest_path.read_bytes(), csv_path.read_bytes()), original)
+                    finally:
+                        api.CloseHandle(handle)
+            core.save_collection(manifest_path, manifest)
+            self.assertEqual(core.read_json(manifest_path)["samples"][0]["id"], "updated")
+            self.assertEqual(core.read_scores(csv_path)[0]["id"], "updated")
 
     def test_nonfinite_bounds_are_rejected_before_screening(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -9,9 +9,10 @@ import json
 import math
 import os
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, mkdtemp
 import random
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -624,8 +625,37 @@ def update_bounds(cmd, samples):
 def save_collection(path, manifest):
     manifest["covered_strata"] = len({tuple(row["stratum"]) for row in manifest["samples"]})
     manifest["shortfall"] = max(0, int(manifest["config"].get("count", 24)) - len(manifest["samples"]))
-    write_json(path, manifest)
-    write_samples_csv(Path(path).parent, manifest)
+    path = Path(path)
+    csv_path = path.parent / "02_samples.csv"
+    pending = Path(mkdtemp(prefix=".collection-save-", dir=path.parent))
+    backup = pending / "previous_samples.csv"
+    keep_backup = False
+    try:
+        staged_manifest = pending / "manifest.json"
+        staged_csv = pending / csv_path.name
+        write_json(staged_manifest, manifest)
+        write_samples_csv(pending, manifest)
+        had_csv = csv_path.exists()
+        if had_csv:
+            shutil.copy2(csv_path, backup)
+            shutil.copymode(csv_path, staged_csv)
+        staged_csv.replace(csv_path)
+        try:
+            # Publish the authoritative manifest after the sample table.
+            staged_manifest.replace(path)
+        except BaseException:
+            try:
+                if had_csv:
+                    backup.replace(csv_path)
+                else:
+                    csv_path.unlink()
+            except OSError as recovery_error:
+                keep_backup = True
+                raise RuntimeError(f"无法恢复原样本表，请查看 {pending}。") from recovery_error
+            raise
+    finally:
+        if not keep_backup:
+            shutil.rmtree(pending, ignore_errors=True)
 
 
 @contextmanager
@@ -689,7 +719,18 @@ def write_samples_csv(output, manifest):
             writer.writerow(values)
 
 
-def reorient_samples(command, manifest, progress=None):
+def _load_collection_sample(command, row, obj, *, verify_source):
+    expected = row.get("coordinate_signature")
+    if verify_source and expected is None:
+        raise ValueError(f"{row['id']}：旧清单缺少坐标签名，请先重新应用朝向。")
+    command.load(row["path"], obj, quiet=1)
+    if verify_source:
+        coords = command.get_coords(f"model {obj}", 1)
+        if coords is None or coordinate_signature(coords) != expected:
+            raise ValueError(f"{row['id']}：{STALE_POSE}")
+
+
+def reorient_samples(command, manifest, progress=None, *, verify_sources=False):
     config = manifest["config"]
     reference = config.get("reference") or manifest.get("reference")
     if reference and config.get("orientation", "target") in ("target", "binder"):
@@ -697,11 +738,13 @@ def reorient_samples(command, manifest, progress=None):
     valid, failed = [], []
     for index, row in enumerate(manifest["samples"]):
         try:
-            command.load(row["path"], "col_candidate", quiet=1)
+            _load_collection_sample(command, row, "col_candidate", verify_source=verify_sources)
             row["matrix"] = candidate_pose(command, "col_candidate", config).tolist()
             command.set_name("col_candidate", f"col_keep_{len(valid)}")
             valid.append(row)
         except Exception as error:
+            if verify_sources:
+                raise
             traceback.print_exc()
             failed.append({"path": row["path"], "reason": str(error)})
         finally:
@@ -727,7 +770,7 @@ def replace_sample(command, manifest, index, progress=None):
     queues = [[row for row in queue if row["path"] not in excluded] for queue in queues]
     queues.sort(key=lambda queue: not queue or queue[0]["stratum"] != original["stratum"])
     for position, row in enumerate(samples):
-        command.load(row["path"], f"col_keep_{position}", quiet=1)
+        _load_collection_sample(command, row, f"col_keep_{position}", verify_source=True)
     if manifest.get("reference"):
         command.load(manifest["reference"], "col_reference", quiet=1)
     config["count"] = len(samples) + 1
@@ -735,6 +778,8 @@ def replace_sample(command, manifest, index, progress=None):
     if len(chosen) == len(samples):
         raise ValueError("没有其他满足分层与结构差异要求的候选；原样本已保留。")
     replacement = chosen[-1]
+    coords = command.get_coords(f"model col_keep_{len(samples)}", 1)
+    replacement["coordinate_signature"] = coordinate_signature(coords)
     replacement["image"] = original["image"]
     samples[index] = replacement
     manifest.setdefault("excluded_paths", []).append(original["path"])
@@ -812,7 +857,7 @@ def _revise_collection(manifest, request, progress):
                     raise ValueError("替换时请选择一个样本。")
                 replace_sample(instance.cmd, manifest, indices[0], progress)
                 instance.cmd.delete("all")
-            reorient_samples(instance.cmd, manifest, progress)
+            reorient_samples(instance.cmd, manifest, progress, verify_sources=action != "orient")
         manifest["reference"] = manifest["config"].get("reference") or manifest.get("reference")
 
 
