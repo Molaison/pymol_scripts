@@ -398,12 +398,12 @@ class AnnotatorProvenance(unittest.TestCase):
                 self.annotator["sa_load_dir"](str(dataset))
                 incoming, _ = self.replacement_structure()
                 replacement_bytes = incoming.read_bytes()
-                reader = self.annotator["read_structure_annotations"]
+                reader = self.annotator["_read_text_file"]
                 writer = self.annotator["annotate_structure_file"]
                 chmod = os.chmod
 
-                def replace_after_read(path):
-                    result = reader(path)
+                def replace_after_read(path, *args, **kwargs):
+                    result = reader(path, *args, **kwargs)
                     incoming.replace(source)
                     return result
 
@@ -418,7 +418,7 @@ class AnnotatorProvenance(unittest.TestCase):
                     return result
 
                 interpositions = {
-                    "read": patch.dict(self.annotator, {"read_structure_annotations": replace_after_read}),
+                    "read": patch.dict(self.annotator, {"_read_text_file": replace_after_read}),
                     "staging": patch.object(os, "chmod", replace_during_staging),
                     "publish": patch.dict(self.annotator, {"annotate_structure_file": replace_after_publish}),
                 }
@@ -428,6 +428,53 @@ class AnnotatorProvenance(unittest.TestCase):
                 self.annotator["sa_annotate"]("Still showing the old model")
                 self.assertEqual(source.read_bytes(), replacement_bytes)
                 self.assertEqual(list(dataset.iterdir()), [source])
+
+    def test_tag_and_undo_use_one_verified_read_of_the_original_source(self):
+        for operation in ("structure", "previous_label"):
+            with self.subTest(operation=operation):
+                directory = self.root / operation
+                directory.mkdir()
+                source = directory / "original.pdb"
+                original_path = directory / "parked_source"
+                shutil.copyfile(FIXTURE, source)
+                self.annotator["sa_load_dir"](str(directory))
+                self.annotator["sa_annotate"]("Original label")
+                original_content = source.read_bytes()
+                incoming, _ = self.replacement_structure()
+                self.annotator["annotate_structure_file"](str(incoming), "quality", "Donor label")
+
+                namespace = self.annotator["sa_annotate"].__globals__
+                function = "_read_text_file" if operation == "structure" else "read_structure_annotations"
+                reader = namespace[function]
+                observed_swaps = []
+
+                def read_while_swapped(path, *args, **options):
+                    if Path(path) != source:
+                        return reader(path, *args, **options)
+                    source.replace(original_path)
+                    incoming.replace(source)
+                    observed_swaps.append(True)
+                    try:
+                        return reader(path, *args, **options)
+                    finally:
+                        source.replace(incoming)
+                        original_path.replace(source)
+
+                undo_count = len(self.state.undo_history)
+                with patch.dict(namespace, {function: read_while_swapped}):
+                    self.annotator["sa_annotate"]("Updated")
+
+                labels = self.annotator["read_structure_annotations"]
+                if operation == "structure":
+                    self.assertEqual(observed_swaps, [True])
+                    self.assertTrue(source.read_bytes() == original_content,
+                                    "A read from the donor replaced the original structure")
+                    self.assertEqual(len(self.state.undo_history), undo_count)
+                else:
+                    self.assertEqual(labels(str(source)).get("quality"), "Updated")
+                    self.annotator["sa_undo"]()
+                    self.assertEqual(labels(str(source)).get("quality"), "Original label",
+                                     "Undo restored the donor's label")
 
     def test_background_gzip_cache_discards_replaced_source_before_navigation(self):
         dataset = self.root / "dataset"
@@ -454,6 +501,57 @@ class AnnotatorProvenance(unittest.TestCase):
         self.annotator["sa_annotate"]("Current source")
         reader = self.annotator["read_structure_annotations"]
         self.assertEqual(reader(str(source))["quality"], "Current source")
+
+    def test_loading_uses_the_validated_source_even_if_path_changes_during_parse(self):
+        for extension in (".pdb", ".pdb.gz"):
+            with self.subTest(extension=extension):
+                dataset = self.root / ("plain_parser" if extension == ".pdb" else "gzip_parser")
+                dataset.mkdir()
+                source = dataset / f"model{extension}"
+                contents = FIXTURE.read_bytes()
+                source.write_bytes(gzip.compress(contents) if extension.endswith(".gz") else contents)
+                incoming, donor_count = self.replacement_structure()
+                swapped = self.root / f"replacement{extension}.tmp"
+                payload = incoming.read_bytes()
+                swapped.write_bytes(gzip.compress(payload) if extension.endswith(".gz") else payload)
+                parked = self.root / "parked_structure"
+                calls = []
+                load, load_raw = self.cmd.load, self.cmd.load_raw
+
+                @contextmanager
+                def exchange():
+                    source.replace(parked)
+                    swapped.replace(source)
+                    calls.append(True)
+                    try:
+                        yield
+                    finally:
+                        source.replace(swapped)
+                        parked.replace(source)
+
+                def path_loader(path, *args, **options):
+                    if Path(path) == source:
+                        with exchange():
+                            return load(path, *args, **options)
+                    return load(path, *args, **options)
+
+                def memory_loader(*args, **options):
+                    with exchange():
+                        return load_raw(*args, **options)
+
+                with patch.object(self.cmd, "load", path_loader), patch.object(
+                    self.cmd, "load_raw", memory_loader
+                ):
+                    self.annotator["sa_load_dir"](str(dataset))
+                self.assertEqual(calls, [True])
+                shown = self.cmd.count_atoms(self.state.current_object)
+                self.assertGreater(shown, donor_count, "The displayed object came from a different file")
+                self.annotator["sa_annotate"]("Reviewed scene")
+                self.cmd.load(str(source), "validation_source")
+                self.assertEqual(self.cmd.count_atoms("validation_source"), shown)
+                self.assertEqual(self.annotator["read_structure_annotations"](str(source)).get("quality"),
+                                 "Reviewed scene")
+                self.cmd.delete("validation_source")
 
     def test_corrupt_gzip_does_not_block_the_next_valid_preload(self):
         shutil.copyfile(FIXTURE, self.root / "a_current.pdb")

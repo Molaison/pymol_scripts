@@ -103,13 +103,23 @@ def derive_object_name(filename: str) -> str:
     return f"{OBJECT_PREFIX}_{sanitized}"
 
 
-def _read_text_file(path: str) -> str:
+def _require_source_version(observed: Optional[FileVersion], expected: FileVersion) -> None:
+    if observed != expected:
+        raise RuntimeError("The source file changed. Click Reload before annotating.")
+
+
+def _read_text_file(
+    path: str, expected_version: Optional[FileVersion] = None
+) -> Tuple[str, FileVersion]:
     path = _long_path(path)
-    if path.lower().endswith(".gz"):
-        with gzip.open(path, "rt", encoding="utf-8", errors="replace", newline="") as fh:
-            return fh.read()
-    with open(path, "rt", encoding="utf-8", errors="replace", newline="") as fh:
-        return fh.read()
+    opener = gzip.open if path.lower().endswith(".gz") else open
+    with opener(path, "rt", encoding="utf-8", errors="replace", newline="") as fh:
+        version = _version_from_stat(os.fstat(fh.fileno()))
+        if expected_version is not None:
+            _require_source_version(version, expected_version)
+        text = fh.read()
+        _require_source_version(_version_from_stat(os.fstat(fh.fileno())), version)
+    return text, version
 
 
 def _copy_windows_source(source: str, destination: str) -> None:
@@ -167,16 +177,13 @@ def _copy_windows_source(source: str, destination: str) -> None:
         raise WinError(get_last_error())
 
 
-def _write_text_file(
-    path: str, text: str, expected_version: Optional[FileVersion] = None
-) -> FileVersion:
+def _write_text_file(path: str, text: str, source_version: FileVersion) -> FileVersion:
     path = _long_path(path)
     target = os.path.realpath(path)
     with open(target, "r+b") as source:
-        original = os.fstat(source.fileno())
-    if expected_version is not None and _version_from_stat(original) != expected_version:
-        raise RuntimeError("The source file changed before annotation. Click Reload.")
-    target_mode = stat.S_IMODE(original.st_mode)
+        source_stat = os.fstat(source.fileno())
+        _require_source_version(_version_from_stat(source_stat), source_version)
+        target_mode = stat.S_IMODE(source_stat.st_mode)
     fd, temp_path = tempfile.mkstemp(
         prefix=".sa-write-", suffix=".tmp", dir=os.path.dirname(target)
     )
@@ -195,8 +202,7 @@ def _write_text_file(
             fh.truncate()
         os.chmod(temp_path, target_mode)
         written_version = _version_from_stat(os.stat(temp_path))
-        if expected_version is not None and _source_version(path) != expected_version:
-            raise RuntimeError("The source file changed while staging the annotation. Click Reload.")
+        _require_source_version(_source_version(path), source_version)
         os.replace(temp_path, target)
         return written_version
     finally:
@@ -258,13 +264,18 @@ def _read_annotation_records(path: str, marker) -> Dict[str, str]:
     return result
 
 
-def _strip_existing_annotations(lines: List[str], marker, label_key: str) -> List[str]:
+def _strip_existing_annotations(
+    lines: List[str], marker, label_key: str
+) -> Tuple[List[str], Optional[str]]:
     filtered = []
+    previous = None
     for line in lines:
         record = _parse_annotation_record(line, marker)
         if record is None or record[0] != label_key:
             filtered.append(line)
-    return filtered
+        else:
+            previous = record[1]
+    return filtered, previous
 
 
 def _insert_annotation_line(
@@ -333,13 +344,13 @@ def has_annotation_fast(path: str, label_key: str) -> bool:
 
 
 def write_pdb_annotation(
-    path: str, label_key: str, label_value: str, *, expected_version: Optional[FileVersion] = None
-) -> FileVersion:
-    text = _read_text_file(path)
+    path: str, label_key: str, label_value: str, expected_version: Optional[FileVersion] = None
+) -> Tuple[Optional[str], FileVersion]:
+    text, source_version = _read_text_file(path, expected_version)
     has_trailing_newline = text.endswith(("\n", "\r"))
     lines = text.splitlines(keepends=True)
 
-    lines = _strip_existing_annotations(lines, PDB_ANNOTATION_MARKER, label_key)
+    lines, previous = _strip_existing_annotations(lines, PDB_ANNOTATION_MARKER, label_key)
 
     timestamp = datetime.datetime.now().isoformat(timespec="seconds")
     remark = f"{REMARK_PREFIX} {label_key}={label_value} ts={timestamp}\n"
@@ -353,18 +364,18 @@ def write_pdb_annotation(
     _insert_annotation_line(lines, insert_at, remark, has_trailing_newline)
 
     out = _join_text_with_trailing_state(lines, has_trailing_newline)
-    return _write_text_file(path, out, expected_version)
+    return previous, _write_text_file(path, out, source_version)
 
 
 def write_cif_annotation(
-    path: str, label_key: str, label_value: str, *, expected_version: Optional[FileVersion] = None
-) -> FileVersion:
+    path: str, label_key: str, label_value: str, expected_version: Optional[FileVersion] = None
+) -> Tuple[Optional[str], FileVersion]:
     """Write annotation as a CIF comment to avoid breaking strict parsers like Rosetta."""
-    text = _read_text_file(path)
+    text, source_version = _read_text_file(path, expected_version)
     has_trailing_newline = text.endswith(("\n", "\r"))
     lines = text.splitlines(keepends=True)
 
-    lines = _strip_existing_annotations(lines, CIF_ANNOTATION_MARKER, label_key)
+    lines, previous = _strip_existing_annotations(lines, CIF_ANNOTATION_MARKER, label_key)
 
     timestamp = datetime.datetime.now().isoformat(timespec="seconds")
     # Use comment format similar to PDB REMARK
@@ -372,17 +383,17 @@ def write_cif_annotation(
     _insert_annotation_line(lines, len(lines), comment, has_trailing_newline)
 
     out = _join_text_with_trailing_state(lines, has_trailing_newline)
-    return _write_text_file(path, out, expected_version)
+    return previous, _write_text_file(path, out, source_version)
 
 
 def annotate_structure_file(
     path: str, label_key: str, label_value: str, *, expected_version: Optional[FileVersion] = None
-) -> FileVersion:
+) -> Tuple[Optional[str], FileVersion]:
     lower = path.lower()
-    if lower.endswith(".pdb") or lower.endswith(".pdb.gz"):
-        return write_pdb_annotation(path, label_key, label_value, expected_version=expected_version)
-    if lower.endswith(".cif") or lower.endswith(".cif.gz"):
-        return write_cif_annotation(path, label_key, label_value, expected_version=expected_version)
+    if lower.endswith((".pdb", ".pdb.gz")):
+        return write_pdb_annotation(path, label_key, label_value, expected_version)
+    if lower.endswith((".cif", ".cif.gz")):
+        return write_cif_annotation(path, label_key, label_value, expected_version)
     raise ValueError(f"Unsupported file type: {path}")
 
 
@@ -390,18 +401,18 @@ def remove_structure_annotation(
     path: str, label_key: str, *, expected_version: Optional[FileVersion] = None
 ) -> FileVersion:
     """Delete a single PYMOL_ANNOTATOR entry from a structure file (used for undo)."""
-    text = _read_text_file(path)
+    text, source_version = _read_text_file(path, expected_version)
     has_trailing_newline = text.endswith(("\n", "\r"))
     lines = text.splitlines(keepends=True)
     lower = path.lower()
     if lower.endswith(".pdb") or lower.endswith(".pdb.gz"):
-        lines = _strip_existing_annotations(lines, PDB_ANNOTATION_MARKER, label_key)
+        lines, _ = _strip_existing_annotations(lines, PDB_ANNOTATION_MARKER, label_key)
     elif lower.endswith(".cif") or lower.endswith(".cif.gz"):
-        lines = _strip_existing_annotations(lines, CIF_ANNOTATION_MARKER, label_key)
+        lines, _ = _strip_existing_annotations(lines, CIF_ANNOTATION_MARKER, label_key)
     else:
         raise ValueError(f"Unsupported file type: {path}")
     out = _join_text_with_trailing_state(lines, has_trailing_newline)
-    return _write_text_file(path, out, expected_version)
+    return _write_text_file(path, out, source_version)
 
 
 @dataclass
@@ -779,7 +790,12 @@ def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> O
             print(f"Structure Annotator: file not found: {load_path}")
             return None
         obj_name = cmd.get_unused_name(_object_name_for_index(path, index), alwaysnumber=0)
-        cmd.load(load_path_resolved, obj_name, quiet=1)
+        if load_path == path:
+            text, _ = _read_text_file(path, version)
+            structure_format = "cif" if path.lower().endswith((".cif", ".cif.gz")) else "pdb"
+            cmd.load_raw(text, structure_format, obj_name, quiet=1)
+        else:
+            cmd.load(load_path_resolved, obj_name, quiet=1)
         cmd.sync()
         cmd.refresh()
         if _source_version(path) != version:
@@ -1014,14 +1030,17 @@ def sa_annotate(value: str) -> None:
         STATE.current_object = obj_name
 
         label_key = normalize_label_key(STATE.label_name)
-        prev_value = read_structure_annotations(path).get(label_key)
-        written_version = annotate_structure_file(path, label_key, value, expected_version=version)
+        anno_path = path
+        prev_value, written_version = annotate_structure_file(
+            anno_path, label_key, value, expected_version=version
+        )
+        # Keep the published file identity even if the source path changes after writing.
         STATE.object_versions[STATE.index] = written_version
 
         # Record for undo (bounded stack).
         STATE.undo_history.append({
             "index": STATE.index,
-            "path": path,
+            "path": anno_path,
             "label_key": label_key,
             "prev_value": prev_value,
             "value": value,
@@ -1070,10 +1089,14 @@ def sa_undo() -> None:
             return
 
         if prev_value is None:
-            written_version = remove_structure_annotation(path, label_key, expected_version=version)
+            written_version = remove_structure_annotation(
+                path, label_key, expected_version=version
+            )
             restored = "(none)"
         else:
-            written_version = annotate_structure_file(path, label_key, prev_value, expected_version=version)
+            _, written_version = annotate_structure_file(
+                path, label_key, prev_value, expected_version=version
+            )
             restored = prev_value
 
         if normalize_label_key(STATE.label_name) == label_key:
