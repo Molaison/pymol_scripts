@@ -98,6 +98,153 @@ class AnnotatorProvenance(unittest.TestCase):
                     labels = self.annotator["read_structure_annotations"](str(path), strict=True)
                     self.assertEqual(labels, {"quality": final_value, "note": long_value})
 
+    def assert_current_scene_unchanged(self, action):
+        previous = self.state.current_object
+        self.assertTrue(previous)
+        position = (self.state.dataset_dir, self.state.index, self.state.current_file())
+        enabled = self.cmd.get_names("objects", enabled_only=1)
+        self.assertIn(previous, enabled)
+        objects = self.cmd.get_names("all")
+        coords = self.cmd.get_coords(f"model {previous}", 1)
+        view = self.cmd.get_view()
+
+        action()
+
+        self.assertEqual((self.state.dataset_dir, self.state.index, self.state.current_file()), position)
+        self.assertEqual(self.state.current_object, previous)
+        self.assertEqual(self.cmd.get_names("objects", enabled_only=1), enabled)
+        self.assertEqual(self.cmd.get_names("all"), objects)
+        np.testing.assert_array_equal(self.cmd.get_coords(f"model {previous}", 1), coords)
+        np.testing.assert_array_equal(self.cmd.get_view(), view)
+
+    def test_failed_navigation_keeps_visible_structure_and_can_retry(self):
+        first, second = self.root / "01_visible.pdb", self.root / "02_unavailable.pdb"
+        shutil.copyfile(FIXTURE, first)
+        shutil.copyfile(FIXTURE, second)
+        self.state.keep_previous = False
+        self.annotator["sa_load_dir"](str(self.root))
+        previous = self.state.current_object
+        second.unlink()
+
+        self.assert_current_scene_unchanged(self.annotator["sa_next"])
+
+        shutil.copyfile(FIXTURE, second)
+        self.annotator["sa_next"]()
+        self.assertEqual((self.state.index, self.state.current_file()), (1, str(second)))
+        self.assertIn(self.state.current_object, self.cmd.get_names("objects", enabled_only=1))
+        self.assertNotIn(previous, self.cmd.get_names("objects"))
+
+    def test_successful_navigation_zooms_to_the_new_structure(self):
+        first, second = self.root / "01_original.pdb", self.root / "02_shifted.pdb"
+        shutil.copyfile(FIXTURE, first)
+        self.cmd.load(str(FIXTURE), "shifted_fixture")
+        self.cmd.translate([500, 0, 0], "shifted_fixture", camera=0)
+        self.cmd.save(str(second), "shifted_fixture")
+        self.cmd.delete("shifted_fixture")
+        self.state.keep_previous = False
+        self.state.step_cmd = "zoom"
+
+        self.annotator["sa_load_dir"](str(self.root))
+        self.annotator["sa_next"]()
+        self.assertEqual(self.state.current_file(), str(second))
+        self.assertEqual(self.cmd.get_names("objects"), [self.state.current_object])
+        actual = self.cmd.get_view()
+        self.cmd.zoom()
+        np.testing.assert_allclose(actual, self.cmd.get_view(), atol=1e-5, rtol=0)
+
+    def test_nonfinite_pdb_and_cif_never_reach_native_loader(self):
+        self.cmd.load(str(FIXTURE), "cif_template")
+        cif = self.root / "template.cif"
+        self.cmd.save(str(cif), "cif_template")
+        self.cmd.delete("cif_template")
+        pdb_data = FIXTURE.read_bytes()
+        invalid_pdb = pdb_data[:30] + b"     nan" + pdb_data[38:]
+        cif_lines = cif.read_bytes().splitlines(keepends=True)
+        tags = [line.strip().lower() for line in cif_lines if line.startswith(b"_atom_site.")]
+        coordinate_column = tags.index(b"_atom_site.cartn_x")
+        first_atom = next(index for index, line in enumerate(cif_lines) if line.startswith(b"ATOM "))
+        fields = cif_lines[first_atom].split()
+        fields[coordinate_column] = b"nan"
+        cif_lines[first_atom] = b" ".join(fields) + b"\n"
+
+        for extension, valid, invalid in (("pdb", pdb_data, invalid_pdb),
+                                          ("cif", cif.read_bytes(), b"".join(cif_lines))):
+            for compressed in (False, True):
+                with self.subTest(extension=extension, compressed=compressed):
+                    suffix = f".{extension}.gz" if compressed else f".{extension}"
+                    dataset = self.root / f"dataset{suffix}"
+                    dataset.mkdir()
+                    first, second = dataset / f"01_good{suffix}", dataset / f"02_invalid{suffix}"
+                    first.write_bytes(gzip.compress(valid) if compressed else valid)
+                    second.write_bytes(gzip.compress(invalid) if compressed else invalid)
+                    self.annotator["sa_load_dir"](str(dataset))
+                    self.assertEqual(self.state.current_file(), str(first))
+                    with patch.object(self.cmd, "load_raw", wraps=self.cmd.load_raw) as native_load:
+                        self.assert_current_scene_unchanged(self.annotator["sa_next"])
+                        self.assert_current_scene_unchanged(self.annotator["sa_prev"])
+                        self.assert_current_scene_unchanged(self.annotator["sa_next_unannotated"])
+                        native_load.assert_not_called()
+
+                    second.write_bytes(first.read_bytes())
+                    self.annotator["sa_goto"](2)
+                    self.assertEqual((self.state.index, self.state.current_file()), (1, str(second)))
+                    self.assertGreater(self.cmd.count_atoms(self.state.current_object), 0)
+
+    def test_rejected_cached_coordinates_do_not_block_later_preloads(self):
+        shutil.copyfile(FIXTURE, self.root / "a_current.pdb")
+        pdb_data = FIXTURE.read_bytes()
+        bad = self.root / "b_nonfinite.pdb.gz"
+        bad.write_bytes(gzip.compress(pdb_data[:30] + b"   1e+39" + pdb_data[38:]))
+        good = self.root / "c_valid.pdb.gz"
+        good.write_bytes(gzip.compress(pdb_data))
+        self.state.preload_enabled = True
+        self.state.preload_ahead = 2
+        self.state.background_decompress_gz = True
+        self.annotator["sa_load_dir"](str(self.root))
+        self.addCleanup(self.annotator["_reset_bg_cache"])
+        self.addCleanup(self.annotator["_bg_executor"].shutdown, wait=True)
+        for future in self.annotator["_bg_decompress_futures"].values():
+            future.result(timeout=10)
+
+        with patch.object(self.cmd, "load_raw", wraps=self.cmd.load_raw) as native_load:
+            self.annotator["_process_preload_tick"]()
+            native_load.assert_called_once()
+            self.assertEqual(native_load.call_args.args[0], pdb_data)
+            self.assert_current_scene_unchanged(lambda: self.annotator["sa_goto"](2))
+            native_load.assert_called_once()
+
+        preloaded = next(name for name in self.cmd.get_names("objects") if "c_valid" in name)
+        self.assertNotIn(preloaded, self.cmd.get_names("objects", enabled_only=1))
+        self.annotator["sa_goto"](3)
+        self.assertEqual((self.state.index, self.state.current_file(), self.state.current_object),
+                         (2, str(good), preloaded))
+
+    def test_empty_native_load_keeps_current_dataset_and_scene(self):
+        source = self.root / "current.pdb"
+        shutil.copyfile(FIXTURE, source)
+        self.annotator["sa_load_dir"](str(self.root))
+        bad_dir = self.root / "invalid"
+        bad_dir.mkdir()
+        invalid = b"REMARK incomplete coordinate file\nEND\n"
+        (bad_dir / "bad.pdb").write_bytes(invalid)
+        self.assert_current_scene_unchanged(lambda: self.annotator["sa_load_dir"](str(bad_dir)))
+
+        source.write_bytes(invalid)
+        self.assert_current_scene_unchanged(self.annotator["_load_current_structure"])
+
+    def test_first_open_with_a_bad_first_file_can_still_navigate(self):
+        (self.root / "01_invalid.pdb").write_bytes(b"REMARK incomplete coordinate file\nEND\n")
+        good = self.root / "02_valid.pdb"
+        shutil.copyfile(FIXTURE, good)
+
+        self.annotator["sa_load_dir"](str(self.root))
+        self.assertIsNone(self.state.current_object)
+        self.assertEqual(self.cmd.get_names("all"), [])
+        self.annotator["sa_next"]()
+
+        self.assertEqual((self.state.index, self.state.current_file()), (1, str(good)))
+        self.assertGreater(self.cmd.count_atoms(self.state.current_object), 0)
+
     def replacement_structure(self):
         self.cmd.fragment("ala", "replacement_fixture")
         path = self.root / "replacement.pdb"
@@ -127,13 +274,25 @@ class AnnotatorProvenance(unittest.TestCase):
                 self.assertEqual(source.read_bytes(), original)
                 self.assertEqual(destination.read_bytes(), original)
 
-    def test_csv_export_protects_inputs_admitted_by_a_custom_dataset_pattern(self):
-        source = self.root / "model.mol2"
+    def test_csv_export_protects_custom_format_after_switching_datasets(self):
+        original_dataset = self.root / "pdb"
+        original_dataset.mkdir()
+        shutil.copyfile(FIXTURE, original_dataset / "original.pdb")
+        self.annotator["sa_load_dir"](str(original_dataset))
+        self.assertTrue(self.state.current_object)
+
+        custom_dataset = self.root / "mol2"
+        custom_dataset.mkdir()
+        source = custom_dataset / "model.mol2"
         self.cmd.fragment("ala", "fixture")
         self.cmd.save(str(source), "fixture")
         self.cmd.delete("fixture")
-        self.annotator["sa_load_dir"](str(self.root), r"^.+\.mol2$")
+        self.annotator["sa_load_dir"](str(custom_dataset), r"^.+\.mol2$")
         self.assertEqual(self.state.current_file(), str(source))
+        report = Path(self.annotator["sa_export_csv"]())
+        self.assertEqual(report.parent, custom_dataset)
+        with report.open(newline="", encoding="utf-8") as stream:
+            self.assertEqual([row["path"] for row in csv.DictReader(stream)], [str(source)])
         original = source.read_bytes()
         self.assertIsNone(self.annotator["sa_export_csv"](str(source)))
         self.assertEqual(source.read_bytes(), original)

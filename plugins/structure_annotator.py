@@ -3,6 +3,7 @@ from pymol.Qt import QtCore, QtWidgets
 import datetime
 import gzip
 import io
+import math
 import os
 import re
 import shutil
@@ -25,6 +26,192 @@ WRITER_TIMESTAMP_PATTERN = re.compile(
     r"(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\Z"
 )
 FileVersion = Tuple[int, int, int, int]
+
+# BEGIN GENERATED COORDINATE CHECKS
+PDB_SUSPECT_COORDINATES = re.compile(
+    rb"(?:^|(?<=\r))(?:ATOM  |HETATM)[^\r\n]{24}"
+    rb"(?=[^\r\n]{0,21}(?:nan|inf|0x|e[+-]?\d))([^\r\n]{1,24})",
+    re.MULTILINE | re.IGNORECASE,
+)
+PDB_COORDINATE_EXPONENT = re.compile(rb"e[+-]?\d")
+HEX_COORDINATE_PREFIX = re.compile(r"0x(?:[0-9a-f]+(?:\.[0-9a-f]*)?|\.[0-9a-f]+)(?:p[+-]?\d+)?", re.ASCII)
+DECIMAL_COORDINATE_PREFIX = re.compile(r"(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?", re.ASCII)
+CIF_WHITESPACE = b" \t\r\n\v\f"
+CIF_NONFINITE_MARKER = re.compile(rb"nan|inf")
+CIF_LARGE_EXPONENT = re.compile(rb"e\+?0*[1-9]\d")
+CIF_DIGIT_MASK = bytes.maketrans(b"123456789", b"000000000")
+CIF_COORDINATE_TAG = re.compile(
+    rb"_(?:atom_site[._](?:cartn|fract)|chem_comp_atom[._](?:pdbx_)?model_cartn)_[xyz]"
+)
+CIF_COORDINATE_KEYS = frozenset(
+    f"{prefix}{axis}{suffix}"
+    for prefix, suffix in (
+        ("_atom_site_cartn_", ""), ("_atom_site_fract_", ""),
+        ("_chem_comp_atom_model_cartn_", ""), ("_chem_comp_atom_pdbx_model_cartn_", "_ideal"),
+    )
+    for axis in "xyz"
+)
+CIF_COORDINATE_TAGS = {key.encode("ascii") for key in CIF_COORDINATE_KEYS}
+CIF_TOKEN_MARKS = re.compile(rb"['\";#_]")
+CIF_CONTROL_TOKEN = re.compile(
+    rb"'[^\n]*?'(?=\s|$)|\"[^\n]*?\"(?=\s|$)|^;.*?^;|#[^\n]*"
+    rb"|(?P<control>_\S+|(?:data_|save_)\S*|(?:global_|loop_|stop_)(?=\s|$))"
+    rb"|(?P<uncertain>['\"]|^;)",
+    re.MULTILINE | re.DOTALL,
+)
+CIF_HEADER_GAP = re.compile(rb"(?:\s|#[^\n]*)*")
+NATIVE_COORDINATE_OVERFLOW = float.fromhex("0x1.ffffffp127")
+
+
+def _nonfinite_coordinate(value, convert=float):
+    token = value.strip().lower().lstrip("+-")
+    if token.startswith(("nan", "inf")):
+        return True
+    hexadecimal = token.startswith("0x")
+    if not hexadecimal and len(token) < 39 and "e" not in token:
+        return False
+    try:
+        if hexadecimal:
+            prefix = HEX_COORDINATE_PREFIX.match(token)
+            if prefix is None:
+                return False
+            number = float.fromhex(prefix[0])
+        else:
+            number = convert(token)
+    except OverflowError:
+        return True
+    except ValueError:
+        # The native loader also accepts a numeric prefix followed by other text.
+        prefix = DECIMAL_COORDINATE_PREFIX.match(token)
+        if prefix is None:
+            return False
+        number = float(prefix[0])
+    return not math.isfinite(number) or number >= NATIVE_COORDINATE_OVERFLOW
+
+
+def _check_pdb_coordinates(contents):
+    folded = contents.lower()
+    if (b"nan" not in folded and b"inf" not in folded and b"0x" not in folded
+            and not PDB_COORDINATE_EXPONENT.search(folded)):
+        return
+    for record in PDB_SUSPECT_COORDINATES.finditer(contents):
+        fields = record[1]
+        for offset in (0, 8, 16):
+            field = fields[offset:offset + 8].decode("ascii", errors="replace")
+            if _nonfinite_coordinate(field):
+                raise ValueError("PDB 包含非有限坐标。")
+
+
+def _may_have_nonfinite_cif_token(contents):
+    if b"nan" in contents or b"inf" in contents:
+        if any(mark.start() == 0 or contents[mark.start() - 1] in b" \t\r\n'\";+-"
+               for mark in CIF_NONFINITE_MARKER.finditer(contents)):
+            return True
+    return (b"0x" in contents or CIF_LARGE_EXPONENT.search(contents) is not None
+            or b"0" * 30 in contents.translate(CIF_DIGIT_MASK))
+
+
+def _cif_token_start(contents, mark):
+    if mark == 0 or contents[mark - 1] in CIF_WHITESPACE:
+        return mark
+    if contents[mark] != ord("_"):
+        return None
+    # A reserved word ends its fixed prefix at the underscore.
+    if mark >= 4 and contents[mark - 4:mark] in (b"data", b"save", b"loop", b"stop"):
+        start = mark - 4
+    elif mark >= 6 and contents[mark - 6:mark] == b"global":
+        start = mark - 6
+    else:
+        return None
+    return start if start == 0 or contents[start - 1] in CIF_WHITESPACE else None
+
+
+def _cif_coordinate_region_has_candidate(contents):
+    """Check coordinate item regions without tokenizing their ordinary rows."""
+    if not contents.isascii():
+        return True
+    contents = contents.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    loop_header = coordinate_region = False
+    last_control = resume = 0
+    for mark in CIF_TOKEN_MARKS.finditer(contents):
+        if mark.start() < resume:
+            continue
+        start = _cif_token_start(contents, mark.start())
+        if start is None or start < resume:
+            continue
+        match = CIF_CONTROL_TOKEN.match(contents, start)
+        if match is None:
+            continue
+        resume = match.end()
+        if match.lastgroup == "uncertain":
+            return True
+        if (contents[start] == ord(";") and resume < len(contents)
+                and contents[resume] not in CIF_WHITESPACE):
+            return True
+        key = match["control"]
+        if key is None:
+            continue
+        gap = contents[last_control:start]
+        if coordinate_region and _may_have_nonfinite_cif_token(gap):
+            return True
+        is_coordinate_key = key.replace(b".", b"_") in CIF_COORDINATE_TAGS
+        if key == b"loop_":
+            loop_header, coordinate_region = True, False
+        elif loop_header and key.startswith(b"_") and CIF_HEADER_GAP.fullmatch(gap):
+            coordinate_region = coordinate_region or is_coordinate_key
+        else:
+            loop_header, coordinate_region = False, is_coordinate_key
+        last_control = resume
+    return coordinate_region and _may_have_nonfinite_cif_token(contents[last_control:])
+
+
+def _cif_coordinate_values(text):
+    from chempy.cif import token_re
+
+    # Use PyMOL's CIF tokenizer, then visit only coordinate items and columns.
+    tokens = [token for token in token_re.findall(text) if token[0] != "#"]
+    controls = [index for index, token in enumerate(tokens)
+                if token.startswith(("_", "data_", "save_"))
+                or token in ("loop_", "stop_", "global_")]
+    controls.append(len(tokens))
+    boundaries = iter(controls)
+    position = next(boundaries)
+    while position < len(tokens):
+        key = tokens[position]
+        end = next(boundaries)
+        if key == "loop_":
+            first_key = position + 1
+            first_value = first_key
+            while end == first_value and end < len(tokens) and tokens[end].startswith("_"):
+                first_value += 1
+                end = next(boundaries)
+            width = first_value - first_key
+            for column, tag in enumerate(tokens[first_key:first_value]):
+                if tag.replace(".", "_") in CIF_COORDINATE_KEYS:
+                    yield from tokens[first_value + column:end:width]
+        elif key.replace(".", "_") in CIF_COORDINATE_KEYS and position + 1 < end:
+            yield tokens[position + 1]
+        position = end
+
+
+def _check_cif_coordinates(contents):
+    folded = contents.lower()
+    # Values cannot precede their coordinate tags. Skip markers in leading metadata.
+    coordinate_tag = CIF_COORDINATE_TAG.search(folded)
+    if coordinate_tag is None or not _may_have_nonfinite_cif_token(folded[coordinate_tag.start():]):
+        return
+    if not _cif_coordinate_region_has_candidate(folded):
+        return
+
+    from chempy.cif import scifloat, unquote
+
+    text = folded.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+    values = list(_cif_coordinate_values(text))
+    if not _may_have_nonfinite_cif_token(" ".join(values).encode("utf-8")):
+        return
+    if any(_nonfinite_coordinate(unquote(value), scifloat) for value in values):
+        raise ValueError("mmCIF 包含非有限坐标。")
+# END GENERATED COORDINATE CHECKS
 
 
 def _long_path(path: str) -> str:
@@ -801,21 +988,75 @@ def _evict_unneeded_objects() -> None:
     _evict_decompressed_except(desired)
 
 
-def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> Optional[str]:
-    if not STATE.files:
-        return None
-    index = index % len(STATE.files)
+class _NoStructureLoaded(ValueError):
+    pass
+
+
+def _stage_structure(path, index, version, load_path):
+    if version is None:
+        raise FileNotFoundError(f"source file is unavailable: {path}")
+    structure_format = "cif" if path.lower().endswith((".cif", ".cif.gz")) else "pdb"
+    if path == load_path:
+        text, _ = _read_text_file(path, version)
+        contents = text.encode("utf-8")
+    else:
+        with open(_long_path(load_path), "rb") as cached:
+            contents = cached.read()
+    if structure_format == "cif":
+        _check_cif_coordinates(contents)
+    else:
+        _check_pdb_coordinates(contents)
+
+    obj_name = cmd.get_unused_name(_object_name_for_index(path, index), alwaysnumber=0)
+    marker = f"_sa_owner_{uuid4().hex}"
+    view = cmd.get_view()
+    try:
+        cmd.load_raw(contents, structure_format, obj_name, quiet=1)
+        cmd.sync()
+        if _source_version(path) != version:
+            raise OSError(f"source changed during load: {path}. Try Reload.")
+        if not cmd.select(marker, f"?{obj_name}", enable=0, quiet=1):
+            raise _NoStructureLoaded(f"no structure was loaded from {path}")
+        cmd.refresh()
+    except Exception:
+        cmd.delete(marker)
+        cmd.delete(obj_name)
+        cmd.set_view(view)
+        raise
+    return obj_name, marker
+
+
+def _focus_structure(index, obj_name, loaded):
+    cmd.enable(obj_name)
+    if not STATE.keep_previous and not STATE.preload_enabled:
+        # Step commands such as zoom also see disabled objects.
+        _delete_managed_objects({index})
+    else:
+        for other_index, other in loaded.items():
+            if other_index != index:
+                try:
+                    cmd.disable(other)
+                except Exception:
+                    pass
+    STATE.index, STATE.current_object = index, obj_name
+    context = {
+        "object": obj_name,
+        "file": STATE.files[index],
+        "index": str(index),
+        "count": str(len(STATE.files)),
+    }
+    _run_pymol_commands(STATE.step_cmd, context)
+
+
+def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True,
+                   force: bool = False) -> Optional[str]:
     path = STATE.files[index]
     version = _source_version(path)
     if version is None:
-        print(f"Structure Annotator: source file is unavailable: {path}")
-        return None
+        raise FileNotFoundError(f"source file is unavailable: {path}")
     loaded = _tracked_objects(None if focus else (index,))
     obj_name = loaded.get(index)
-    if obj_name is not None and STATE.object_versions.get(index) != version:
-        _delete_managed_objects(STATE.object_marks.keys() - {index})
-        obj_name = None
-    if obj_name is None:
+    if force or obj_name is None or STATE.object_versions.get(index) != version:
         load_path = path
         if _is_gz_path(path) and STATE.background_decompress_gz:
             requested = _request_decompressed_path(index, version)
@@ -823,62 +1064,17 @@ def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> O
                 load_path = requested
             elif not allow_gz_fallback:
                 return None
-        # Use long path for Windows compatibility
-        load_path_resolved = _long_path(load_path)
-        if not os.path.exists(load_path_resolved):
-            print(f"Structure Annotator: file not found: {load_path}")
-            return None
-        obj_name = cmd.get_unused_name(_object_name_for_index(path, index), alwaysnumber=0)
-        if load_path == path:
-            text, _ = _read_text_file(path, version)
-            structure_format = "cif" if path.lower().endswith((".cif", ".cif.gz")) else "pdb"
-            cmd.load_raw(text, structure_format, obj_name, quiet=1)
-        else:
-            cmd.load(load_path_resolved, obj_name, quiet=1)
-        cmd.sync()
-        cmd.refresh()
-        if _source_version(path) != version:
-            cmd.delete(obj_name)
-            print(f"Structure Annotator: source changed during load: {path}. Try Reload.")
-            return None
-        marker = f"_sa_owner_{uuid4().hex}"
-        if not cmd.select(marker, f"model {obj_name}", enable=0, quiet=1):
-            cmd.delete(marker)
-            cmd.delete(obj_name)
-            return None
-        old_marker = STATE.object_marks.get(index)
-        if old_marker:
-            cmd.delete(old_marker)
+        obj_name, marker = _stage_structure(path, index, version, load_path)
+        # Retire the previous object at this slot only after the replacement is ready.
+        if index in STATE.object_marks:
+            _delete_managed_objects(STATE.object_marks.keys() - {index})
         STATE.object_marks[index] = marker
         STATE.object_versions[index] = version
 
-    if not focus:
-        try:
-            cmd.disable(obj_name)
-        except Exception:
-            pass
-        return obj_name
-
-    for other_index, other in loaded.items():
-        if other_index != index:
-            try:
-                cmd.disable(other)
-            except Exception:
-                pass
-    try:
-        cmd.enable(obj_name)
-    except Exception:
-        pass
-
-    STATE.current_object = obj_name
-
-    context = {
-        "object": obj_name,
-        "file": path,
-        "index": str(index),
-        "count": str(len(STATE.files)),
-    }
-    _run_pymol_commands(STATE.step_cmd, context)
+    if focus:
+        _focus_structure(index, obj_name, loaded)
+    else:
+        cmd.disable(obj_name)
     return obj_name
 
 
@@ -948,22 +1144,24 @@ def _process_preload_tick() -> None:
                 _schedule_preload_tick()
             return
         except Exception as e:
-            print(f"Structure Annotator preload error: {e}")
+            print(f"Structure Annotator preload error: {STATE.files[idx]}: {e}")
             traceback.print_exc()
-            _preload_queue = []
-            return
+            _preload_queue.pop(0)
     return
 
 
-def _load_current_structure() -> None:
-    if not STATE.current_file():
+def _load_current_structure(target: Optional[int] = None) -> None:
+    if not STATE.files:
         print("Structure Annotator: no dataset loaded")
         return
-    if not STATE.keep_previous and not STATE.preload_enabled:
-        _delete_managed_objects()
-
-    STATE.current_object = None
-    _ensure_loaded(STATE.index, focus=True, allow_gz_fallback=True)
+    index = STATE.index if target is None else target
+    force = not STATE.keep_previous and not STATE.preload_enabled
+    try:
+        _ensure_loaded(index, focus=True, force=force)
+    except Exception as error:
+        print(f"Structure Annotator: cannot load {STATE.files[index]}: {error}")
+        traceback.print_exc()
+        return
     _evict_unneeded_objects()
     _kick_preload()
 
@@ -996,6 +1194,22 @@ def sa_load_dir(path: str = ".", pattern: str = STRUCTURE_PATTERN) -> None:
         files = dataset_files
         if STATE.skip_annotated:
             files = _unannotated_files(dataset_files, normalize_label_key(STATE.label_name))
+        staged = None
+        if files:
+            first = files[0]
+            version = _source_version(first)
+            try:
+                staged = _stage_structure(first, 0, version, first)
+            except Exception as error:
+                # Custom-pattern files without a preview can still be listed and exported.
+                metadata_only = isinstance(error, _NoStructureLoaded) and not first.lower().endswith(
+                    (".pdb", ".pdb.gz", ".cif", ".cif.gz")
+                )
+                if STATE.files and not metadata_only:
+                    raise
+                # On first open, keep the file list available for Go and CSV export.
+                print(f"Structure Annotator: cannot load {first}: {error}")
+                traceback.print_exc()
         if _preload_panel_timer is not None:
             _preload_panel_timer.stop()
         _preload_queue.clear()
@@ -1013,7 +1227,11 @@ def sa_load_dir(path: str = ".", pattern: str = STRUCTURE_PATTERN) -> None:
             return
         if not STATE.skip_annotated:
             _rescan_annotated_indices()
-        _load_current_structure()
+        if staged is not None:
+            obj_name, marker = staged
+            STATE.object_marks[0], STATE.object_versions[0] = marker, version
+            _focus_structure(0, obj_name, {})
+            _kick_preload()
         annotated = len(STATE.annotated_indices)
         print(
             f"Structure Annotator: loaded {len(STATE.files)} files from {path} "
@@ -1029,8 +1247,7 @@ def sa_next() -> None:
         if not STATE.files:
             print("Structure Annotator: no dataset loaded (use sa_load_dir)")
             return
-        STATE.index = (STATE.index + 1) % len(STATE.files)
-        _load_current_structure()
+        _load_current_structure((STATE.index + 1) % len(STATE.files))
     except Exception as e:
         print(f"Structure Annotator next error: {e}")
         traceback.print_exc()
@@ -1041,8 +1258,7 @@ def sa_prev() -> None:
         if not STATE.files:
             print("Structure Annotator: no dataset loaded (use sa_load_dir)")
             return
-        STATE.index = (STATE.index - 1) % len(STATE.files)
-        _load_current_structure()
+        _load_current_structure((STATE.index - 1) % len(STATE.files))
     except Exception as e:
         print(f"Structure Annotator prev error: {e}")
         traceback.print_exc()
@@ -1155,8 +1371,7 @@ def sa_undo() -> None:
         print(f"Undo: {os.path.basename(path)} {label_key} -> {restored}")
         # Return to the file we just changed so the user can see the result.
         if 0 <= index < len(STATE.files):
-            STATE.index = index
-            _load_current_structure()
+            _load_current_structure(index)
     except Exception as e:
         print(f"Structure Annotator undo error: {e}")
         traceback.print_exc()
@@ -1177,8 +1392,7 @@ def sa_goto(position: int) -> None:
         if target < 0 or target >= len(STATE.files):
             print(f"Structure Annotator: position must be 1..{len(STATE.files)}")
             return
-        STATE.index = target
-        _load_current_structure()
+        _load_current_structure(target)
     except Exception as e:
         print(f"Structure Annotator goto error: {e}")
         traceback.print_exc()
@@ -1194,8 +1408,7 @@ def sa_next_unannotated() -> None:
         for offset in range(1, total + 1):
             candidate = (STATE.index + offset) % total
             if candidate not in STATE.annotated_indices:
-                STATE.index = candidate
-                _load_current_structure()
+                _load_current_structure(candidate)
                 return
         print("Structure Annotator: all files are annotated for this label")
     except Exception as e:
@@ -1554,9 +1767,10 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
     def _reload(self) -> None:
         self._sync_to_state()
         active = _enabled_managed_objects() if STATE.current_object else {}
-        if active and STATE.index not in active:
-            STATE.index = next(iter(active))
-        _load_current_structure()
+        index = STATE.index
+        if active and index not in active:
+            index = next(iter(active))
+        _load_current_structure(index)
         self._refresh_status()
 
     def _apply_selected_value(self) -> None:
