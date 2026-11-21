@@ -673,16 +673,28 @@ class CollectionDialog(QtWidgets.QDialog):
 
     def open_gallery(self):
         self.require_manifest()
+        busy = None
         for folder in ("images", "previews"):
             directory = self.manifest_path.parent / folder
             page = directory / "04_gallery.html"
-            current = core.current_images(self.manifest, directory)
-            if page.exists() and current:
-                report = {"results": [current.get(index, {"index": index, "ok": False})
-                                      for index in range(len(self.manifest["samples"]))]}
-                core.write_gallery(self.manifest, directory, report)
-                QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(page)))
-                return
+            if not page.exists():
+                continue
+            try:
+                with core.export_directory_lock(directory):
+                    manifest = core.read_json(self.manifest_path)
+                    current = core.current_images(manifest, directory)
+                    if not current:
+                        continue
+                    report = {"results": [current.get(index, {"index": index, "ok": False})
+                                          for index in range(len(manifest["samples"]))]}
+                    core.write_gallery(manifest, directory, report)
+            except core.ExportInProgress as error:
+                busy = error
+                continue
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(page)))
+            return
+        if busy is not None:
+            raise busy
         raise ValueError("没有当前设置的展示页，请先刷新预览或导出。")
 
     def closeEvent(self, event):

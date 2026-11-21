@@ -296,6 +296,49 @@ class CollectionsSampling(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "quality"):
                 core.prepare_rows(config)
 
+    def test_structure_path_prefers_the_exact_name_before_trimming(self):
+        with tempfile.TemporaryDirectory() as temporary, pymol2.PyMOL() as instance:
+            root = Path(temporary)
+            cmd = instance.cmd
+            cmd.fragment("ala", "intended")
+            cmd.fragment("gly", "substitute")
+            name = "\u2028model.pdb"
+            cmd.save(str(root / name), "intended")
+            cmd.save(str(root / "model.pdb"), "substitute")
+            cmd.save(str(root / "padded.pdb"), "intended")
+            path = root / "scores.csv"
+            with path.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream, quoting=csv.QUOTE_ALL)
+                writer.writerow(["path", "quality"])
+                writer.writerow([name, "0.9"])
+                writer.writerow(["  padded.pdb", "0.8"])
+            rows, skipped = core.prepare_rows({"scores": str(path), "metrics": [{"name": "quality"}]})
+            self.assertFalse(skipped)
+            self.assertEqual([row["id"] for row in rows], [name, "padded.pdb"])
+            self.assertEqual([Path(row["path"]).name for row in rows], [name, "padded.pdb"])
+            cmd.load(rows[0]["path"], "selected")
+            self.assertEqual(cmd.count_atoms("selected"), cmd.count_atoms("intended"))
+
+    def test_missing_structure_path_cannot_use_a_literal_none_filename(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shutil.copyfile(FIXTURE, root / "None.pdb")
+            fixtures = {
+                "scores.json": '[{"id":"missing","quality":0.9,"path":null},'
+                               '{"id":"explicit","quality":0.8,"path":"None"}]',
+                "scores.csv": "id,quality,path\nmissing,0.9\nexplicit,0.8,None\n",
+            }
+            for name, data in fixtures.items():
+                with self.subTest(name=name):
+                    path = root / name
+                    path.write_text(data, encoding="utf-8")
+                    config = {"scores": str(path), "metrics": [{"name": "quality"}]}
+                    rows, skipped = core.prepare_rows(config)
+                    self.assertEqual([(row["id"], row["scores"]["quality"]) for row in rows],
+                                     [("explicit", 0.8)])
+                    self.assertEqual([Path(row["path"]).name for row in rows], ["None.pdb"])
+                    self.assertEqual([item["row"] for item in skipped], [2])
+
     def test_out_of_range_json_integer_does_not_abort_screening(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

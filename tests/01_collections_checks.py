@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from unittest.mock import patch
 
 import numpy as np
 
@@ -458,6 +459,17 @@ if args.stage in ("qt", "all") and (args.hidden_qt_child or os.name != "nt"):
     panel.actions.edit("pin")
     finish_ui_task()
     assert panel.manifest["samples"][0]["pinned"] != previous_pin
+    current = core.revise_collection(manifest_path, {"action": "pin", "indices": [0]})
+    assert current["samples"][0]["pinned"] != panel.manifest["samples"][0]["pinned"]
+    width, height = core.preview_size(panel.rendering.width.value(), panel.rendering.height.value())
+    export = core.export_collection(manifest_path, width=width, height=height, preview=True, retry_failed=True)
+    assert export["reused"] == len(current["samples"])
+    gallery = manifest_path.parent / "previews/04_gallery.html"
+    published = gallery.read_bytes()
+    with patch.object(QtGui.QDesktopServices, "openUrl", return_value=True) as open_url:
+        panel.open_gallery()
+    assert Path(open_url.call_args.args[0].toLocalFile()).resolve() == gallery.resolve()
+    assert gallery.read_bytes() == published
     assert not panel.findChildren(QtWidgets.QTabWidget)
     assert panel.sampling.title() == "数据与采样" and panel.rendering.title() == "朝向与导出"
     panel.show()
@@ -481,7 +493,8 @@ if args.stage in ("qt", "all") and (args.hidden_qt_child or os.name != "nt"):
                      "preview_failures_keep_scene": "PASS",
                      "preview_with_retained_atom_order": "PASS",
                      "form_restore_and_apply": "PASS", "capture_refreshes_thumbnails": "PASS",
-                     "pin_ui": "PASS", "close_cancels_and_joins_workers": "PASS",
+                     "pin_ui": "PASS", "gallery_uses_saved_manifest": "PASS",
+                     "close_cancels_and_joins_workers": "PASS",
                      "native_groupbox_style_without_tabs": "PASS",
                      "widget_render": str(image_path.resolve()),
                      "platform": os.environ["QT_QPA_PLATFORM"], "input_desktop_switched": False}

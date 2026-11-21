@@ -235,10 +235,18 @@ def prepare_rows(config):
             ):
                 skipped.append({"row": number, "reason": "分数范围筛选"})
                 continue
-            value = str(source[path_column]).strip()
-            if not value:
+            raw = source[path_column]
+            value = "" if raw is None else str(raw)
+            trimmed = value.strip()
+            if not trimmed:
                 raise ValueError("结构路径为空")
-            path = _resolve_structure_path(root, value)
+            try:
+                path = _resolve_structure_path(root, value)
+            except ValueError:
+                if value == trimmed:
+                    raise
+                value = trimmed
+                path = _resolve_structure_path(root, value)
             path = str(path.resolve())
             if os.path.normcase(path) in seen:
                 raise ValueError("重复结构路径")
