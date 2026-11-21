@@ -443,7 +443,7 @@ class CollectionPreview:
             raise ValueError("样本编号超出范围。")
         manifest = panel.manifest
         row = manifest["samples"][index]
-        enabled = cmd.get_names("objects", enabled_only=1)
+        enabled = cmd.get_names("all", enabled_only=1)
         view = cmd.get_view()
         staged = cmd.get_unused_name("collections_preview")
         width, height = cmd.get_viewport()
@@ -461,6 +461,8 @@ class CollectionPreview:
                             expected_coordinates=expected, bounds=manifest["bounds"])
             if sort_for_validation:
                 cmd.set("retain_order", 1, staged)
+            cmd.set("state", 1, staged)
+            cmd.set("all_states", 0, staged)
             core.style_structure(cmd, staged, manifest["config"])
         except Exception:
             cmd.delete(staged)
@@ -484,9 +486,10 @@ class CollectionPreview:
         enabled, view = panel.previous_scene
         cmd.delete(self.object_name)
         cmd.disable("all")
-        for obj in enabled:
-            if obj in cmd.get_names("objects"):
-                cmd.enable(obj)
+        existing = set(cmd.get_names("all"))
+        for name in enabled:
+            if name in existing:
+                cmd.enable(name)
         cmd.set_view(view)
         panel.previous_scene, self.object_name = None, None
 

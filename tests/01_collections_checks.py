@@ -375,6 +375,12 @@ if args.stage in ("qt", "all") and (args.hidden_qt_child or os.name != "nt"):
         pymol_instance.start()
     cmd.run(str(repository / "plugins/structure_collections.py"))
     cmd.fragment("ala", "col_original_scene")
+    cmd.select("col_original_highlight", "col_original_scene and name CA")
+    cmd.select("col_original_hidden", "col_original_scene and name N")
+    cmd.disable("col_original_hidden")
+    cmd.enable("col_original_highlight")
+    original_selections = cmd.get_names("selections", enabled_only=1)
+    assert original_selections == ["col_original_highlight"]
     original_view = tuple(cmd.get_view())
     original_enabled = cmd.get_names("objects", enabled_only=1)
     panel.preview(0)
@@ -425,6 +431,33 @@ if args.stage in ("qt", "all") and (args.hidden_qt_child or os.name != "nt"):
         finally:
             cmd.set("retain_order", original_retain_order)
             panel.manifest["samples"][1] = next_sample
+
+    with tempfile.TemporaryDirectory() as temporary, pymol2.PyMOL() as analysis:
+        ensemble = Path(temporary) / "ensemble.pdb"
+        analysis.cmd.fragment("ala", "fixture")
+        analysis.cmd.create("fixture", "fixture", 1, 2)
+        initial = analysis.cmd.get_coords("fixture", 1)
+        analysis.cmd.load_coords(initial + [25, 0, 0], "fixture", 2)
+        analysis.cmd.save(str(ensemble), "fixture", state=0)
+        analysis.cmd.load(str(ensemble), "saved_fixture")
+        first = analysis.cmd.get_coords("saved_fixture", 1)
+        panel.manifest["samples"][1] = dict(next_sample, path=str(ensemble), matrix=np.eye(4).tolist(),
+                                             coordinate_signature=core.coordinate_signature(first))
+        original_frame = cmd.get_state()
+        original_show_all = cmd.get_setting_boolean("all_states")
+        cmd.load(str(ensemble), "col_scene_frames")
+        cmd.frame(2)
+        cmd.set("all_states", 1)
+        try:
+            panel.preview(1)
+            assert cmd.get_object_state(panel.scene.object_name) == 1
+            np.testing.assert_array_equal(cmd.get_coords(panel.scene.object_name, 1), first)
+            assert cmd.get_state() == 2 and cmd.get_setting_boolean("all_states")
+        finally:
+            cmd.set("all_states", original_show_all)
+            cmd.frame(original_frame)
+            cmd.delete("col_scene_frames")
+            panel.manifest["samples"][1] = next_sample
     panel.preview(0)
     panel.capture_view()
     assert "view" in json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -439,6 +472,7 @@ if args.stage in ("qt", "all") and (args.hidden_qt_child or os.name != "nt"):
     panel.restore_scene()
     assert cmd.get_names("objects", enabled_only=1) == original_enabled
     np.testing.assert_allclose(cmd.get_view(), original_view)
+    assert cmd.get_names("selections", enabled_only=1) == original_selections
     panel.rendering.orientation.setCurrentIndex(panel.rendering.orientation.findData("binder"))
     panel.rendering.width.setValue(320)
     panel.rendering.height.setValue(480)
@@ -492,6 +526,8 @@ if args.stage in ("qt", "all") and (args.hidden_qt_child or os.name != "nt"):
                      "preview_restore_capture": "PASS", "cmd_run_registration": "PASS",
                      "preview_failures_keep_scene": "PASS",
                      "preview_with_retained_atom_order": "PASS",
+                     "preview_only_first_state": "PASS",
+                     "restore_named_selections": "PASS",
                      "form_restore_and_apply": "PASS", "capture_refreshes_thumbnails": "PASS",
                      "pin_ui": "PASS", "gallery_uses_saved_manifest": "PASS",
                      "close_cancels_and_joins_workers": "PASS",
