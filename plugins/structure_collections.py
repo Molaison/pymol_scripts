@@ -232,6 +232,7 @@ class RenderForm(QtWidgets.QGroupBox):
             self.orientation.addItem(label, value)
         reference_widget, self.reference = file_field(self)
         self.reference.setPlaceholderText("留空以第一个入选样本为参考")
+        self._restored_reference = ""
         self.frame_selection = QtWidgets.QLineEdit("polymer.protein")
         self.axis = QtWidgets.QLineEdit()
         self.axis.setPlaceholderText("如 0,0,1；留空根据至少三条环状链估计")
@@ -262,12 +263,16 @@ class RenderForm(QtWidgets.QGroupBox):
         axis = [float(value.strip()) for value in text.split(",")] if text else None
         if axis is not None and len(axis) != 3:
             raise ValueError("对称轴请输入三个数值，例如 0,0,1。")
+        reference = self.reference.text().strip()
+        if reference and reference != self._restored_reference:
+            reference = str(Path(reference).resolve())
         return {"target": self.target.text().strip(), "binder": self.binder.text().strip(),
-                "orientation": self.orientation.currentData(), "reference": self.reference.text().strip(),
+                "orientation": self.orientation.currentData(), "reference": reference,
                 "frame_selection": self.frame_selection.text().strip(), "symmetry_axis": axis}
 
     def restore_config(self, config):
         values = core.orientation_config(config)
+        self._restored_reference = values["reference"] or ""
         for name in ("target", "binder", "reference", "frame_selection"):
             getattr(self, name).setText(values[name] or "")
         self.orientation.setCurrentIndex(self.orientation.findData(values["orientation"]))

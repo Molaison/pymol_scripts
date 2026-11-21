@@ -580,6 +580,21 @@ def coordinate_signature(coords):
     return hashlib.sha256(np.asarray(coords, dtype="<f4").tobytes()).hexdigest()
 
 
+def _reference_frame_signature(cmd, config):
+    """Identify the native reference used for matching and orienting the collection."""
+    mode = config.get("orientation", "target")
+    align = config.get(mode, "chain A" if mode == "target" else "chain B")
+    axes = config.get(mode, "polymer.protein")
+    model = cmd.get_model("model col_reference", 1)
+    # Native super uses the reference's residue identities and bonds as well as its selected CAs.
+    atoms = [(atom.index, atom.segi, atom.chain, atom.resi, atom.resn, atom.name,
+              atom.alt, atom.symbol, atom.flags, atom.coord) for atom in model.atom]
+    bonds = [(bond.index, bond.order) for bond in model.bond]
+    anchors = [[index for _, index in cmd.index(selection("col_reference", expression, True))]
+               for expression in dict.fromkeys((align, axes))]
+    return hashlib.sha256(json.dumps([atoms, bonds, anchors], separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
 def apply_pose(cmd, obj, matrix, *, expected_coordinates=None, bounds=None):
     matrix = np.asarray(matrix)
     coords = cmd.get_coords(f"model {obj}", 1)
@@ -694,18 +709,26 @@ def _create_collection(config, output, progress):
 
     rows, skipped = prepare_rows(config)
     queues, edges = make_strata(rows, config["metrics"], config.get("seed", 0))
+    reference = str(Path(config["reference"]).resolve()) if config.get("reference") else None
+    if reference:
+        config = {**config, "reference": reference}
+    reference_signature = None
     with pymol2.PyMOL() as instance:
         command = instance.cmd
         command.set("max_threads", 1)
-        if config.get("reference"):
-            command.load(str(Path(config["reference"]).resolve()), "col_reference", quiet=1)
+        if reference:
+            command.load(reference, "col_reference", quiet=1)
         selected, rejected, invalid, unverified = select_diverse(command, queues, config, progress=progress)
-        reference = config.get("reference") or (selected[0]["path"] if selected else None)
+        reference = reference or (selected[0]["path"] if selected else None)
+        if selected and config.get("orientation", "target") in ("target", "binder"):
+            reference_signature = _reference_frame_signature(command, config)
         bounds = update_bounds(command, selected)
     manifest = {"version": 1, "config": config, "reference": reference,
                 "samples": selected, "quantile_edges": edges, "occupied_strata": len(queues),
                 "eligible": len(rows), "rejected_duplicates": rejected, "skipped": skipped,
                 "invalid_structures": invalid, "unverified_candidates": unverified, "bounds": bounds}
+    if reference_signature is not None:
+        manifest["reference_frame_signature"] = reference_signature
     save_collection(output / "01_collection.json", manifest)
     return manifest
 
@@ -730,32 +753,35 @@ def write_samples_csv(output, manifest):
             writer.writerow(values)
 
 
-def _load_collection_sample(command, row, obj, *, verify_source):
+def _load_saved_sample(command, row, obj):
     expected = row.get("coordinate_signature")
-    if verify_source and expected is None:
+    if expected is None:
         raise ValueError(f"{row['id']}：旧清单缺少坐标签名，请先重新应用朝向。")
     command.load(row["path"], obj, quiet=1)
-    if verify_source:
-        coords = command.get_coords(f"model {obj}", 1)
-        if coords is None or coordinate_signature(coords) != expected:
-            raise ValueError(f"{row['id']}：{STALE_POSE}")
+    coords = command.get_coords(f"model {obj}", 1)
+    if coords is None or coordinate_signature(coords) != expected:
+        raise ValueError(f"{row['id']}：{STALE_POSE}")
 
 
-def reorient_samples(command, manifest, progress=None, *, verify_sources=False):
+def reorient_samples(command, manifest, progress=None):
     config = manifest["config"]
-    reference = config.get("reference") or manifest.get("reference")
-    if reference and config.get("orientation", "target") in ("target", "binder"):
+    saved_reference = manifest.get("reference")
+    reference = config.get("reference") or saved_reference
+    aligns_to_reference = config.get("orientation", "target") in ("target", "binder")
+    if reference and aligns_to_reference:
+        if not Path(reference).is_absolute():
+            if not saved_reference or not Path(saved_reference).is_absolute():
+                raise ValueError("旧清单没有记录参考结构的绝对路径，请重新选择参考结构后应用朝向。")
+            reference = saved_reference
         command.load(reference, "col_reference", quiet=1)
     valid, failed = [], []
     for index, row in enumerate(manifest["samples"]):
         try:
-            _load_collection_sample(command, row, "col_candidate", verify_source=verify_sources)
+            command.load(row["path"], "col_candidate", quiet=1)
             row["matrix"] = candidate_pose(command, "col_candidate", config).tolist()
             command.set_name("col_candidate", f"col_keep_{len(valid)}")
             valid.append(row)
         except Exception as error:
-            if verify_sources:
-                raise
             traceback.print_exc()
             failed.append({"path": row["path"], "reason": str(error)})
         finally:
@@ -770,20 +796,32 @@ def reorient_samples(command, manifest, progress=None, *, verify_sources=False):
     manifest["samples"] = valid
     manifest["invalid_structures"].extend(failed)
     manifest["bounds"] = update_bounds(command, valid)
+    if aligns_to_reference:
+        reference = reference or valid[0]["path"]
+        manifest["reference_frame_signature"] = _reference_frame_signature(command, config)
+    else:
+        manifest.pop("reference_frame_signature", None)
+    manifest["reference"] = reference
 
 
 def replace_sample(command, manifest, index, progress=None):
     samples, config = manifest["samples"], dict(manifest["config"])
     original = samples[index]
+    if config.get("orientation", "target") in ("target", "binder"):
+        reference = manifest.get("reference")
+        expected = manifest.get("reference_frame_signature")
+        if not reference or expected is None:
+            raise ValueError("清单缺少参考结构朝向签名，请先重新应用朝向。")
+        command.load(reference, "col_reference", quiet=1)
+        if _reference_frame_signature(command, config) != expected:
+            raise ValueError("参考结构的对齐数据已变化，请先重新应用朝向。")
     rows, _ = prepare_rows(config)
     queues, _ = make_strata(rows, config["metrics"], config.get("seed", 0), manifest.get("quantile_edges"))
     excluded = {row["path"] for row in samples} | set(manifest.get("excluded_paths", []))
     queues = [[row for row in queue if row["path"] not in excluded] for queue in queues]
     queues.sort(key=lambda queue: not queue or queue[0]["stratum"] != original["stratum"])
     for position, row in enumerate(samples):
-        _load_collection_sample(command, row, f"col_keep_{position}", verify_source=True)
-    if manifest.get("reference"):
-        command.load(manifest["reference"], "col_reference", quiet=1)
+        _load_saved_sample(command, row, f"col_keep_{position}")
     config["count"] = len(samples) + 1
     chosen, _, _, _ = select_diverse(command, queues, config, selected=samples, progress=progress)
     if len(chosen) == len(samples):
@@ -791,6 +829,10 @@ def replace_sample(command, manifest, index, progress=None):
     replacement = chosen[-1]
     coords = command.get_coords(f"model col_keep_{len(samples)}", 1)
     replacement["coordinate_signature"] = coordinate_signature(coords)
+    _load_saved_sample(command, replacement, "col_candidate")
+    command.delete(f"col_keep_{len(samples)}")
+    command.delete(f"col_keep_{index}")
+    command.set_name("col_candidate", f"col_keep_{index}")
     replacement["image"] = original["image"]
     samples[index] = replacement
     manifest.setdefault("excluded_paths", []).append(original["path"])
@@ -850,7 +892,11 @@ def _revise_collection(manifest, request, progress):
     else:
         if action == "orient":
             previous_orientation = orientation_config(manifest["config"])
-            manifest["config"].update(request["config"])
+            updates = dict(request["config"])
+            chosen_reference = updates.get("reference")
+            if chosen_reference and chosen_reference != manifest["config"].get("reference"):
+                updates["reference"] = str(Path(chosen_reference).resolve())
+            manifest["config"].update(updates)
             if orientation_config(manifest["config"]) != previous_orientation:
                 manifest.pop("view", None)
         elif action == "remove":
@@ -862,14 +908,21 @@ def _revise_collection(manifest, request, progress):
         if not manifest["samples"]:
             raise ValueError("请保留至少一个样本。")
         with pymol2.PyMOL() as instance:
-            instance.cmd.set("max_threads", 1)
+            command = instance.cmd
+            command.set("max_threads", 1)
+            if action == "orient":
+                reorient_samples(command, manifest, progress)
+                return
             if action == "replace":
                 if len(indices) != 1:
                     raise ValueError("替换时请选择一个样本。")
-                replace_sample(instance.cmd, manifest, indices[0], progress)
-                instance.cmd.delete("all")
-            reorient_samples(instance.cmd, manifest, progress, verify_sources=action != "orient")
-        manifest["reference"] = manifest["config"].get("reference") or manifest.get("reference")
+                replace_sample(command, manifest, indices[0], progress)
+            else:
+                for position, row in enumerate(manifest["samples"]):
+                    _load_saved_sample(command, row, f"col_keep_{position}")
+                    if progress:
+                        progress(position + 1, len(manifest["samples"]))
+            manifest["bounds"] = update_bounds(command, manifest["samples"])
 
 
 def style_structure(cmd, obj, config, render=False):

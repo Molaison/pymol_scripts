@@ -225,6 +225,81 @@ class CollectionsSampling(unittest.TestCase):
             self.assertEqual(rows[0]["path"], str((root / "retained.pdb").resolve()))
             self.assertEqual([item["row"] for item in skipped], [2, 3])
 
+    def test_sample_edits_do_not_adopt_a_changed_alignment_reference(self):
+        with tempfile.TemporaryDirectory() as temporary, pymol2.PyMOL() as instance:
+            root = Path(temporary)
+            cmd = instance.cmd
+            cmd.set("max_threads", 1)
+            cmd.load(str(FIXTURE), "fixture")
+            coords = cmd.get_coords("fixture", 1)
+            reference = root / "reference.pdb"
+            cmd.save(str(reference), "fixture")
+            original_reference = reference.read_bytes()
+            for name, scale in (("kept", [1, 1, 1]), ("other", [1.25, 1.5, 1.8]),
+                                ("alternate", [0.8, 2.8, 0.95])):
+                cmd.load_coords(coords * scale, "fixture", 1)
+                cmd.save(str(root / f"{name}.pdb"), "fixture")
+            scores = root / "scores.json"
+            entries = [{"path": "kept.pdb", "quality": 0.91}, {"path": "other.pdb", "quality": 0.95}]
+            scores.write_text(json.dumps(entries), encoding="utf-8")
+            config = {"scores": str(scores), "metrics": [{"name": "quality"}], "count": 2,
+                      "seed": 7, "rmsd": 0.15, "orientation": "target", "reference": str(reference),
+                      "target": "polymer.protein and resi 1-150 and q > 0.5",
+                      "binder": "polymer.protein"}
+            collection = root / "collection"
+            initial = core.create_collection(config, collection)
+            index = next(i for i, row in enumerate(initial["samples"]) if row["id"] == "kept.pdb")
+            path = collection / "01_collection.json"
+            pinned = core.revise_collection(path, {"action": "pin", "indices": [index]})
+            expected = pinned["samples"][index]
+            removed_manifest = root / "removed/01_collection.json"
+            shutil.copytree(collection, removed_manifest.parent)
+            legacy = core.read_json(removed_manifest)
+            legacy.pop("reference_frame_signature", None)
+            core.write_json(removed_manifest, legacy)
+
+            cmd.load_coords(coords * [2.8, 1.1, 0.6], "fixture", 1)
+            cmd.save(str(reference), "fixture")
+            removed = core.revise_collection(removed_manifest, {"action": "remove", "indices": [1 - index]})
+            self.assertEqual(removed["samples"], [expected])
+            scores.write_text(json.dumps([*entries, {"path": "alternate.pdb", "quality": 0.94}]),
+                              encoding="utf-8")
+            before = (path.read_bytes(), (collection / "02_samples.csv").read_bytes())
+            request = {"action": "replace", "indices": [1 - index]}
+            changes = {
+                "coordinates": None,
+                "residue numbers": ("fixture", "resi = str(int(resi) + 10)"),
+                "occupancy": ("fixture and resi 3-12", "q = 0.0"),
+            }
+            for label, edit in changes.items():
+                with self.subTest(reference_change=label):
+                    path.write_bytes(before[0])
+                    (collection / "02_samples.csv").write_bytes(before[1])
+                    if edit is not None:
+                        reference.write_bytes(original_reference)
+                        cmd.delete("fixture")
+                        cmd.load(str(reference), "fixture")
+                        cmd.alter(*edit)
+                        cmd.save(str(reference), "fixture")
+                        self.assertEqual(cmd.get_coords("fixture", 1).tolist(), coords.tolist())
+                    with self.assertRaisesRegex(ValueError, "参考结构.*已变化"):
+                        core.revise_collection(path, request)
+                    self.assertEqual((path.read_bytes(), (collection / "02_samples.csv").read_bytes()), before)
+            path.write_bytes(before[0])
+            (collection / "02_samples.csv").write_bytes(before[1])
+            cmd.load_coords(coords * [2.8, 1.1, 0.6], "fixture", 1)
+            cmd.save(str(reference), "fixture")
+            legacy = core.read_json(path)
+            del legacy["reference_frame_signature"]
+            core.write_json(path, legacy)
+            with self.assertRaisesRegex(ValueError, "缺少参考结构朝向签名"):
+                core.revise_collection(path, request)
+            refreshed = core.revise_collection(path, {"action": "orient", "config": {}})
+            revised = core.revise_collection(path, request)
+            self.assertEqual(revised["samples"][index], refreshed["samples"][index])
+            self.assertNotEqual(revised["samples"][index]["matrix"], expected["matrix"])
+            self.assertEqual(revised["samples"][1 - index]["id"], "alternate.pdb")
+
     @unittest.skipUnless(sys.platform == "win32", "requires Windows file sharing modes")
     def test_collection_save_preserves_both_files_when_publication_fails(self):
         import ctypes
