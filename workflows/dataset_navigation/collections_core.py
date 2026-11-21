@@ -66,6 +66,18 @@ def write_json(path, value):
     temporary.replace(path)
 
 
+def _is_rosetta_score_header(parts):
+    if not parts or parts[0] != "SCORE:" or parts[-1] != "description":
+        return False
+    for value in parts[1:-1]:
+        try:
+            float(value)
+        except ValueError:
+            continue
+        return False
+    return True
+
+
 def read_scores(path):
     """Read CSV/TSV, a JSON row list, or a Rosetta SCORE table.
 
@@ -87,7 +99,7 @@ def read_scores(path):
             parts = line.split()
             if not parts or parts[0] != "SCORE:":
                 continue
-            if parts[-1] == "description":
+            if _is_rosetta_score_header(parts):
                 header = parts[1:]
             elif header:
                 if len(parts) - 1 != len(header):
@@ -656,6 +668,7 @@ def render_worker(manifest_path, indices, directory, width, height, threads, rep
             try:
                 cmd.delete("all")
                 signature = render_signature(manifest, row, width, height)
+                source_sha256 = _file_sha256(row["path"])
                 cmd.load(row["path"], "col_render", quiet=1)
                 apply_pose(cmd, "col_render", row["matrix"],
                            expected_coordinates=row.get("coordinate_signature"), bounds=manifest["bounds"])
@@ -664,9 +677,11 @@ def render_worker(manifest_path, indices, directory, width, height, threads, rep
                 cmd.png(str(temporary), width=width, height=height, dpi=300, ray=1, quiet=1)
                 if not temporary.is_file() or temporary.stat().st_size == 0:
                     raise RuntimeError(f"PyMOL 未写出图像: {destination}")
+                image_sha256 = _file_sha256(temporary)
                 temporary.replace(destination)
                 results.append({"index": index, "image": str(destination), "ok": True,
-                                "signature": signature})
+                                "signature": signature, "source_sha256": source_sha256,
+                                "image_sha256": image_sha256})
             except Exception as exc:
                 traceback.print_exc()
                 results.append({"index": index, "ok": False, "error": str(exc)})
@@ -764,7 +779,24 @@ def render_signature(manifest, row, width, height):
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def current_images(manifest, directory, width=None, height=None):
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _file_matches(path, previous_digest):
+    if not previous_digest:
+        return False
+    try:
+        return _file_sha256(path) == previous_digest
+    except OSError:
+        return False
+
+
+def current_images(manifest, directory, width=None, height=None, *, verify_contents=False, control=None):
     report = Path(directory) / "03_export.json"
     if not report.exists() or not manifest["samples"]:
         return {}
@@ -773,10 +805,19 @@ def current_images(manifest, directory, width=None, height=None):
     by_image = {Path(row["image"]).name: row for row in previous["results"] if row.get("ok")}
     valid = {}
     for index, row in enumerate(manifest["samples"]):
+        if control:
+            control.check()
         previous_row = by_image.get(row["image"])
-        if (previous_row and (Path(directory) / row["image"]).is_file()
-                and previous_row.get("signature") == render_signature(manifest, row, width, height)):
-            valid[index] = dict(previous_row, index=index)
+        image = Path(directory) / row["image"]
+        if (not previous_row or not image.is_file()
+                or previous_row.get("signature") != render_signature(manifest, row, width, height)):
+            continue
+        if verify_contents and not (
+            _file_matches(row["path"], previous_row.get("source_sha256"))
+            and _file_matches(image, previous_row.get("image_sha256"))
+        ):
+            continue
+        valid[index] = dict(previous_row, index=index)
     return valid
 
 
@@ -848,7 +889,8 @@ def export_collection(manifest_path, workers=2, width=1600, height=1200,
         raise ValueError("并发数至少为 1，图像宽高至少为 64。")
     directory = manifest_path.parent / ("previews" if preview else "images")
     directory.mkdir(exist_ok=True)
-    retained = current_images(manifest, directory, width, height) if retry_failed else {}
+    retained = (current_images(manifest, directory, width, height, verify_contents=True, control=control)
+                if retry_failed else {})
     pending = [index for index in range(len(manifest["samples"])) if index not in retained]
     workers = min(workers, len(pending), os.cpu_count() or 1)
     if pending:
