@@ -81,6 +81,14 @@ class AnnotatorProvenance(unittest.TestCase):
         self.state.auto_advance = False
         self.state.background_decompress_gz = False
 
+    def replacement_structure(self):
+        self.cmd.fragment("ala", "replacement_fixture")
+        path = self.root / "replacement.pdb"
+        self.cmd.save(str(path), "replacement_fixture")
+        atom_count = self.cmd.count_atoms("replacement_fixture")
+        self.cmd.delete("replacement_fixture")
+        return path, atom_count
+
     def test_gzip_preference_changes_only_when_dataset_is_reloaded(self):
         plain, compressed = self.root / "model.pdb", self.root / "model.pdb.gz"
         shutil.copyfile(FIXTURE, plain)
@@ -230,6 +238,26 @@ class AnnotatorProvenance(unittest.TestCase):
         reader = self.annotator["read_structure_annotations"]
         self.assertNotIn("quality", reader(str(source)))
 
+    def test_undo_keeps_user_edits_to_the_preloaded_model(self):
+        self.state.preload_enabled = True
+        for earlier_label in (None, "Earlier label"):
+            with self.subTest(earlier_label=earlier_label):
+                dataset = self.root / ("unmarked" if earlier_label is None else "marked")
+                dataset.mkdir()
+                source = dataset / "model.pdb"
+                shutil.copyfile(FIXTURE, source)
+                if earlier_label:
+                    self.annotator["annotate_structure_file"](str(source), "quality", earlier_label)
+                self.annotator["sa_load_dir"](str(dataset))
+                self.annotator["sa_annotate"]("Reviewed")
+                self.cmd.alter(self.state.current_object, "b=77")
+
+                self.annotator["sa_undo"]()
+                model = self.cmd.get_model(self.state.current_object)
+                self.assertEqual({atom.b for atom in model.atom}, {77.0})
+                reader = self.annotator["read_structure_annotations"]
+                self.assertEqual(reader(str(source)).get("quality"), earlier_label)
+
     def test_same_name_manual_replacement_cannot_be_annotated_or_deleted(self):
         source = self.root / "model.pdb"
         shutil.copyfile(FIXTURE, source)
@@ -286,6 +314,94 @@ class AnnotatorProvenance(unittest.TestCase):
         self.annotator["sa_annotate"]("Preloaded")
         self.assertEqual(self.annotator["read_pdb_annotations"](str(self.root / "second.pdb"))["quality"],
                          "Preloaded")
+
+    def test_displayed_model_must_be_reloaded_after_replacing_its_source(self):
+        dataset = self.root / "dataset"
+        dataset.mkdir()
+        source = dataset / "model.pdb"
+        shutil.copyfile(FIXTURE, source)
+        self.state.preload_enabled = True
+        self.annotator["sa_load_dir"](str(dataset))
+        old_count = self.cmd.count_atoms(self.state.current_object)
+
+        replacement, new_count = self.replacement_structure()
+        self.assertNotEqual(old_count, new_count)
+        replacement.replace(source)
+        reader = self.annotator["read_structure_annotations"]
+        self.annotator["sa_annotate"]("From stale display")
+        self.assertNotIn("quality", reader(str(source)))
+
+        self.annotator["sa_goto"](1)
+        self.assertEqual(self.cmd.count_atoms(self.state.current_object), new_count)
+        self.annotator["sa_annotate"]("Reloaded")
+        self.assertEqual(reader(str(source))["quality"], "Reloaded")
+
+    def test_annotation_does_not_adopt_replacements_during_write(self):
+        for timing in ("read", "staging", "publish"):
+            with self.subTest(timing=timing):
+                dataset = self.root / timing
+                dataset.mkdir()
+                source = dataset / "model.pdb"
+                shutil.copyfile(FIXTURE, source)
+                self.annotator["sa_load_dir"](str(dataset))
+                incoming, _ = self.replacement_structure()
+                replacement_bytes = incoming.read_bytes()
+                reader = self.annotator["read_structure_annotations"]
+                writer = self.annotator["annotate_structure_file"]
+                chmod = os.chmod
+
+                def replace_after_read(path):
+                    result = reader(path)
+                    incoming.replace(source)
+                    return result
+
+                def replace_during_staging(path, mode):
+                    chmod(path, mode)
+                    if Path(path).name.startswith(".sa-write-") and incoming.exists():
+                        incoming.replace(source)
+
+                def replace_after_publish(*args, **kwargs):
+                    result = writer(*args, **kwargs)
+                    incoming.replace(source)
+                    return result
+
+                interpositions = {
+                    "read": patch.dict(self.annotator, {"read_structure_annotations": replace_after_read}),
+                    "staging": patch.object(os, "chmod", replace_during_staging),
+                    "publish": patch.dict(self.annotator, {"annotate_structure_file": replace_after_publish}),
+                }
+                with interpositions[timing]:
+                    self.annotator["sa_annotate"]("In progress")
+                self.assertFalse(incoming.exists())
+                self.annotator["sa_annotate"]("Still showing the old model")
+                self.assertEqual(source.read_bytes(), replacement_bytes)
+                self.assertEqual(list(dataset.iterdir()), [source])
+
+    def test_background_gzip_cache_discards_replaced_source_before_navigation(self):
+        dataset = self.root / "dataset"
+        dataset.mkdir()
+        shutil.copyfile(FIXTURE, dataset / "first.pdb")
+        source = dataset / "second.pdb.gz"
+        source.write_bytes(gzip.compress(FIXTURE.read_bytes()))
+        replacement, expected_atoms = self.replacement_structure()
+
+        self.state.preload_enabled = True
+        self.state.preload_ahead = 1
+        self.state.background_decompress_gz = True
+        self.annotator["sa_load_dir"](str(dataset))
+        self.addCleanup(self.annotator["_reset_bg_cache"])
+        self.addCleanup(self.annotator["_bg_executor"].shutdown, wait=True)
+        self.annotator["_bg_decompress_futures"][1].result(timeout=10)
+        self.annotator["_collect_ready_decompressed"]([1])
+
+        incoming = self.root / "next.pdb.gz"
+        incoming.write_bytes(gzip.compress(replacement.read_bytes()))
+        incoming.replace(source)
+        self.annotator["sa_next"]()
+        self.assertEqual(self.cmd.count_atoms(self.state.current_object), expected_atoms)
+        self.annotator["sa_annotate"]("Current source")
+        reader = self.annotator["read_structure_annotations"]
+        self.assertEqual(reader(str(source))["quality"], "Current source")
 
     def test_legacy_pdb_markers_beyond_the_old_probe_boundary_are_still_skipped(self):
         self.cmd.load(str(FIXTURE), "template")

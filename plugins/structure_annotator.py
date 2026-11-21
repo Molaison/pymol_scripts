@@ -23,6 +23,7 @@ WRITER_TIMESTAMP_PATTERN = re.compile(
     r"[ \t]+ts=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
     r"(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\Z"
 )
+FileVersion = Tuple[int, int, int, int]
 
 
 def _long_path(path: str) -> str:
@@ -39,6 +40,17 @@ def _long_path(path: str) -> str:
     if len(abs_path) >= 240:  # Add prefix for long paths
         return "\\\\?\\" + abs_path
     return path
+
+
+def _version_from_stat(info: os.stat_result) -> FileVersion:
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def _source_version(path: str) -> Optional[FileVersion]:
+    try:
+        return _version_from_stat(os.stat(_long_path(path)))
+    except OSError:
+        return None
 
 
 def _split_values(values_text: str) -> List[str]:
@@ -155,11 +167,16 @@ def _copy_windows_source(source: str, destination: str) -> None:
         raise WinError(get_last_error())
 
 
-def _write_text_file(path: str, text: str) -> None:
+def _write_text_file(
+    path: str, text: str, expected_version: Optional[FileVersion] = None
+) -> FileVersion:
     path = _long_path(path)
     target = os.path.realpath(path)
     with open(target, "r+b") as source:
-        target_mode = stat.S_IMODE(os.fstat(source.fileno()).st_mode)
+        original = os.fstat(source.fileno())
+    if expected_version is not None and _version_from_stat(original) != expected_version:
+        raise RuntimeError("The source file changed before annotation. Click Reload.")
+    target_mode = stat.S_IMODE(original.st_mode)
     fd, temp_path = tempfile.mkstemp(
         prefix=".sa-write-", suffix=".tmp", dir=os.path.dirname(target)
     )
@@ -177,7 +194,11 @@ def _write_text_file(path: str, text: str) -> None:
                 fh.write(payload)
             fh.truncate()
         os.chmod(temp_path, target_mode)
+        written_version = _version_from_stat(os.stat(temp_path))
+        if expected_version is not None and _source_version(path) != expected_version:
+            raise RuntimeError("The source file changed while staging the annotation. Click Reload.")
         os.replace(temp_path, target)
+        return written_version
     finally:
         try:
             os.unlink(temp_path)
@@ -220,6 +241,8 @@ def _parse_annotation_record(line: str, marker) -> Optional[Tuple[str, str]]:
 def _iter_annotation_records(path: str, marker) -> Iterator[Tuple[str, str]]:
     """Stream annotation records from a structure file using one marker."""
     for line in _iter_text_lines(path):
+        if "PYMOL_ANNOTATOR" not in line:
+            continue
         record = _parse_annotation_record(line, marker)
         if record is not None:
             yield record
@@ -309,7 +332,9 @@ def has_annotation_fast(path: str, label_key: str) -> bool:
     return False
 
 
-def write_pdb_annotation(path: str, label_key: str, label_value: str) -> None:
+def write_pdb_annotation(
+    path: str, label_key: str, label_value: str, *, expected_version: Optional[FileVersion] = None
+) -> FileVersion:
     text = _read_text_file(path)
     has_trailing_newline = text.endswith(("\n", "\r"))
     lines = text.splitlines(keepends=True)
@@ -328,10 +353,12 @@ def write_pdb_annotation(path: str, label_key: str, label_value: str) -> None:
     _insert_annotation_line(lines, insert_at, remark, has_trailing_newline)
 
     out = _join_text_with_trailing_state(lines, has_trailing_newline)
-    _write_text_file(path, out)
+    return _write_text_file(path, out, expected_version)
 
 
-def write_cif_annotation(path: str, label_key: str, label_value: str) -> None:
+def write_cif_annotation(
+    path: str, label_key: str, label_value: str, *, expected_version: Optional[FileVersion] = None
+) -> FileVersion:
     """Write annotation as a CIF comment to avoid breaking strict parsers like Rosetta."""
     text = _read_text_file(path)
     has_trailing_newline = text.endswith(("\n", "\r"))
@@ -345,21 +372,23 @@ def write_cif_annotation(path: str, label_key: str, label_value: str) -> None:
     _insert_annotation_line(lines, len(lines), comment, has_trailing_newline)
 
     out = _join_text_with_trailing_state(lines, has_trailing_newline)
-    _write_text_file(path, out)
+    return _write_text_file(path, out, expected_version)
 
 
-def annotate_structure_file(path: str, label_key: str, label_value: str) -> None:
+def annotate_structure_file(
+    path: str, label_key: str, label_value: str, *, expected_version: Optional[FileVersion] = None
+) -> FileVersion:
     lower = path.lower()
     if lower.endswith(".pdb") or lower.endswith(".pdb.gz"):
-        write_pdb_annotation(path, label_key, label_value)
-        return
+        return write_pdb_annotation(path, label_key, label_value, expected_version=expected_version)
     if lower.endswith(".cif") or lower.endswith(".cif.gz"):
-        write_cif_annotation(path, label_key, label_value)
-        return
+        return write_cif_annotation(path, label_key, label_value, expected_version=expected_version)
     raise ValueError(f"Unsupported file type: {path}")
 
 
-def remove_structure_annotation(path: str, label_key: str) -> None:
+def remove_structure_annotation(
+    path: str, label_key: str, *, expected_version: Optional[FileVersion] = None
+) -> FileVersion:
     """Delete a single PYMOL_ANNOTATOR entry from a structure file (used for undo)."""
     text = _read_text_file(path)
     has_trailing_newline = text.endswith(("\n", "\r"))
@@ -372,7 +401,7 @@ def remove_structure_annotation(path: str, label_key: str) -> None:
     else:
         raise ValueError(f"Unsupported file type: {path}")
     out = _join_text_with_trailing_state(lines, has_trailing_newline)
-    _write_text_file(path, out)
+    return _write_text_file(path, out, expected_version)
 
 
 @dataclass
@@ -394,6 +423,7 @@ class AnnotatorState:
     preload_interval_ms: int = 250
     background_decompress_gz: bool = True
     object_marks: Dict[int, str] = field(default_factory=dict)
+    object_versions: Dict[int, FileVersion] = field(default_factory=dict)
     current_object: Optional[str] = None
     undo_history: List[dict] = field(default_factory=list)
     annotated_indices: set = field(default_factory=set)
@@ -416,6 +446,8 @@ if not hasattr(STATE, "annotated_indices"):
     STATE.annotated_indices = set()
 if not hasattr(STATE, "object_marks"):
     STATE.object_marks = {}
+if not hasattr(STATE, "object_versions"):
+    STATE.object_versions = {}
 
 
 def _structure_dedupe_key(file_path: str) -> str:
@@ -510,6 +542,7 @@ def _enabled_managed_objects(indices=None) -> Dict[int, str]:
 _bg_executor = globals().get("_bg_executor", None)
 _bg_cache_dir = globals().get("_bg_cache_dir", None)
 _bg_decompress_futures = globals().get("_bg_decompress_futures", {})
+_bg_decompress_versions = globals().get("_bg_decompress_versions", {})
 _bg_decompressed_paths = globals().get("_bg_decompressed_paths", {})
 
 
@@ -533,45 +566,68 @@ def _ensure_bg_cache_dir() -> str:
 
 def _reset_bg_cache() -> None:
     global _bg_cache_dir, _bg_decompress_futures, _bg_decompressed_paths
+    global _bg_decompress_versions
+    cache_dir = _bg_cache_dir
+    futures = list(_bg_decompress_futures.values())
     _bg_decompress_futures = {}
+    _bg_decompress_versions = {}
     _bg_decompressed_paths = {}
-    if _bg_cache_dir and os.path.isdir(_bg_cache_dir):
-        try:
-            shutil.rmtree(_bg_cache_dir, ignore_errors=True)
-        except Exception:
-            pass
     _bg_cache_dir = None
+    for future in futures:
+        future.cancel()
+        if cache_dir:
+            future.add_done_callback(lambda _: shutil.rmtree(cache_dir, ignore_errors=True))
+    if cache_dir:
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+# A script reload can retain pre-versioning cache entries; none certify their bytes.
+if (any(idx not in _bg_decompress_versions for idx in _bg_decompress_futures)
+        or any(isinstance(out, str) for out in _bg_decompressed_paths.values())):
+    _reset_bg_cache()
 
 
 def _is_gz_path(path: str) -> bool:
     return bool(path) and path.lower().endswith(".gz")
 
 
-def _decompress_gz_to_cache(src_path: str, dst_path: str) -> str:
+def _decompress_gz_to_cache(
+    src_path: str, dst_path: str, version: FileVersion
+) -> Optional[Tuple[FileVersion, str]]:
     src_path = _long_path(src_path)
     dst_path = _long_path(dst_path)
     tmp_path = dst_path + ".tmp"
-    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-    with gzip.open(src_path, "rb") as fin, open(tmp_path, "wb") as fout:
-        shutil.copyfileobj(fin, fout, length=1024 * 1024)
-    os.replace(tmp_path, dst_path)
-    return dst_path
+    try:
+        with open(src_path, "rb") as source:
+            observed = _version_from_stat(os.fstat(source.fileno()))
+            if observed != version:
+                return None
+            with gzip.GzipFile(fileobj=source, mode="rb") as fin, open(tmp_path, "wb") as fout:
+                shutil.copyfileobj(fin, fout, length=1024 * 1024)
+            if _version_from_stat(os.fstat(source.fileno())) != observed:
+                return None
+        os.replace(tmp_path, dst_path)
+        return observed, dst_path
+    finally:
+        _remove_cached_path(tmp_path)
+
+
+def _remove_cached_path(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def _cached_unzipped_path(src_path: str) -> str:
     base = os.path.basename(src_path)
     if base.lower().endswith(".gz"):
         base = base[: -len(".gz")]
-    try:
-        st = os.stat(src_path)
-        stamp = f"{int(st.st_mtime)}_{st.st_size}"
-    except Exception:
-        stamp = "unknown"
     cache_dir = _ensure_bg_cache_dir()
-    return os.path.join(cache_dir, f"{stamp}_{base}")
+    return os.path.join(cache_dir, f"{uuid4().hex}_{base}")
 
 
-def _request_decompressed_path(index: int) -> Optional[str]:
+def _request_decompressed_path(index: int, version: Optional[FileVersion] = None) -> Optional[str]:
     if not STATE.files:
         return None
     index = index % len(STATE.files)
@@ -581,18 +637,30 @@ def _request_decompressed_path(index: int) -> Optional[str]:
     if not STATE.background_decompress_gz:
         return src_path
 
+    if version is None:
+        version = _source_version(src_path)
+    if version is None:
+        return None
+
+    _collect_ready_decompressed([index])
     existing = _bg_decompressed_paths.get(index)
-    if existing and os.path.exists(existing):
-        return existing
+    if existing:
+        cached_version, cached_path = existing
+        if cached_version == version and os.path.exists(cached_path):
+            return cached_path
+        _remove_cached_path(cached_path)
+        _bg_decompressed_paths.pop(index, None)
 
     fut = _bg_decompress_futures.get(index)
-    if fut is None or fut.done():
-        dst_path = _cached_unzipped_path(src_path)
-
-        def _job() -> str:
-            return _decompress_gz_to_cache(src_path, dst_path)
-
-        _bg_decompress_futures[index] = _get_bg_executor().submit(_job)
+    if fut is not None:
+        # Retain completed attempts so a failed or consumed result is not resubmitted.
+        if _bg_decompress_versions.get(index) == version or not fut.done():
+            return None
+    dst_path = _cached_unzipped_path(src_path)
+    _bg_decompress_versions[index] = version
+    _bg_decompress_futures[index] = _get_bg_executor().submit(
+        _decompress_gz_to_cache, src_path, dst_path, version
+    )
     return None
 
 
@@ -605,21 +673,23 @@ def _collect_ready_decompressed(indexes: List[int]) -> None:
             out = fut.result()
         except Exception:
             out = None
-        if out and os.path.exists(out):
-            _bg_decompressed_paths[idx] = out
+        if out:
+            version, path = out
+            if version == _source_version(STATE.files[idx]) and os.path.exists(path):
+                _bg_decompressed_paths[idx] = out
+            else:
+                _remove_cached_path(path)
+                _bg_decompressed_paths.pop(idx, None)
 
 
 def _evict_decompressed_except(keep_indices: set) -> None:
-    for idx, path in list(_bg_decompressed_paths.items()):
+    for idx, (_, path) in list(_bg_decompressed_paths.items()):
         if idx in keep_indices:
             continue
-        try:
-            if path and os.path.exists(path):
-                os.remove(path)
-        except Exception:
-            pass
+        _remove_cached_path(path)
         _bg_decompressed_paths.pop(idx, None)
         _bg_decompress_futures.pop(idx, None)
+        _bg_decompress_versions.pop(idx, None)
 
 
 def _run_pymol_commands(template: str, context: Dict[str, str]) -> None:
@@ -644,6 +714,7 @@ def _delete_managed_objects(keep_indices=()) -> None:
         cmd.delete(obj)
     for index in removed:
         cmd.delete(STATE.object_marks.pop(index))
+        STATE.object_versions.pop(index, None)
 
 
 def _desired_indices_ahead() -> List[int]:
@@ -675,12 +746,19 @@ def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> O
         return None
     index = index % len(STATE.files)
     path = STATE.files[index]
+    version = _source_version(path)
+    if version is None:
+        print(f"Structure Annotator: source file is unavailable: {path}")
+        return None
     loaded = _tracked_objects(None if focus else (index,))
     obj_name = loaded.get(index)
+    if obj_name is not None and STATE.object_versions.get(index) != version:
+        _delete_managed_objects(STATE.object_marks.keys() - {index})
+        obj_name = None
     if obj_name is None:
         load_path = path
         if _is_gz_path(path) and STATE.background_decompress_gz:
-            requested = _request_decompressed_path(index)
+            requested = _request_decompressed_path(index, version)
             if requested and os.path.exists(_long_path(requested)):
                 load_path = requested
             elif not allow_gz_fallback:
@@ -694,6 +772,10 @@ def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> O
         cmd.load(load_path_resolved, obj_name, quiet=1)
         cmd.sync()
         cmd.refresh()
+        if _source_version(path) != version:
+            cmd.delete(obj_name)
+            print(f"Structure Annotator: source changed during load: {path}. Try Reload.")
+            return None
         marker = f"_sa_owner_{uuid4().hex}"
         if not cmd.select(marker, f"model {obj_name}", enable=0, quiet=1):
             cmd.delete(marker)
@@ -703,6 +785,7 @@ def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> O
         if old_marker:
             cmd.delete(old_marker)
         STATE.object_marks[index] = marker
+        STATE.object_versions[index] = version
 
     if not focus:
         try:
@@ -907,17 +990,21 @@ def sa_annotate(value: str) -> None:
         if not obj_name:
             print("Structure Annotator: the current structure is not displayed. Click Reload before annotating.")
             return
+        version = _source_version(path)
+        if version is None or STATE.object_versions.get(STATE.index) != version:
+            print("Structure Annotator: the source file changed. Click Reload before annotating.")
+            return
         STATE.current_object = obj_name
 
         label_key = normalize_label_key(STATE.label_name)
-        anno_path = path
-        prev_value = read_structure_annotations(anno_path).get(label_key)
-        annotate_structure_file(anno_path, label_key, value)
+        prev_value = read_structure_annotations(path).get(label_key)
+        written_version = annotate_structure_file(path, label_key, value, expected_version=version)
+        STATE.object_versions[STATE.index] = written_version
 
         # Record for undo (bounded stack).
         STATE.undo_history.append({
             "index": STATE.index,
-            "path": anno_path,
+            "path": path,
             "label_key": label_key,
             "prev_value": prev_value,
             "value": value,
@@ -955,16 +1042,19 @@ def sa_undo() -> None:
         label_key = entry["label_key"]
         prev_value = entry["prev_value"]
         index = entry["index"]
+        version = _source_version(path)
 
         if prev_value is None:
-            remove_structure_annotation(path, label_key)
+            written_version = remove_structure_annotation(path, label_key, expected_version=version)
             STATE.annotated_indices.discard(index)
             restored = "(none)"
         else:
-            annotate_structure_file(path, label_key, prev_value)
+            written_version = annotate_structure_file(path, label_key, prev_value, expected_version=version)
             STATE.annotated_indices.add(index)
             restored = prev_value
 
+        if version is not None and STATE.object_versions.get(index) == version:
+            STATE.object_versions[index] = written_version
         STATE.undo_history.pop()
         print(f"Undo: {os.path.basename(path)} {label_key} -> {restored}")
         # Return to the file we just changed so the user can see the result.
@@ -1497,6 +1587,8 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
 
         if STATE.current_object and STATE.index not in _enabled_managed_objects((STATE.index,)):
             status_text += "\n\nCurrent structure is unavailable. Click Reload before annotating."
+        elif STATE.current_object and _source_version(path) != STATE.object_versions.get(STATE.index):
+            status_text += "\n\nSource file changed. Click Reload before annotating."
 
         self.status_label.setText(status_text)
 
