@@ -81,6 +81,23 @@ class AnnotatorProvenance(unittest.TestCase):
         self.state.auto_advance = False
         self.state.background_decompress_gz = False
 
+    def test_export_scan_preserves_records_across_blocks_and_line_endings(self):
+        for extension, marker in (("pdb", "REMARK 950 PYMOL_ANNOTATOR"),
+                                  ("cif", "# PYMOL_ANNOTATOR")):
+            first = f"{marker} quality=Old\r\n"
+            filler = "#" + "x" * (65529 - len(first)) + "\r"
+            final_value = "Reviewed PYMOL_ANNOTATOR followed by \u2028 a literal separator"
+            long_value = "å" * 66000
+            data = (first + filler + f"{marker} quality={final_value}\r\n"
+                    f"{marker} note={long_value}").encode("utf-8")
+            for compressed in (False, True):
+                with self.subTest(extension=extension, compressed=compressed):
+                    suffix = f".{extension}.gz" if compressed else f".{extension}"
+                    path = self.root / f"metadata{suffix}"
+                    path.write_bytes(gzip.compress(data) if compressed else data)
+                    labels = self.annotator["read_structure_annotations"](str(path), strict=True)
+                    self.assertEqual(labels, {"quality": final_value, "note": long_value})
+
     def replacement_structure(self):
         self.cmd.fragment("ala", "replacement_fixture")
         path = self.root / "replacement.pdb"

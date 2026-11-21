@@ -227,13 +227,23 @@ def _check_export_source(fh, export_target: Optional[Tuple[int, int]]) -> None:
             raise ValueError("The export destination is a dataset structure.")
 
 
-def _iter_text_lines(path: str, export_target: Optional[Tuple[int, int]] = None) -> Iterator[str]:
-    """Yield a structure file one line at a time, including compressed files."""
-    path = _long_path(path)
-    open_text = gzip.open if path.lower().endswith(".gz") else open
-    with open_text(path, "rt", encoding="utf-8", errors="replace", newline="") as fh:
-        _check_export_source(fh, export_target)
-        yield from fh
+def _iter_block_annotation_lines(stream) -> Iterator[str]:
+    """Find possible records in full-read exports without visiting each atom line."""
+    for chunk in iter(lambda: stream.read(65536), ""):
+        if not chunk.endswith("\n"):
+            chunk += stream.readline()
+        offset = 0
+        while True:
+            hit = chunk.find("PYMOL_ANNOTATOR", offset)
+            if hit < 0:
+                break
+            start = chunk.rfind("\n", 0, hit) + 1
+            end = chunk.find("\n", hit)
+            if end < 0:
+                yield chunk[start:]
+                break
+            yield chunk[start:end]
+            offset = end + 1
 
 
 def _parse_annotation_record(line: str, marker) -> Optional[Tuple[str, str]]:
@@ -255,15 +265,21 @@ def _parse_annotation_record(line: str, marker) -> Optional[Tuple[str, str]]:
 
 
 def _iter_annotation_records(
-    path: str, marker, export_target: Optional[Tuple[int, int]] = None
+    path: str, marker, export_target: Optional[Tuple[int, int]] = None, *, scan_blocks: bool = False
 ) -> Iterator[Tuple[str, str]]:
     """Stream annotation records from a structure file using one marker."""
-    for line in _iter_text_lines(path, export_target):
-        if "PYMOL_ANNOTATOR" not in line:
-            continue
-        record = _parse_annotation_record(line, marker)
-        if record is not None:
-            yield record
+    path = _long_path(path)
+    open_text = gzip.open if path.lower().endswith(".gz") else open
+    newline = None if scan_blocks else ""
+    with open_text(path, "rt", encoding="utf-8", errors="replace", newline=newline) as fh:
+        _check_export_source(fh, export_target)
+        lines = _iter_block_annotation_lines(fh) if scan_blocks else fh
+        for line in lines:
+            if "PYMOL_ANNOTATOR" not in line:
+                continue
+            record = _parse_annotation_record(line, marker)
+            if record is not None:
+                yield record
 
 
 def _read_annotation_records(
@@ -271,7 +287,7 @@ def _read_annotation_records(
 ) -> Dict[str, str]:
     result = {}
     try:
-        for key, value in _iter_annotation_records(path, marker, export_target):
+        for key, value in _iter_annotation_records(path, marker, export_target, scan_blocks=strict):
             result[key] = value
     except Exception as error:
         if strict:
