@@ -287,10 +287,11 @@ class CollectionTask(QtCore.QObject):
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.poll)
 
-    def start(self, operation, callback):
+    def start(self, operation, callback, *, recover_on_failure=True):
         if self.future is not None:
             raise ValueError("已有任务正在执行。")
         self.control, self.callback = core.TaskControl(), callback
+        self.recover_on_failure = recover_on_failure
         self.panel.set_busy(True)
         self.future = self.executor.submit(operation, self.control)
         self.timer.start(100)
@@ -315,10 +316,14 @@ class CollectionTask(QtCore.QObject):
         try:
             callback(future.result())
         except CancelledError:
-            self.panel.recover_current()
-            self.panel.status.setText("已取消，后台进程已退出。已保存的结果保留，可重试未完成项。")
+            if self.recover_on_failure:
+                self.panel.recover_current()
+                self.panel.status.setText("已取消，后台进程已退出。已保存的结果保留，可重试未完成项。")
+            else:
+                self.panel.status.setText("已取消展示页核对。")
         except Exception as error:
-            self.panel.recover_current()
+            if self.recover_on_failure:
+                self.panel.recover_current()
             self.panel.show_error(error)
         if self.close_pending:
             self.close_pending = False
@@ -676,29 +681,15 @@ class CollectionDialog(QtWidgets.QDialog):
 
     def open_gallery(self):
         self.require_manifest()
-        busy = None
-        for folder in ("images", "previews"):
-            directory = self.manifest_path.parent / folder
-            page = directory / "04_gallery.html"
-            if not page.exists():
-                continue
-            try:
-                with core.export_directory_lock(directory):
-                    manifest = core.read_json(self.manifest_path)
-                    current = core.current_images(manifest, directory)
-                    if not current:
-                        continue
-                    report = {"results": [current.get(index, {"index": index, "ok": False})
-                                          for index in range(len(manifest["samples"]))]}
-                    core.write_gallery(manifest, directory, report)
-            except core.ExportInProgress as error:
-                busy = error
-                continue
-            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(page)))
-            return
-        if busy is not None:
-            raise busy
-        raise ValueError("没有当前设置的展示页，请先刷新预览或导出。")
+        path = self.manifest_path
+        self.task.start(lambda control: core.gallery_page(path, control), self._open_gallery_page,
+                        recover_on_failure=False)
+
+    def _open_gallery_page(self, page):
+        self.task.control.check()
+        if not QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(page))):
+            raise RuntimeError(f"无法打开展示页：{page}")
+        self.status.setText("已打开当前展示页。")
 
     def closeEvent(self, event):
         if self.task.future is not None:

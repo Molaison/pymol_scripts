@@ -1039,7 +1039,8 @@ def _file_matches(path, previous_digest):
         return False
 
 
-def current_images(manifest, directory, width=None, height=None, *, verify_contents=False, control=None):
+def current_images(manifest, directory, width=None, height=None, *, verify_contents=False,
+                   allow_legacy=False, control=None):
     report = Path(directory) / "03_export.json"
     if not report.exists() or not manifest["samples"]:
         return {}
@@ -1055,12 +1056,13 @@ def current_images(manifest, directory, width=None, height=None, *, verify_conte
         if (not previous_row or not image.is_file()
                 or previous_row.get("signature") != render_signature(manifest, row, width, height)):
             continue
-        if verify_contents and not (
-            previous_row.get("source_snapshot") is True
-            and _file_matches(row["path"], previous_row.get("source_sha256"))
-            and _file_matches(image, previous_row.get("image_sha256"))
-        ):
-            continue
+        if verify_contents:
+            if previous_row.get("source_snapshot") is True:
+                if not (_file_matches(row["path"], previous_row.get("source_sha256"))
+                        and _file_matches(image, previous_row.get("image_sha256"))):
+                    continue
+            elif not allow_legacy:
+                continue
         valid[index] = dict(previous_row, index=index)
     return valid
 
@@ -1232,6 +1234,36 @@ def export_collection(manifest_path, workers=2, width=1600, height=1200,
         write_json(directory / "03_export.json", result)
         write_gallery(manifest, directory, result)
         return result
+
+
+def gallery_page(manifest_path, control):
+    """Refresh a viewable gallery from successful images under its publication lock."""
+    control.report("核对展示页", 0, 0)
+    busy = None
+    for folder in ("images", "previews"):
+        control.check()
+        directory = manifest_path.parent / folder
+        page = directory / "04_gallery.html"
+        if not page.exists():
+            continue
+        try:
+            with export_directory_lock(directory):
+                manifest = read_json(manifest_path)
+                current = current_images(manifest, directory, verify_contents=True,
+                                         allow_legacy=True, control=control)
+                if not current:
+                    continue
+                report = {"results": [current.get(index, {"index": index, "ok": False})
+                                      for index in range(len(manifest["samples"]))]}
+                control.check()
+                write_gallery(manifest, directory, report)
+        except ExportInProgress as error:
+            busy = error
+            continue
+        return page
+    if busy is not None:
+        raise busy
+    raise ValueError("没有当前设置的展示页，请先刷新预览或导出。")
 
 
 def write_gallery(manifest, directory, export):

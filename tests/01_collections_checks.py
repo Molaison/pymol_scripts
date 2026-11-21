@@ -502,8 +502,29 @@ if args.stage in ("qt", "all") and (args.hidden_qt_child or os.name != "nt"):
     published = gallery.read_bytes()
     with patch.object(QtGui.QDesktopServices, "openUrl", return_value=True) as open_url:
         panel.open_gallery()
+        finish_ui_task()
     assert Path(open_url.call_args.args[0].toLocalFile()).resolve() == gallery.resolve()
     assert gallery.read_bytes() == published
+    with patch.object(QtGui.QDesktopServices, "openUrl", return_value=False), \
+            patch.object(QtWidgets.QMessageBox, "warning", return_value=QtWidgets.QMessageBox.Ok) as warning:
+        panel.open_gallery()
+        finish_ui_task()
+    message = warning.call_args.args[2]
+    assert "无法打开展示页" in message and str(gallery) in message
+    assert panel.status.text() == message and gallery.read_bytes() == published
+    rejected = gallery.parent / current["samples"][0]["image"]
+    saved_png = rejected.read_bytes()
+    try:
+        rejected.write_bytes(saved_png[:24])
+        with patch.object(QtGui.QDesktopServices, "openUrl", return_value=True) as open_url:
+            panel.open_gallery()
+            finish_ui_task()
+        assert Path(open_url.call_args.args[0].toLocalFile()).resolve() == gallery.resolve()
+        page = gallery.read_text(encoding="utf-8")
+        assert f'src="{rejected.name}"' not in page
+        assert f'src="{current["samples"][1]["image"]}"' in page
+    finally:
+        rejected.write_bytes(saved_png)
     assert not panel.findChildren(QtWidgets.QTabWidget)
     assert panel.sampling.title() == "数据与采样" and panel.rendering.title() == "朝向与导出"
     panel.show()
@@ -527,6 +548,7 @@ if args.stage in ("qt", "all") and (args.hidden_qt_child or os.name != "nt"):
                      "preview_failures_keep_scene": "PASS",
                      "preview_with_retained_atom_order": "PASS",
                      "preview_only_first_state": "PASS",
+                     "gallery_omits_damaged_images": "PASS",
                      "restore_named_selections": "PASS",
                      "form_restore_and_apply": "PASS", "capture_refreshes_thumbnails": "PASS",
                      "pin_ui": "PASS", "gallery_uses_saved_manifest": "PASS",
