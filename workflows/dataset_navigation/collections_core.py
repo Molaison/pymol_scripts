@@ -26,6 +26,7 @@ from uuid import uuid4
 ORIENTATION_KEYS = ("target", "binder", "orientation", "reference",
                     "frame_selection", "symmetry_axis")
 STALE_POSE = "源结构坐标已变化，请重新应用朝向后再导出。"
+SAMPLE_CSV_COLUMNS = ("id", "path", "stratum", "nearest_rmsd")
 
 
 def orientation_config(config):
@@ -86,6 +87,28 @@ def _is_rosetta_score_header(parts):
     return True
 
 
+def metric_bounds(spec):
+    """Return validated numeric score bounds, preserving None as unbounded."""
+    name = spec.get("name", "打分")
+    bounds = []
+    for key, label in (("min", "最低值"), ("max", "最高值")):
+        value = spec.get(key)
+        if value is None:
+            bounds.append(None)
+            continue
+        try:
+            value = float(value)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError(f"{name} {label}必须是数字。") from None
+        if not math.isfinite(value):
+            raise ValueError(f"{name} {label}必须是有限数值。")
+        bounds.append(value)
+    minimum, maximum = bounds
+    if minimum is not None and maximum is not None and minimum > maximum:
+        raise ValueError(f"{name} 最低值大于最高值。")
+    return minimum, maximum
+
+
 def read_scores(path):
     """Read CSV/TSV, a JSON row list, or a Rosetta SCORE table.
 
@@ -109,6 +132,8 @@ def read_scores(path):
                 continue
             if _is_rosetta_score_header(parts):
                 header = parts[1:]
+                if len(header) != len(set(header)):
+                    raise ValueError("Rosetta SCORE 表头存在重复字段。")
             elif header:
                 if len(parts) - 1 != len(header):
                     raise ValueError("Rosetta SCORE 行的列数与表头不一致。")
@@ -117,7 +142,39 @@ def read_scores(path):
             raise ValueError("未找到 Rosetta SCORE 表头。")
         return rows
     delimiter = "\t" if path.suffix.lower() == ".tsv" else ","
-    rows = list(csv.DictReader(text.splitlines(), delimiter=delimiter))
+    return _read_delimited_scores(text, delimiter)
+
+
+def _read_delimited_scores(text, delimiter):
+    reader = csv.reader(text.splitlines(), delimiter=delimiter)
+    fieldnames = next(reader, [])
+    width = len(fieldnames)
+    repeated_fields = []
+    if width != len(set(fieldnames)):
+        prefix_width = len(SAMPLE_CSV_COLUMNS)
+        if (delimiter != "," or tuple(fieldnames[:prefix_width]) != SAMPLE_CSV_COLUMNS
+                or any(name in SAMPLE_CSV_COLUMNS for name in fieldnames[prefix_width:])):
+            raise ValueError("打分表的列名不能重复。")
+        # Legacy sample exports could write the same metric in two identical columns.
+        first_column = {}
+        for column, name in enumerate(fieldnames):
+            first = first_column.setdefault(name, column)
+            if first != column:
+                repeated_fields.append((first, column))
+    rows = []
+    for values in reader:
+        if not values:
+            continue
+        if repeated_fields and (len(values) != width or any(
+            values[first] != values[column] for first, column in repeated_fields
+        )):
+            raise ValueError("打分表的重复列包含不一致的分数。")
+        row = dict(zip(fieldnames, values))
+        if len(values) < width:
+            row.update(dict.fromkeys(fieldnames[len(values):]))
+        if len(values) > width:
+            row[None] = values[width:]
+        rows.append(row)
     if rows and (None in rows[0] or not all(rows[0])):
         raise ValueError("打分表的列名或分隔符不正确。")
     return rows
@@ -130,6 +187,7 @@ def prepare_rows(config):
     specs = config["metrics"]
     if not specs:
         raise ValueError("请至少选择一个打分列。")
+    bounds = [(spec["name"], *metric_bounds(spec)) for spec in specs]
     rows, skipped, seen = [], [], set()
     path_column = config.get("path_column", "path")
     for number, source in enumerate(read_scores(score_path), 2):
@@ -137,9 +195,11 @@ def prepare_rows(config):
             scores = {spec["name"]: float(source[spec["name"]]) for spec in specs}
             if not all(math.isfinite(score) for score in scores.values()):
                 raise ValueError("打分不是有限数值")
-            if any((spec.get("min") is not None and scores[spec["name"]] < spec["min"])
-                   or (spec.get("max") is not None and scores[spec["name"]] > spec["max"])
-                   for spec in specs):
+            if any(
+                (minimum is not None and scores[name] < minimum)
+                or (maximum is not None and scores[name] > maximum)
+                for name, minimum, maximum in bounds
+            ):
                 skipped.append({"row": number, "reason": "分数范围筛选"})
                 continue
             value = str(source[path_column]).strip()
@@ -185,22 +245,27 @@ def _quantile_edges(values, bins):
 
 
 def make_strata(rows, specs, seed, saved_edges=None):
-    """Joint quantile cells; equal scores always belong to the same cell."""
-    edges, groups = {}, {}
-    for spec in specs:
+    """Joint quantile cells with ordered cutoffs for repeated metric names."""
+    ordered = isinstance(saved_edges, list)
+    if ordered and len(saved_edges) != len(specs):
+        raise ValueError("保存的分层边界与打分指标数量不一致。")
+    axes, groups = [], {}
+    for index, spec in enumerate(specs):
         bins = int(spec.get("bins", 3))
         if bins < 1:
             raise ValueError("每个打分的层数必须至少为 1。")
         name = spec["name"]
-        if saved_edges is not None and name in saved_edges:
-            edges[name] = saved_edges[name]
+        if ordered:
+            cuts = saved_edges[index]
+        elif saved_edges is not None and name in saved_edges:
+            cuts = saved_edges[name]
         else:
             values = np.array([row["scores"][name] for row in rows])
-            edges[name] = _quantile_edges(values, bins)
+            cuts = _quantile_edges(values, bins)
+        axes.append((name, cuts))
     for row in rows:
-        cell = tuple(int(np.searchsorted(edges[spec["name"]],
-                                         row["scores"][spec["name"]], side="right"))
-                     for spec in specs)
+        cell = tuple(int(np.searchsorted(cuts, row["scores"][name], side="right"))
+                     for name, cuts in axes)
         row["stratum"] = list(cell)
         groups.setdefault(cell, []).append(row)
     rng = random.Random(int(seed))
@@ -208,6 +273,9 @@ def make_strata(rows, specs, seed, saved_edges=None):
     rng.shuffle(cells)
     for cell in cells:
         rng.shuffle(groups[cell])
+    edges = dict(axes)
+    if len(edges) != len(axes):
+        edges = [cuts for _, cuts in axes]
     return [groups[cell] for cell in cells], edges
 
 
@@ -537,14 +605,22 @@ def create_collection(config, output, progress=None):
 
 
 def write_samples_csv(output, manifest):
-    metrics = [spec["name"] for spec in manifest["config"]["metrics"]]
+    metrics = dict.fromkeys(spec["name"] for spec in manifest["config"]["metrics"])
+    occupied = set(SAMPLE_CSV_COLUMNS).union(metrics)
+    for name in metrics:
+        column = name
+        if name in SAMPLE_CSV_COLUMNS:
+            while column in occupied:
+                column = f"score_{column}"
+            occupied.add(column)
+        metrics[name] = column
     with (Path(output) / "02_samples.csv").open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["id", "path", "stratum", "nearest_rmsd"] + metrics)
+        writer = csv.DictWriter(handle, fieldnames=[*SAMPLE_CSV_COLUMNS, *metrics.values()])
         writer.writeheader()
         for row in manifest["samples"]:
             values = {key: row[key] for key in ("id", "path", "nearest_rmsd")}
             values["stratum"] = "/".join(str(x + 1) for x in row["stratum"])
-            values.update(row["scores"])
+            values.update({metrics[name]: value for name, value in row["scores"].items()})
             writer.writerow(values)
 
 

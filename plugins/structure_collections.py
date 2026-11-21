@@ -4,10 +4,12 @@ from pymol import cmd
 from pymol.Qt import QtCore, QtGui, QtWidgets
 import datetime
 import json
+import math
 from pathlib import Path
 import sys
 import traceback
 from concurrent.futures import CancelledError, ThreadPoolExecutor
+from itertools import chain
 
 # PyMOL run executes in its own globals, where __file__ can belong to PyMOL.
 _repository = str(Path(sys._getframe().f_code.co_filename).resolve().parents[1])
@@ -62,30 +64,48 @@ class ScoreTable(QtWidgets.QTableWidget):
         self.setRowCount(0)
         if not rows:
             raise ValueError("打分表为空。")
-        for name in rows[0]:
+        columns = [name for name in dict.fromkeys(chain.from_iterable(rows))
+                   if isinstance(name, str) and name]
+        for name in columns:
             values = []
-            for row in rows[:100]:
+            for row in rows:
+                raw = row.get(name)
+                if raw is None or raw == "":
+                    continue
+                if isinstance(raw, str):
+                    prefix = raw.lstrip()
+                    if not prefix or (prefix[0] not in "+-." and not prefix[0].isdecimal()):
+                        continue
                 try:
-                    values.append(float(row[name]))
-                except (ValueError, TypeError, KeyError):
-                    pass
+                    value = float(raw)
+                except (ValueError, TypeError, OverflowError):
+                    continue
+                if math.isfinite(value):
+                    values.append(value)
+                    if len(values) == 100:
+                        break
             if not values:
                 continue
-            index = self.rowCount()
-            self.insertRow(index)
-            item = QtWidgets.QTableWidgetItem(name)
-            item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
-            item.setCheckState(QtCore.Qt.Unchecked)
-            self.setItem(index, 0, item)
-            bins = QtWidgets.QSpinBox()
-            bins.setRange(1, 20)
-            bins.setValue(3)
-            self.setCellWidget(index, 1, bins)
-            self.setItem(index, 2, QtWidgets.QTableWidgetItem(""))
-            self.setItem(index, 3, QtWidgets.QTableWidgetItem(""))
-            sample = QtWidgets.QTableWidgetItem(f"{min(values):.4g} … {max(values):.4g}")
-            sample.setFlags(sample.flags() & ~QtCore.Qt.ItemIsEditable)
-            self.setItem(index, 4, sample)
+            self.add_metric(name, f"{min(values):.4g} … {max(values):.4g}")
+        return columns
+
+    def add_metric(self, name, example):
+        index = self.rowCount()
+        self.insertRow(index)
+        item = QtWidgets.QTableWidgetItem(name)
+        item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
+        item.setCheckState(QtCore.Qt.Unchecked)
+        self.setItem(index, 0, item)
+        bins = QtWidgets.QSpinBox()
+        bins.setRange(1, 20)
+        bins.setValue(3)
+        self.setCellWidget(index, 1, bins)
+        self.setItem(index, 2, QtWidgets.QTableWidgetItem(""))
+        self.setItem(index, 3, QtWidgets.QTableWidgetItem(""))
+        sample = QtWidgets.QTableWidgetItem(example)
+        sample.setFlags(sample.flags() & ~QtCore.Qt.ItemIsEditable)
+        self.setItem(index, 4, sample)
+        return index
 
     def specifications(self):
         result = []
@@ -94,10 +114,8 @@ class ScoreTable(QtWidgets.QTableWidget):
                 continue
             spec = {"name": self.item(row, 0).text(), "bins": self.cellWidget(row, 1).value()}
             for column, key in ((2, "min"), (3, "max")):
-                text = self.item(row, column).text().strip()
-                spec[key] = float(text) if text else None
-            if spec["min"] is not None and spec["max"] is not None and spec["min"] > spec["max"]:
-                raise ValueError(f"{spec['name']} 最低值大于最高值。")
+                spec[key] = self.item(row, column).text().strip() or None
+            spec["min"], spec["max"] = core.metric_bounds(spec)
             result.append(spec)
         if not result:
             raise ValueError("请勾选至少一个关注的打分列。")
@@ -157,16 +175,14 @@ class SamplingForm(QtWidgets.QGroupBox):
 
     def load_columns(self):
         rows = core.read_scores(self.scores.text().strip())
-        if not rows:
-            raise ValueError("打分表为空。")
+        columns = self.table.populate(rows)
         self.path_column.clear()
-        self.path_column.addItems(list(rows[0]))
+        self.path_column.addItems(columns)
         for preferred in ("path", "structure_path", "file", "filename", "description", "id"):
             index = self.path_column.findText(preferred)
             if index >= 0:
                 self.path_column.setCurrentIndex(index)
                 break
-        self.table.populate(rows)
         score_parent = Path(self.scores.text().strip()).resolve().parent
         if not self.root.text():
             self.root.setText(str(score_parent))
@@ -189,14 +205,14 @@ class SamplingForm(QtWidgets.QGroupBox):
         self.output.setText(str(directory))
         self.path_column.clear()
         self.path_column.addItem(config.get("path_column", "path"))
-        self.table.populate([{spec["name"]: 0 for spec in config["metrics"]}])
-        for row, spec in enumerate(config["metrics"]):
+        self.table.setRowCount(0)
+        for spec in config["metrics"]:
+            row = self.table.add_metric(spec["name"], "已保存的配置")
             self.table.item(row, 0).setCheckState(QtCore.Qt.Checked)
             self.table.cellWidget(row, 1).setValue(spec.get("bins", 3))
             for column, key in ((2, "min"), (3, "max")):
                 value = spec.get(key)
                 self.table.item(row, column).setText("" if value is None else str(value))
-            self.table.item(row, 4).setText("已保存的配置")
         for name, default in (("count", 24), ("seed", 0), ("rmsd", 2), ("coverage", 0.8)):
             getattr(self, name).setValue(config.get(name, default))
         self.diversity.setCurrentIndex(self.diversity.findData(config.get("diversity", "shape")))

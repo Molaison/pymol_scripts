@@ -50,6 +50,21 @@ class CollectionsSampling(unittest.TestCase):
         self.assertEqual(candidate["stratum"], originals[3]["stratum"])
         self.assertNotEqual(candidate["stratum"], originals[0]["stratum"])
 
+    def test_repeated_metric_keeps_independent_strata_and_saved_boundaries(self):
+        specs = [{"name": "quality", "bins": 2}, {"name": "quality", "bins": 4}]
+        rows = [{"scores": {"quality": score}} for score in range(12)]
+        queues, edges = core.make_strata(rows, specs, seed=0)
+        self.assertEqual(len(queues), 4)
+        self.assertEqual(edges, [[5.5], [2.75, 5.5, 8.25]])
+        self.assertEqual(rows[8]["stratum"], [1, 2])
+
+        refreshed = [{"scores": {"quality": score}} for score in (0, 8, 100)]
+        _, reused = core.make_strata(refreshed, specs, seed=0, saved_edges=edges)
+        self.assertEqual(reused, edges)
+        self.assertEqual(refreshed[1]["stratum"], [1, 2])
+        core.make_strata(refreshed, specs, seed=0, saved_edges={"quality": edges[1]})
+        self.assertEqual(refreshed[1]["stratum"], [2, 2])
+
     def test_replacement_uses_saved_strata_after_the_score_table_changes(self):
         with tempfile.TemporaryDirectory() as temporary, pymol2.PyMOL() as instance:
             root = Path(temporary)
@@ -106,6 +121,105 @@ class CollectionsSampling(unittest.TestCase):
             self.assertEqual(probes, ["retained", "retained.pdb"])
             self.assertEqual(rows[0]["path"], str((root / "retained.pdb").resolve()))
             self.assertEqual([item["row"] for item in skipped], [2, 3])
+
+    def test_nonfinite_bounds_are_rejected_before_screening(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shutil.copyfile(FIXTURE, root / "candidate.pdb")
+            scores = root / "scores.csv"
+            scores.write_text("path,quality\ncandidate.pdb,0.5\n", encoding="utf-8")
+            for field in ("min", "max"):
+                for value in (float("nan"), float("inf"), -float("inf")):
+                    with self.subTest(field=field, value=value):
+                        metric = {"name": "quality", field: value}
+                        with self.assertRaisesRegex(ValueError, "有限"):
+                            core.prepare_rows({"scores": str(scores), "metrics": [metric]})
+
+    def test_each_bound_for_the_same_metric_is_applied(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("low.pdb", "high.pdb"):
+                shutil.copyfile(FIXTURE, root / name)
+            scores = root / "scores.csv"
+            scores.write_text("path,quality\nlow.pdb,0.2\nhigh.pdb,0.9\n", encoding="utf-8")
+            metrics = [{"name": "quality", "max": 0.5}, {"name": "quality", "min": 0.1}]
+            rows, skipped = core.prepare_rows({"scores": str(scores), "metrics": metrics})
+            self.assertEqual([row["id"] for row in rows], ["low.pdb"])
+            self.assertEqual([item["row"] for item in skipped], [3])
+
+    def test_exported_table_roundtrips_repeated_and_metadata_named_metrics(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("low.pdb", "high.pdb"):
+                shutil.copyfile(FIXTURE, root / name)
+            scores = root / "scores.csv"
+            scores.write_text(
+                "path,id,quality,nearest_rmsd,score_id\n"
+                "low.pdb,17,0.2,0.6,0.75\n"
+                "high.pdb,19,0.9,0.3,0.8\n",
+                encoding="utf-8",
+            )
+            metrics = [
+                {"name": "quality", "max": 0.5}, {"name": "quality", "min": 0.1},
+                {"name": "id"}, {"name": "nearest_rmsd"}, {"name": "score_id"},
+            ]
+            config = {"scores": str(scores), "metrics": metrics, "count": 1, "seed": 1,
+                      "orientation": "pca", "target": "polymer.protein", "binder": "polymer.protein"}
+            output = root / "collection"
+            manifest = core.create_collection(config, output)
+            self.assertEqual(manifest["quantile_edges"], [[] for _ in metrics])
+            rows = core.read_scores(output / "02_samples.csv")
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["path"], str((root / "low.pdb").resolve()))
+            self.assertEqual(rows[0]["id"], "17")
+            self.assertEqual(rows[0]["quality"], "0.2")
+            self.assertEqual(rows[0]["score_id"], "0.75")
+            self.assertEqual(rows[0]["score_score_id"], "17.0")
+            self.assertEqual(rows[0]["score_nearest_rmsd"], "0.6")
+
+    def test_legacy_export_repeats_only_identical_metric_values(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shutil.copyfile(FIXTURE, root / "low.pdb")
+            scores = root / "02_samples.csv"
+            header = "id,path,stratum,nearest_rmsd,quality,quality\n"
+            same = "legacy,low.pdb,1/1,,0.2,0.2\n"
+            scores.write_text(header + same, encoding="utf-8-sig")
+            rows, skipped = core.prepare_rows({"scores": str(scores), "metrics": [{"name": "quality"}]})
+            self.assertEqual([row["id"] for row in rows], ["legacy"])
+            self.assertEqual(rows[0]["scores"]["quality"], 0.2)
+            self.assertFalse(skipped)
+
+            scores.write_text(header + same + "conflict,low.pdb,1/1,,0.2,0.95\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "重复"):
+                core.read_scores(scores)
+
+    def test_duplicate_metric_headers_are_rejected(self):
+        fixtures = {
+            "scores.csv": "path,quality,quality\nlow.pdb,0.1,0.95\n",
+            "scores.tsv": "path\tquality\tquality\nlow.pdb\t0.1\t0.95\n",
+            "scores.sc": "SCORE: quality quality description\nSCORE: 0.1 0.95 low\n",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, content in fixtures.items():
+                with self.subTest(name=name):
+                    path = root / name
+                    path.write_text(content, encoding="utf-8-sig")
+                    with self.assertRaisesRegex(ValueError, "重复"):
+                        core.read_scores(path)
+
+    def test_delimited_scores_keep_missing_and_extra_field_shapes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "scores.csv"
+            path.write_text("path,quality,pae\nfirst\n\nsecond,0.9,4,extra\n", encoding="utf-8-sig")
+            self.assertEqual(core.read_scores(path), [
+                {"path": "first", "quality": None, "pae": None},
+                {"path": "second", "quality": "0.9", "pae": "4", None: ["extra"]},
+            ])
+            path.write_text("path,quality\nfirst,0.9,extra\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                core.read_scores(path)
 
     def test_ca_reuse_across_pairs_preserves_decision_after_reloading_candidate(self):
         with pymol2.PyMOL() as instance:
