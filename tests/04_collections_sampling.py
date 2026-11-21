@@ -819,6 +819,49 @@ class CollectionsSampling(unittest.TestCase):
             cmd.load(rows[0]["path"], "selected")
             self.assertEqual(cmd.count_atoms("selected"), cmd.count_atoms("intended"))
 
+    def test_case_sensitive_structure_paths_do_not_discard_a_distinct_model(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            root = directory / "models"
+            root.mkdir()
+            if os.name == "nt":
+                enabled = subprocess.run(
+                    ["fsutil.exe", "file", "setCaseSensitiveInfo", str(root), "enable"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                if enabled.returncode:
+                    self.skipTest("The filesystem does not allow enabling case-sensitive filenames")
+            lower, upper = root / "model.pdb", root / "MODEL.pdb"
+            shutil.copyfile(FIXTURE, lower)
+            if upper.exists():
+                self.skipTest("The test directory is case-insensitive")
+            ca = [line for line in FIXTURE.read_text(encoding="ascii").splitlines(keepends=True)
+                  if line.startswith("ATOM") and line[12:16].strip() == "CA"]
+            upper.write_text("".join(ca[:8]) + "END\n", encoding="ascii")
+            alias = root / "Model.pdb"
+            if os.name == "nt":
+                try:
+                    os.link(upper, alias)
+                except OSError:
+                    alias = upper
+            else:
+                alias = upper
+
+            scores = directory / "scores.json"
+            scores.write_text(json.dumps([
+                {"path": lower.name, "quality": 1}, {"path": upper.name, "quality": 0},
+                {"path": str(alias), "quality": 0},
+            ]), encoding="utf-8")
+            config = {"scores": str(scores), "root": str(root), "metrics": [{"name": "quality", "bins": 2}],
+                      "seed": 0, "count": 1, "orientation": "pca",
+                      "frame_selection": "chain A", "binder": "chain A"}
+
+            manifest = core.create_collection(config, directory / "out")
+            self.assertEqual(manifest["eligible"], 2)
+            self.assertEqual([sample["path"] for sample in manifest["samples"]], [str(upper)])
+            self.assertEqual([entry["row"] for entry in manifest["skipped"]], [4])
+
     def test_disappearing_structure_during_path_resolution_does_not_abort_sampling(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

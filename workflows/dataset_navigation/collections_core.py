@@ -282,7 +282,7 @@ def prepare_rows(config):
     if not specs:
         raise ValueError("请至少选择一个打分列。")
     bounds = [(spec["name"], *metric_bounds(spec)) for spec in specs]
-    rows, skipped, seen = [], [], set()
+    rows, skipped, seen = [], [], {}
     path_column = config.get("path_column", "path")
     for number, source in enumerate(read_scores(score_path), 2):
         try:
@@ -314,9 +314,15 @@ def prepare_rows(config):
             except OSError:
                 resolved = path.resolve()
             path = str(resolved)
-            if os.path.normcase(path) in seen:
-                raise ValueError("重复结构路径")
-            seen.add(os.path.normcase(path))
+            previous_paths = seen.setdefault(os.path.normcase(path), [])
+            for previous in previous_paths:
+                try:
+                    same_file = path == previous or os.path.samefile(path, previous)
+                except OSError:
+                    continue
+                if same_file:
+                    raise ValueError("重复结构路径")
+            previous_paths.append(path)
             rows.append({"id": str(source.get("id") or source.get("description") or
                                    Path(value).name), "path": path, "scores": scores})
         except (KeyError, TypeError, ValueError, OverflowError) as exc:
