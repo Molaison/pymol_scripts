@@ -2,6 +2,7 @@
 
 import argparse
 from collections import Counter
+import csv
 import json
 from pathlib import Path
 import shutil
@@ -220,6 +221,63 @@ class CollectionsSampling(unittest.TestCase):
             path.write_text("path,quality\nfirst,0.9,extra\n", encoding="utf-8")
             with self.assertRaises(ValueError):
                 core.read_scores(path)
+
+    def test_quoted_structure_paths_and_ids_preserve_line_separators(self):
+        with tempfile.TemporaryDirectory() as temporary, pymol2.PyMOL() as instance:
+            root = Path(temporary)
+            cmd = instance.cmd
+            intended = root / "a\u2028b.pdb"
+            cmd.fragment("ala", "target")
+            cmd.fragment("gly", "other")
+            cmd.save(str(intended), "target")
+            cmd.save(str(root / "ab.pdb"), "other")
+            for suffix, delimiter in (("csv", ","), ("tsv", "\t")):
+                with self.subTest(suffix=suffix):
+                    path = root / f"scores.{suffix}"
+                    with path.open("w", newline="", encoding="utf-8-sig") as stream:
+                        writer = csv.writer(stream, delimiter=delimiter, quoting=csv.QUOTE_ALL)
+                        writer.writerow(["path", "id", "quality"])
+                        writer.writerow([intended.name, "first\r\nsecond\nthird", "0.9"])
+                    config = {"scores": str(path), "metrics": [{"name": "quality"}]}
+                    rows, skipped = core.prepare_rows(config)
+                    self.assertEqual(len(rows), 1)
+                    self.assertFalse(skipped)
+                    row = rows[0]
+                    self.assertEqual(Path(row["path"]), intended)
+                    self.assertEqual(row["id"], "first\r\nsecond\nthird")
+                    cmd.load(row["path"], "selected")
+                    self.assertEqual(cmd.count_atoms("selected"), cmd.count_atoms("target"))
+                    cmd.delete("selected")
+
+    def test_json_duplicate_keys_cannot_override_screening_scores(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("low.pdb", "high.pdb"):
+                shutil.copyfile(FIXTURE, root / name)
+            scores = root / "scores.json"
+            config = {"scores": str(scores), "metrics": [{"name": "quality", "max": 0.5}]}
+            scores.write_text('[{"path":"low.pdb","quality":0.2},'
+                              '{"path":"high.pdb","quality":0.9}]', encoding="utf-8")
+            rows, _ = core.prepare_rows(config)
+            self.assertEqual([row["id"] for row in rows], ["low.pdb"])
+            scores.write_text('[{"path":"low.pdb","quality":0.2,"quality":0.95},'
+                              '{"path":"high.pdb","quality":0.9,"quality":0.2}]', encoding="utf-8-sig")
+            with self.assertRaisesRegex(ValueError, "quality"):
+                core.prepare_rows(config)
+
+    def test_out_of_range_json_integer_does_not_abort_screening(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shutil.copyfile(FIXTURE, root / "retained.pdb")
+            scores = root / "scores.json"
+            scores.write_text(json.dumps([
+                {"path": "invalid.pdb", "quality": 10 ** 400},
+                {"path": "retained.pdb", "quality": 0.9},
+            ]), encoding="utf-8")
+            config = {"scores": str(scores), "metrics": [{"name": "quality"}]}
+            rows, skipped = core.prepare_rows(config)
+            self.assertEqual([row["id"] for row in rows], ["retained.pdb"])
+            self.assertEqual([item["row"] for item in skipped], [2])
 
     def test_ca_reuse_across_pairs_preserves_decision_after_reloading_candidate(self):
         with pymol2.PyMOL() as instance:

@@ -64,6 +64,7 @@ class TaskControl:
 def read_json(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
+
 import numpy as np
 
 
@@ -109,6 +110,17 @@ def metric_bounds(spec):
     return minimum, maximum
 
 
+def _reject_duplicate_json_keys(pairs):
+    row = dict(pairs)
+    if len(row) != len(pairs):
+        seen = set()
+        for key, _ in pairs:
+            if key in seen:
+                raise ValueError(f"JSON 打分文件的对象字段“{key}”重复。")
+            seen.add(key)
+    return row
+
+
 def read_scores(path):
     """Read CSV/TSV, a JSON row list, or a Rosetta SCORE table.
 
@@ -118,13 +130,15 @@ def read_scores(path):
         List of row dictionaries.
     """
     path = Path(path)
-    text = path.read_text(encoding="utf-8-sig")
-    if path.suffix.lower() == ".json":
-        rows = json.loads(text)
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        text = path.read_text(encoding="utf-8-sig")
+        rows = json.loads(text, object_pairs_hook=_reject_duplicate_json_keys)
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             raise ValueError("JSON 打分文件必须是由行对象组成的列表。")
         return rows
-    if path.suffix.lower() in (".sc", ".score"):
+    if suffix in (".sc", ".score"):
+        text = path.read_text(encoding="utf-8-sig")
         header, rows = None, []
         for line in text.splitlines():
             parts = line.split()
@@ -141,12 +155,13 @@ def read_scores(path):
         if header is None:
             raise ValueError("未找到 Rosetta SCORE 表头。")
         return rows
-    delimiter = "\t" if path.suffix.lower() == ".tsv" else ","
-    return _read_delimited_scores(text, delimiter)
+    delimiter = "\t" if suffix == ".tsv" else ","
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        return _read_delimited_scores(stream, delimiter)
 
 
-def _read_delimited_scores(text, delimiter):
-    reader = csv.reader(text.splitlines(), delimiter=delimiter)
+def _read_delimited_scores(stream, delimiter):
+    reader = csv.reader(stream, delimiter=delimiter)
     fieldnames = next(reader, [])
     width = len(fieldnames)
     repeated_fields = []
@@ -212,7 +227,7 @@ def prepare_rows(config):
             seen.add(os.path.normcase(path))
             rows.append({"id": str(source.get("id") or source.get("description") or
                                    Path(value).name), "path": path, "scores": scores})
-        except (KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
             skipped.append({"row": number, "reason": str(exc)})
     if not rows:
         raise ValueError("筛选后没有可用的结构与打分，请检查列名、路径和范围。")
