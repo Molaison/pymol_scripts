@@ -337,6 +337,39 @@ if args.stage in ("regression", "all"):
             assert [row["index"] for row in rendered] == [0, 1]
             assert all(row["ok"] and Path(row["image"]).is_file() for row in rendered)
 
+            import ctypes
+            from ctypes import wintypes
+
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            create = kernel.CreateFileW
+            create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                               wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+            create.restype = wintypes.HANDLE
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            handle = create(str(receipt), 0x80000000, 0, None, 3, 0, None)
+            if handle == ctypes.c_void_p(-1).value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            live_handles = [handle]
+            read_json = core.read_json
+            read_conflicts = []
+
+            def release_receipt_after_read_conflict(path):
+                try:
+                    return read_json(path)
+                except PermissionError as error:
+                    read_conflicts.append(error.errno)
+                    assert kernel.CloseHandle(live_handles.pop())
+                    raise
+
+            try:
+                with patch.object(core, "read_json", release_receipt_after_read_conflict):
+                    resumed_report = core.worker_report(receipt, "worker-sharing")
+            finally:
+                if live_handles:
+                    assert kernel.CloseHandle(live_handles.pop())
+            assert read_conflicts == [13], read_conflicts
+            assert resumed_report["results"] == rendered
+
         cancellation_directory = temporary / "cancel"
         cancellation_directory.mkdir()
         cancellation_path = cancellation_directory / "01_collection.json"

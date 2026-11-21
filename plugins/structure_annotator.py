@@ -493,14 +493,9 @@ if not hasattr(STATE, "dataset_files"):
 
 
 def _structure_dedupe_key(file_path: str) -> str:
+    """Group only the plain and gzip copies of the same structure format."""
     name = os.path.basename(file_path).lower()
-    if name.endswith(".gz"):
-        name = name[: -len(".gz")]
-    for ext in (".pdb", ".cif"):
-        if name.endswith(ext):
-            name = name[: -len(ext)]
-            break
-    return name
+    return name[: -len(".gz")] if name.endswith(".gz") else name
 
 
 def _list_structure_files(

@@ -73,23 +73,31 @@ def read_json(path):
 import numpy as np
 
 
+def _retry_windows_report_io(operation):
+    """Wait briefly if native Windows sharing rules interrupt a worker receipt."""
+    if os.name != "nt":
+        return operation()
+    deadline = time.monotonic() + 0.25
+    while True:
+        try:
+            return operation()
+        except PermissionError as error:
+            winerror = getattr(error, "winerror", None)
+            sharing_error = winerror in (5, 32) or (winerror is None and error.errno == errno.EACCES)
+            if not sharing_error or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
 def write_json(path, value, *, retry_sharing=False):
     """Atomically write a JSON result so progress readers see complete records."""
     path = Path(path)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-    deadline = time.monotonic() + 0.25 if retry_sharing and os.name == "nt" else 0
-    while True:
-        try:
-            temporary.replace(path)
-            return
-        except PermissionError as error:
-            # MoveFileExW can briefly refuse replacement while the coordinator
-            # is reading a live worker receipt. Keep the same staged JSON.
-            if (not deadline or getattr(error, "winerror", None) not in (5, 32)
-                    or time.monotonic() >= deadline):
-                raise
-            time.sleep(0.01)
+    if retry_sharing:
+        _retry_windows_report_io(lambda: temporary.replace(path))
+    else:
+        temporary.replace(path)
 
 
 def _publish_task_progress(path, phase, completed, total):
@@ -513,7 +521,7 @@ def select_diverse(cmd, queues, config, selected=None, progress=None):
     """Round-robin occupied score cells, rejecting near-duplicates globally."""
     selected, rejected, invalid, unverified = list(selected or []), 0, [], []
     count, threshold = int(config.get("count", 24)), float(config.get("rmsd", 2.0))
-    if count < 1 or threshold <= 0 or not 0 < float(config.get("coverage", 0.8)) <= 1:
+    if count < 1 or not 0 < threshold < math.inf or not 0 < float(config.get("coverage", 0.8)) <= 1:
         raise ValueError("样本数、RMSD 阈值和覆盖率必须为有效正数。")
     processed, total = 0, sum(len(queue) for queue in queues)
     while any(queues) and len(selected) < count:
@@ -1132,9 +1140,10 @@ def current_images(manifest, directory, width=None, height=None, *, verify_conte
 
 
 def worker_report(path, run_id):
-    if not Path(path).exists():
+    try:
+        report = _retry_windows_report_io(lambda: read_json(path))
+    except FileNotFoundError:
         return {"results": []}
-    report = read_json(path)
     return report if report.get("run_id") == run_id else {"results": []}
 
 
@@ -1194,7 +1203,7 @@ def publish_worker_diagnostics(results, directory, scratch=None):
         log.replace(directory / log.name)
     by_index = {row["index"]: row for row in results}
     for report_path in reports:
-        report = read_json(report_path)
+        report = _retry_windows_report_io(lambda: read_json(report_path))
         report["results"] = [by_index[row["index"]] for row in report["results"]]
         write_json(directory / report_path.name, report)
 

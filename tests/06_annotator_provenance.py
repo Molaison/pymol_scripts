@@ -275,6 +275,34 @@ class AnnotatorProvenance(unittest.TestCase):
         self.assertEqual(reader(str(compressed)).get("quality"), "Compressed")
         self.assertEqual(reader(str(plain)).get("quality"), "Needs review")
 
+    def test_same_stem_pdb_and_cif_are_separate_models_with_one_compression_variant_each(self):
+        atom_counts = {}
+        for extension, fragment in (("pdb", "ala"), ("cif", "gly")):
+            self.cmd.fragment(fragment, "fixture")
+            path = self.root / f"candidate.{extension}"
+            self.cmd.save(str(path), "fixture")
+            with gzip.open(str(path) + ".gz", "wb") as stream:
+                stream.write(path.read_bytes())
+            atom_counts[path.name] = self.cmd.count_atoms("fixture")
+            self.cmd.delete("fixture")
+        self.assertEqual(len(set(atom_counts.values())), 2)
+        for prefer_gz in (True, False):
+            with self.subTest(prefer_gz=prefer_gz):
+                self.state.prefer_gz = prefer_gz
+                self.annotator["sa_load_dir"](str(self.root))
+                expected = {name + (".gz" if prefer_gz else ""): count for name, count in atom_counts.items()}
+                actual = {}
+                for _ in self.state.files:
+                    name = Path(self.state.current_file()).name
+                    actual[name] = self.cmd.count_atoms(self.state.current_object)
+                    self.annotator["sa_annotate"](f"Reviewed {actual[name]} atoms")
+                    self.annotator["sa_next"]()
+                self.assertEqual(actual, expected)
+                report = Path(self.annotator["sa_export_csv"]())
+                with report.open(newline="", encoding="utf-8") as stream:
+                    rows = {row["filename"]: row["quality"] for row in csv.DictReader(stream)}
+                self.assertEqual(rows, {name: f"Reviewed {count} atoms" for name, count in expected.items()})
+
     def test_cif_multiword_annotation_survives_csv_export_and_undo(self):
         self.cmd.load(str(FIXTURE), "template")
         path = self.root / "review.cif"

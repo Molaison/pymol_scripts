@@ -553,6 +553,29 @@ class CollectionsSampling(unittest.TestCase):
             cmd.load(str(FIXTURE), "col_candidate")
             self.assertEqual(core.check_diversity(cmd, {}, config, selected), "duplicate")
 
+    def test_nonfinite_rmsd_cannot_disable_native_duplicate_rejection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            names = ["original.pdb", "copy.pdb"]
+            for name in names:
+                shutil.copyfile(FIXTURE, root / name)
+            scores = root / "scores.json"
+            scores.write_text(json.dumps([{"path": name, "quality": 0.9} for name in names]),
+                              encoding="utf-8")
+            config = {"scores": str(scores), "metrics": [{"name": "quality"}], "count": 2,
+                      "seed": 8, "rmsd": 0.1, "orientation": "pca",
+                      "target": "polymer.protein", "binder": "polymer.protein"}
+            normal = core.create_collection(config, root / "valid")
+            self.assertEqual(len(normal["samples"]), 1)
+            self.assertEqual(normal["rejected_duplicates"], 1)
+            for value in ("NaN", "Infinity", "-Infinity"):
+                with self.subTest(value=value):
+                    config["rmsd"] = value
+                    output = root / value
+                    with self.assertRaisesRegex(ValueError, "RMSD"):
+                        core.create_collection(config, output)
+                    self.assertFalse((output / "01_collection.json").exists())
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
