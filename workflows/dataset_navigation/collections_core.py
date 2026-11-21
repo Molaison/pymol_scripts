@@ -433,7 +433,7 @@ def symmetry_frame(coords, centroids, axis=None):
 
 def selection(obj, expression, ca=False):
     result = f"(model {obj}) and ({expression})"
-    return result + " and polymer.protein and name CA" if ca else result
+    return result + " and polymer.protein and name CA and state 1" if ca else result
 
 
 def ca_coordinates(cmd, expression, cache):
@@ -601,12 +601,43 @@ def _reference_frame_signature(cmd, config):
     axes = config.get(mode, "polymer.protein")
     model = cmd.get_model("model col_reference", 1)
     # Native super uses the reference's residue identities and bonds as well as its selected CAs.
-    atoms = [(atom.index, atom.segi, atom.chain, atom.resi, atom.resn, atom.name,
+    positions = {atom.index: position for position, atom in enumerate(model.atom, 1)}
+    atoms = [(positions[atom.index], atom.segi, atom.chain, atom.resi, atom.resn, atom.name,
               atom.alt, atom.symbol, atom.flags, atom.coord) for atom in model.atom]
     bonds = [(bond.index, bond.order) for bond in model.bond]
-    anchors = [[index for _, index in cmd.index(selection("col_reference", expression, True))]
-               for expression in dict.fromkeys((align, axes))]
+    anchors = _state_one_anchor_positions(cmd, "col_reference", (align, axes), positions)
     return hashlib.sha256(json.dumps([atoms, bonds, anchors], separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _state_one_anchor_positions(cmd, obj, expressions, positions):
+    """Use state-1 positions so atoms only in later states cannot renumber the anchors."""
+    return [[positions[index] for _, index in cmd.index(selection(obj, expression, True))]
+            for expression in dict.fromkeys(expressions)]
+
+
+def _screening_signature(cmd, obj, config):
+    selections = [config.get("diversity_selection") or config.get("binder", "chain B")]
+    if config.get("diversity", "shape") == "pose":
+        selections.append(config.get("target", "chain A"))
+    mode = config.get("orientation", "target")
+    if mode in ("target", "binder"):
+        selections.append(config.get(mode, "chain A" if mode == "target" else "chain B"))
+    else:
+        selections.append(config.get("frame_selection", "polymer.protein"))
+    # Sample loading checks coordinates separately. Native bonds share iterate_state ordering.
+    whole_model = f"model {obj}"
+    atoms = []
+    cmd.iterate_state(1, whole_model, "atoms.append((index, segi, chain, resi, resn, name, alt, elem, flags))",
+                      space={"atoms": atoms})
+    if cmd.get_version()[1] >= 2.4:
+        bonds = cmd.get_bonds(whole_model, 1)
+    else:
+        # Older versions use zero-based states for get_bonds.
+        bonds = [(*bond.index, bond.order) for bond in cmd.get_model(whole_model, 1).bond]
+    positions = {atom[0]: position for position, atom in enumerate(atoms, 1)}
+    anchors = _state_one_anchor_positions(cmd, obj, selections, positions)
+    atom_properties = [atom[1:] for atom in atoms]
+    return hashlib.sha256(json.dumps([atom_properties, bonds, anchors], separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def apply_pose(cmd, obj, matrix, *, expected_coordinates=None, bounds=None):
@@ -648,11 +679,14 @@ def preview_size(width, height):
     return round(width * scale), round(height * scale)
 
 
-def update_bounds(cmd, samples):
+def update_bounds(cmd, samples, *, screening_config=None):
     low, high = np.full(3, np.inf), np.full(3, -np.inf)
     for index, row in enumerate(samples):
-        coords = cmd.get_coords(f"model col_keep_{index}", 1)
+        obj = f"col_keep_{index}"
+        coords = cmd.get_coords(f"model {obj}", 1)
         row["coordinate_signature"] = coordinate_signature(coords)
+        if screening_config is not None:
+            row["screening_signature"] = _screening_signature(cmd, obj, screening_config)
         matrix = np.asarray(row["matrix"])
         coords = coords @ matrix[:3, :3].T + matrix[:3, 3]
         low, high = np.minimum(low, coords.min(0)), np.maximum(high, coords.max(0))
@@ -739,7 +773,7 @@ def _create_collection(config, output, progress):
         reference = reference or (selected[0]["path"] if selected else None)
         if selected and config.get("orientation", "target") in ("target", "binder"):
             reference_signature = _reference_frame_signature(command, config)
-        bounds = update_bounds(command, selected)
+        bounds = update_bounds(command, selected, screening_config=config)
     manifest = {"version": 1, "config": config, "reference": reference,
                 "samples": selected, "quantile_edges": edges, "occupied_strata": len(queues),
                 "eligible": len(rows), "rejected_duplicates": rejected, "skipped": skipped,
@@ -812,13 +846,21 @@ def reorient_samples(command, manifest, progress=None):
         raise ValueError("固定样本无法应用新朝向，原 collection 已保留；请修正链选择或解除固定。")
     manifest["samples"] = valid
     manifest["invalid_structures"].extend(failed)
-    manifest["bounds"] = update_bounds(command, valid)
+    manifest["bounds"] = update_bounds(command, valid, screening_config=config)
     if aligns_to_reference:
         reference = reference or valid[0]["path"]
         manifest["reference_frame_signature"] = _reference_frame_signature(command, config)
     else:
         manifest.pop("reference_frame_signature", None)
     manifest["reference"] = reference
+
+
+def _verify_screening_inputs(command, row, obj, config):
+    expected = row.get("screening_signature")
+    if expected is None:
+        raise ValueError(f"{row['id']}：旧清单缺少结构筛选与朝向签名，请先重新应用朝向。")
+    if _screening_signature(command, obj, config) != expected:
+        raise ValueError(f"{row['id']}：结构筛选或朝向输入已变化，请先重新应用朝向。")
 
 
 def replace_sample(command, manifest, index, progress=None):
@@ -832,24 +874,30 @@ def replace_sample(command, manifest, index, progress=None):
         command.load(reference, "col_reference", quiet=1)
         if _reference_frame_signature(command, config) != expected:
             raise ValueError("参考结构的对齐数据已变化，请先重新应用朝向。")
+    for position, row in enumerate(samples):
+        _load_saved_sample(command, row, f"col_keep_{position}")
+    for position, row in enumerate(samples):
+        _verify_screening_inputs(command, row, f"col_keep_{position}", config)
     rows, _ = prepare_rows(config)
     queues, _ = make_strata(rows, config["metrics"], config.get("seed", 0), manifest.get("quantile_edges"))
     excluded = {row["path"] for row in samples} | set(manifest.get("excluded_paths", []))
     queues = [[row for row in queue if row["path"] not in excluded] for queue in queues]
     queues.sort(key=lambda queue: not queue or queue[0]["stratum"] != original["stratum"])
-    for position, row in enumerate(samples):
-        _load_saved_sample(command, row, f"col_keep_{position}")
     config["count"] = len(samples) + 1
     chosen, _, _, _ = select_diverse(command, queues, config, selected=samples, progress=progress)
     if len(chosen) == len(samples):
         raise ValueError("没有其他满足分层与结构差异要求的候选；原样本已保留。")
     replacement = chosen[-1]
-    coords = command.get_coords(f"model col_keep_{len(samples)}", 1)
+    staged = f"col_keep_{len(samples)}"
+    coords = command.get_coords(f"model {staged}", 1)
     replacement["coordinate_signature"] = coordinate_signature(coords)
-    _load_saved_sample(command, replacement, "col_candidate")
-    command.delete(f"col_keep_{len(samples)}")
+    replacement["screening_signature"] = _screening_signature(command, staged, config)
+    command.delete(staged)
+    _load_saved_sample(command, replacement, staged)
+    if _screening_signature(command, staged, config) != replacement["screening_signature"]:
+        raise ValueError(f"{replacement['id']}：候选结构在筛选后发生变化，请重试替换。")
     command.delete(f"col_keep_{index}")
-    command.set_name("col_candidate", f"col_keep_{index}")
+    command.set_name(staged, f"col_keep_{index}")
     replacement["image"] = original["image"]
     samples[index] = replacement
     manifest.setdefault("excluded_paths", []).append(original["path"])

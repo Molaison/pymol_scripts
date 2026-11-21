@@ -226,6 +226,147 @@ class CollectionsSampling(unittest.TestCase):
             self.assertEqual(rows[0]["path"], str((root / "retained.pdb").resolve()))
             self.assertEqual([item["row"] for item in skipped], [2, 3])
 
+    def test_multistate_screening_ignores_atoms_absent_from_first_state(self):
+        with tempfile.TemporaryDirectory() as temporary, pymol2.PyMOL() as instance:
+            root = Path(temporary)
+            cmd = instance.cmd
+            cmd.set("max_threads", 1)
+            cmd.load(str(FIXTURE), "fixture")
+            first_state = "fixture and resi 1-25+61-80"
+            cmd.create("source_single", first_state, 1, 1)
+            cmd.create("source_ensemble", first_state, 1, 1)
+            cmd.create("source_ensemble", "fixture and resi 1-170", 1, 2)
+            cmd.create("source_alternate", first_state, 1, 1)
+            cmd.load_coords(cmd.get_coords("source_alternate", 1) * [1.3, 1.2, 1.6], "source_alternate", 1)
+            for extension in ("pdb", "cif"):
+                with self.subTest(extension=extension):
+                    single, ensemble = root / f"single.{extension}", root / f"ensemble.{extension}"
+                    cmd.save(str(single), "source_single", state=0)
+                    cmd.save(str(ensemble), "source_ensemble", state=0)
+                    scores = root / f"scores_{extension}.json"
+                    config = {"scores": str(scores), "metrics": [{"name": "quality"}], "count": 2,
+                              "rmsd": 0.1, "orientation": "target", "diversity": "pose",
+                              "target": "polymer.protein", "binder": "polymer.protein",
+                              "reference": str(single)}
+                    single_row = {"path": single.name, "quality": 0.91}
+                    ensemble_row = {"path": ensemble.name, "quality": 0.90}
+                    scores.write_text(json.dumps([single_row]), encoding="utf-8")
+                    control = core.create_collection(config, root / f"control_{extension}")
+                    scores.write_text(json.dumps([ensemble_row]), encoding="utf-8")
+                    result = core.create_collection(config, root / f"only_ensemble_{extension}")
+                    self.assertEqual(result["invalid_structures"], [])
+                    self.assertEqual(result["samples"][0]["matrix"], control["samples"][0]["matrix"])
+                    self.assertEqual(result["samples"][0]["coordinate_signature"],
+                                     control["samples"][0]["coordinate_signature"])
+                    scores.write_text(json.dumps([single_row, ensemble_row]), encoding="utf-8")
+                    compared = core.create_collection(config, root / f"compared_{extension}")
+                    self.assertEqual(compared["invalid_structures"], [])
+                    self.assertEqual(compared["rejected_duplicates"], 1)
+                    self.assertEqual(len(compared["samples"]), 1)
+                    alternate = root / f"alternate.{extension}"
+                    cmd.save(str(alternate), "source_alternate", state=0)
+                    del config["reference"]
+                    config["count"] = 1
+                    scores.write_text(json.dumps([ensemble_row]), encoding="utf-8")
+                    implicit = root / f"implicit_{extension}"
+                    initial = core.create_collection(config, implicit)
+                    self.assertEqual(initial["reference"], str(ensemble))
+                    scores.write_text(json.dumps([ensemble_row, {"path": alternate.name, "quality": 0.89}]),
+                                      encoding="utf-8")
+                    replaced = core.revise_collection(implicit / "01_collection.json",
+                                                      {"action": "replace", "indices": [0]})
+                    self.assertEqual(replaced["samples"][0]["path"], str(alternate))
+
+    def test_replacement_checks_screening_inputs_behind_unchanged_coordinates(self):
+        with tempfile.TemporaryDirectory() as temporary, pymol2.PyMOL() as instance:
+            root = Path(temporary)
+            cmd = instance.cmd
+            cmd.set("max_threads", 1)
+            cmd.load(str(FIXTURE), "fixture")
+            cmd.alter("fixture", "q = 1.0")
+            kept, alternate = root / "kept.pdb", root / "alternate.pdb"
+            cmd.save(str(kept), "fixture")
+            changed = cmd.get_coords("fixture", 1)
+            for index, atom in enumerate(cmd.get_model("fixture", 1).atom):
+                if 12 <= int(atom.resi) <= 32:
+                    changed[index, 0] += 5
+            cmd.load_coords(changed, "fixture", 1)
+            cmd.save(str(alternate), "fixture")
+            scores = root / "scores.json"
+            rows = [{"path": kept.name, "quality": 0.80}]
+            scores.write_text(json.dumps(rows), encoding="utf-8")
+            config = {"scores": str(scores), "metrics": [{"name": "quality"}], "count": 1,
+                      "seed": 1, "rmsd": 5, "orientation": "pca", "binder": "polymer.protein",
+                      "diversity_selection": "polymer.protein and q > 0.5"}
+            output = root / "collection"
+            initial = core.create_collection(config, output)
+            manifest, sample_table = output / "01_collection.json", output / "02_samples.csv"
+            scores.write_text(json.dumps([*rows, {"path": alternate.name, "quality": 0.82}]), encoding="utf-8")
+            request = {"action": "replace", "indices": [0]}
+            before = (manifest.read_bytes(), sample_table.read_bytes())
+            with self.assertRaisesRegex(ValueError, "没有其他满足分层与结构差异要求的候选"):
+                core.revise_collection(manifest, request)
+            legacy = core.read_json(manifest)
+            legacy["samples"][0].pop("screening_signature", None)
+            core.write_json(manifest, legacy)
+            with self.assertRaisesRegex(ValueError, "缺少结构筛选与朝向签名"):
+                core.revise_collection(manifest, request)
+            self.assertEqual(core.read_json(manifest), legacy)
+            self.assertEqual(sample_table.read_bytes(), before[1])
+            manifest.write_bytes(before[0])
+
+            cmd.load(str(kept), "kept")
+            cmd.alter("kept and resi 12-32", "q = 0.0")
+            cmd.save(str(kept), "kept")
+            cmd.delete("kept")
+            cmd.load(str(kept), "kept")
+            self.assertEqual(core.coordinate_signature(cmd.get_coords("kept", 1)),
+                             initial["samples"][0]["coordinate_signature"])
+            with self.assertRaisesRegex(ValueError, "结构筛选或朝向输入已变化"):
+                core.revise_collection(manifest, request)
+            self.assertEqual((manifest.read_bytes(), sample_table.read_bytes()), before)
+            core.revise_collection(manifest, {"action": "orient", "config": {}})
+            updated = core.revise_collection(manifest, request)
+            self.assertEqual(updated["samples"][0]["id"], alternate.name)
+
+    def test_reopened_replacement_uses_same_frame_selections_as_screened_model(self):
+        with tempfile.TemporaryDirectory() as temporary, pymol2.PyMOL() as instance:
+            root = Path(temporary)
+            cmd = instance.cmd
+            cmd.set("max_threads", 1)
+            cmd.load(str(FIXTURE), "fixture")
+            cmd.alter("fixture", "q = 1.0")
+            kept, alternate = root / "kept.pdb", root / "alternate.pdb"
+            cmd.save(str(kept), "fixture")
+            cmd.load_coords(cmd.get_coords("fixture", 1) * [1.1, 1.6, 1.8], "fixture", 1)
+            cmd.save(str(alternate), "fixture")
+            scores = root / "scores.json"
+            rows = [{"path": kept.name, "quality": 0.80}]
+            scores.write_text(json.dumps(rows), encoding="utf-8")
+            config = {"scores": str(scores), "metrics": [{"name": "quality"}], "count": 1,
+                      "seed": 1, "rmsd": 0.1, "orientation": "pca", "binder": "polymer.protein",
+                      "frame_selection": "polymer.protein and q > 0.5"}
+            output = root / "collection"
+            core.create_collection(config, output)
+            manifest, csv_file = output / "01_collection.json", output / "02_samples.csv"
+            before = (manifest.read_bytes(), csv_file.read_bytes())
+            scores.write_text(json.dumps([*rows, {"path": alternate.name, "quality": 0.82}]), encoding="utf-8")
+            choose = core.select_diverse
+
+            def change_frame_after_selection(*args, **kwargs):
+                result = choose(*args, **kwargs)
+                self.assertEqual(result[0][-1]["id"], alternate.name)
+                cmd.alter("fixture and resi 1-12", "q = 0.0")
+                cmd.save(str(alternate), "fixture")
+                return result
+
+            request = {"action": "replace", "indices": [0]}
+            with patch.object(core, "select_diverse", change_frame_after_selection):
+                with self.assertRaisesRegex(ValueError, "候选结构在筛选后发生变化"):
+                    core.revise_collection(manifest, request)
+            self.assertEqual((manifest.read_bytes(), csv_file.read_bytes()), before)
+            self.assertEqual(core.revise_collection(manifest, request)["samples"][0]["id"], alternate.name)
+
     def test_sample_edits_do_not_adopt_a_changed_alignment_reference(self):
         with tempfile.TemporaryDirectory() as temporary, pymol2.PyMOL() as instance:
             root = Path(temporary)
