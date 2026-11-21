@@ -89,6 +89,165 @@ class AnnotatorProvenance(unittest.TestCase):
         self.cmd.delete("replacement_fixture")
         return path, atom_count
 
+    def test_csv_export_cannot_overwrite_a_dataset_source_or_its_hardlink(self):
+        for alias in (False, True):
+            with self.subTest(alias=alias):
+                directory = self.root / str(alias)
+                directory.mkdir()
+                source = directory / "model.pdb"
+                shutil.copyfile(FIXTURE, source)
+                self.annotator["sa_load_dir"](str(directory))
+                self.annotator["sa_annotate"]("Reviewed before export")
+                destination = source
+                if alias:
+                    destination = directory / "report.csv"
+                    try:
+                        os.link(source, destination)
+                    except OSError as exc:
+                        self.skipTest(f"hard links are unavailable: {exc}")
+                original = source.read_bytes()
+                self.assertIsNone(self.annotator["sa_export_csv"](str(destination)))
+                self.assertEqual(source.read_bytes(), original)
+                self.assertEqual(destination.read_bytes(), original)
+
+    def test_csv_export_protects_inputs_admitted_by_a_custom_dataset_pattern(self):
+        source = self.root / "model.mol2"
+        self.cmd.fragment("ala", "fixture")
+        self.cmd.save(str(source), "fixture")
+        self.cmd.delete("fixture")
+        self.annotator["sa_load_dir"](str(self.root), r"^.+\.mol2$")
+        self.assertEqual(self.state.current_file(), str(source))
+        original = source.read_bytes()
+        self.assertIsNone(self.annotator["sa_export_csv"](str(source)))
+        self.assertEqual(source.read_bytes(), original)
+
+    def test_csv_export_rejects_a_dataset_path_even_if_source_changes_while_reading(self):
+        source = self.root / "model.pdb"
+        shutil.copyfile(FIXTURE, source)
+        self.annotator["sa_load_dir"](str(self.root))
+        self.annotator["sa_annotate"]("Keep the correct structure")
+        original = source.read_bytes()
+        read_annotations = self.annotator["read_structure_annotations"]
+
+        def substitute_during_read(path, **options):
+            parked = source.with_suffix(".parked")
+            os.replace(source, parked)
+            try:
+                shutil.copyfile(FIXTURE, source)
+                return read_annotations(path, **options)
+            finally:
+                os.replace(parked, source)
+
+        with patch.dict(self.annotator, read_structure_annotations=substitute_during_read):
+            self.assertIsNone(self.annotator["sa_export_csv"](str(source)))
+        self.assertEqual(source.read_bytes(), original)
+
+    def test_csv_export_preserves_labels_named_for_metadata_columns(self):
+        source = self.root / "model.pdb"
+        shutil.copyfile(FIXTURE, source)
+        self.annotator["sa_load_dir"](str(self.root))
+        for name in ("filename", "path"):
+            with self.subTest(label=name):
+                self.state.label_name = name
+                self.annotator["sa_annotate"]("Reviewed in PyMOL")
+                exported = self.annotator["sa_export_csv"]()
+                with Path(exported).open(newline="", encoding="utf-8") as report:
+                    reader = csv.DictReader(report)
+                    row = next(reader)
+                self.assertEqual(reader.fieldnames, ["filename", f"label_{name}", "path"])
+                self.assertEqual(row[f"label_{name}"], "Reviewed in PyMOL")
+                self.assertEqual((row["filename"], row["path"]), (source.name, str(source)))
+
+    def test_unreadable_source_preserves_the_existing_annotation_csv(self):
+        source = self.root / "model.pdb.gz"
+        with gzip.open(source, "wb") as stream:
+            stream.write(FIXTURE.read_bytes())
+        self.annotator["sa_load_dir"](str(self.root))
+        self.annotator["sa_annotate"]("Verified label")
+        report = Path(self.annotator["sa_export_csv"]())
+        original = report.read_bytes()
+        self.assertIn(b"Verified label", original)
+        source.write_bytes(b"corrupted gzip")
+        replacement = self.root / "new.csv"
+        self.assertIsNone(self.annotator["sa_export_csv"](str(report)))
+        self.assertEqual(report.read_bytes(), original)
+        self.assertIsNone(self.annotator["sa_export_csv"](str(replacement)))
+        self.assertFalse(replacement.exists())
+
+    def test_missing_custom_format_preserves_an_existing_annotation_csv(self):
+        source = self.root / "model.mol2"
+        self.cmd.fragment("ala", "fixture")
+        self.cmd.save(str(source), "fixture")
+        self.cmd.delete("fixture")
+        self.annotator["sa_load_dir"](str(self.root), r"^.+\.mol2$")
+        report = Path(self.annotator["sa_export_csv"]())
+        original = report.read_bytes()
+        source.rename(source.with_suffix(".parked"))
+        self.assertIsNone(self.annotator["sa_export_csv"](str(report)))
+        self.assertEqual(report.read_bytes(), original)
+
+    def test_csv_export_uses_the_entire_loaded_dataset_when_navigation_is_filtered(self):
+        done, pending = self.root / "done.pdb", self.root / "pending.pdb"
+        shutil.copyfile(FIXTURE, done)
+        self.annotator["sa_load_dir"](str(self.root))
+        self.annotator["sa_annotate"]("Already reviewed")
+        shutil.copyfile(FIXTURE, pending)
+        self.state.skip_annotated = True
+        self.annotator["sa_load_dir"](str(self.root))
+        self.assertEqual(self.state.files, [str(pending)])
+        report = Path(self.annotator["sa_export_csv"]())
+        with report.open(newline="", encoding="utf-8") as stream:
+            exported = {row["filename"]: row["quality"] for row in csv.DictReader(stream)}
+        self.assertEqual(exported, {"done.pdb": "Already reviewed", "pending.pdb": ""})
+        original = done.read_bytes()
+        self.assertIsNone(self.annotator["sa_export_csv"](str(done)))
+        self.assertEqual(done.read_bytes(), original)
+        self.annotator["sa_annotate"]("Newly reviewed")
+        self.annotator["sa_load_dir"](str(self.root))
+        self.assertEqual(self.state.files, [])
+        self.assertEqual(self.annotator["sa_export_csv"](), str(report))
+        with report.open(newline="", encoding="utf-8") as stream:
+            exported = {row["filename"]: row["quality"] for row in csv.DictReader(stream)}
+        self.assertEqual(exported, {"done.pdb": "Already reviewed", "pending.pdb": "Newly reviewed"})
+
+    def test_default_csv_export_stays_in_the_loaded_directory_after_cwd_changes(self):
+        loaded, unrelated = self.root / "loaded", self.root / "unrelated"
+        loaded.mkdir()
+        unrelated.mkdir()
+        shutil.copyfile(FIXTURE, loaded / "model.pdb")
+        previous_report = unrelated / "annotations_quality.csv"
+        original = b"Report from a different dataset\n"
+        previous_report.write_bytes(original)
+        self.addCleanup(os.chdir, Path.cwd())
+        os.chdir(loaded)
+        self.annotator["sa_load_dir"](".")
+        self.annotator["sa_annotate"]("Reviewed in the loaded directory")
+        os.chdir(unrelated)
+        exported = self.annotator["sa_export_csv"]()
+        self.assertEqual(Path(exported), loaded / "annotations_quality.csv")
+        self.assertEqual(previous_report.read_bytes(), original)
+        self.assertIn(b"Reviewed in the loaded directory", Path(exported).read_bytes())
+
+    def test_reloading_the_plugin_requires_a_complete_inventory_before_export(self):
+        source = self.root / "model.pdb"
+        shutil.copyfile(FIXTURE, source)
+        self.annotator["sa_load_dir"](str(self.root))
+        self.annotator["sa_annotate"]("Reviewed before plugin reload")
+        report = Path(self.annotator["sa_export_csv"]())
+        original = report.read_bytes()
+        del self.state.dataset_files
+        script = Path(self.annotator["__file__"])
+        with patch.object(pymol, "cmd", self.cmd):
+            exec(compile(script.read_bytes(), str(script), "exec"), self.annotator)
+        self.assertIs(self.annotator["STATE"], self.state)
+        with patch.object(builtins, "print") as output:
+            self.assertIsNone(self.annotator["sa_export_csv"](str(report)))
+        self.assertIn("reload the dataset", output.call_args.args[0])
+        self.assertEqual(report.read_bytes(), original)
+        self.annotator["sa_load_dir"](str(self.root))
+        self.assertEqual(self.annotator["sa_export_csv"](), str(report))
+        self.assertEqual(report.read_bytes(), original)
+
     def test_gzip_preference_changes_only_when_dataset_is_reloaded(self):
         plain, compressed = self.root / "model.pdb", self.root / "model.pdb.gz"
         shutil.copyfile(FIXTURE, plain)

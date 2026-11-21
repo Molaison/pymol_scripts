@@ -2,6 +2,7 @@ from pymol import cmd
 from pymol.Qt import QtCore, QtWidgets
 import datetime
 import gzip
+import io
 import os
 import re
 import shutil
@@ -177,8 +178,12 @@ def _copy_windows_source(source: str, destination: str) -> None:
         raise WinError(get_last_error())
 
 
-def _write_text_file(path: str, text: str, source_version: FileVersion) -> FileVersion:
+def _write_text_file(
+    path: str, text: str, source_version: FileVersion, *, compress: Optional[bool] = None
+) -> FileVersion:
     path = _long_path(path)
+    if compress is None:
+        compress = path.lower().endswith(".gz")
     target = os.path.realpath(path)
     with open(target, "r+b") as source:
         source_stat = os.fstat(source.fileno())
@@ -194,7 +199,7 @@ def _write_text_file(path: str, text: str, source_version: FileVersion) -> FileV
         payload = text.encode("utf-8")
         # Update just the default stream of the copy without recreating its file.
         with open(temp_path, "r+b") as fh:
-            if path.lower().endswith(".gz"):
+            if compress:
                 with gzip.GzipFile(filename=os.path.basename(path), fileobj=fh, mode="wb") as compressed:
                     compressed.write(payload)
             else:
@@ -215,14 +220,19 @@ def _write_text_file(path: str, text: str, source_version: FileVersion) -> FileV
             os.unlink(temp_path)
 
 
-def _iter_text_lines(path: str) -> Iterator[str]:
+def _check_export_source(fh, export_target: Optional[Tuple[int, int]]) -> None:
+    if export_target is not None:
+        info = os.fstat(fh.fileno())
+        if (info.st_dev, info.st_ino) == export_target:
+            raise ValueError("The export destination is a dataset structure.")
+
+
+def _iter_text_lines(path: str, export_target: Optional[Tuple[int, int]] = None) -> Iterator[str]:
     """Yield a structure file one line at a time, including compressed files."""
     path = _long_path(path)
-    if path.lower().endswith(".gz"):
-        with gzip.open(path, "rt", encoding="utf-8", errors="replace", newline="") as fh:
-            yield from fh
-        return
-    with open(path, "rt", encoding="utf-8", errors="replace", newline="") as fh:
+    open_text = gzip.open if path.lower().endswith(".gz") else open
+    with open_text(path, "rt", encoding="utf-8", errors="replace", newline="") as fh:
+        _check_export_source(fh, export_target)
         yield from fh
 
 
@@ -244,9 +254,11 @@ def _parse_annotation_record(line: str, marker) -> Optional[Tuple[str, str]]:
     return match.group(1), value
 
 
-def _iter_annotation_records(path: str, marker) -> Iterator[Tuple[str, str]]:
+def _iter_annotation_records(
+    path: str, marker, export_target: Optional[Tuple[int, int]] = None
+) -> Iterator[Tuple[str, str]]:
     """Stream annotation records from a structure file using one marker."""
-    for line in _iter_text_lines(path):
+    for line in _iter_text_lines(path, export_target):
         if "PYMOL_ANNOTATOR" not in line:
             continue
         record = _parse_annotation_record(line, marker)
@@ -254,13 +266,16 @@ def _iter_annotation_records(path: str, marker) -> Iterator[Tuple[str, str]]:
             yield record
 
 
-def _read_annotation_records(path: str, marker) -> Dict[str, str]:
+def _read_annotation_records(
+    path: str, marker, *, strict: bool = False, export_target: Optional[Tuple[int, int]] = None
+) -> Dict[str, str]:
     result = {}
     try:
-        for key, value in _iter_annotation_records(path, marker):
+        for key, value in _iter_annotation_records(path, marker, export_target):
             result[key] = value
-    except Exception:
-        pass
+    except Exception as error:
+        if strict:
+            raise OSError(f"Cannot read annotations from {path}: {error}") from error
     return result
 
 
@@ -311,14 +326,24 @@ def read_cif_annotations(path: str) -> Dict[str, str]:
     return _read_annotation_records(path, CIF_ANNOTATION_MARKER)
 
 
-def read_structure_annotations(path: str) -> Dict[str, str]:
+def read_structure_annotations(
+    path: str, *, strict: bool = False, export_target: Optional[Tuple[int, int]] = None
+) -> Dict[str, str]:
     """Read existing annotations from a structure file."""
     lower = path.lower()
     if lower.endswith(".pdb") or lower.endswith(".pdb.gz"):
-        return read_pdb_annotations(path)
-    if lower.endswith(".cif") or lower.endswith(".cif.gz"):
-        return read_cif_annotations(path)
-    return {}
+        marker = PDB_ANNOTATION_MARKER
+    elif lower.endswith(".cif") or lower.endswith(".cif.gz"):
+        marker = CIF_ANNOTATION_MARKER
+    else:
+        if strict:
+            try:
+                with open(_long_path(path), "rb") as fh:
+                    _check_export_source(fh, export_target)
+            except (OSError, ValueError) as error:
+                raise OSError(f"Cannot read annotations from {path}: {error}") from error
+        return {}
+    return _read_annotation_records(path, marker, strict=strict, export_target=export_target)
 
 
 def has_annotation_fast(path: str, label_key: str) -> bool:
@@ -438,6 +463,7 @@ class AnnotatorState:
     current_object: Optional[str] = None
     undo_history: List[dict] = field(default_factory=list)
     annotated_indices: set = field(default_factory=set)
+    dataset_files: Optional[List[str]] = field(default_factory=list)
 
     def values(self) -> List[str]:
         return _split_values(self.values_text) or ["Good", "Bad"]
@@ -459,6 +485,11 @@ if not hasattr(STATE, "object_marks"):
     STATE.object_marks = {}
 if not hasattr(STATE, "object_versions"):
     STATE.object_versions = {}
+if not hasattr(STATE, "dataset_files"):
+    # A filtered queue from an older version does not identify the full dataset.
+    STATE.dataset_files = None
+    if STATE.files:
+        STATE.dataset_dir = os.path.dirname(STATE.files[0])
 
 
 def _structure_dedupe_key(file_path: str) -> str:
@@ -498,20 +529,17 @@ def _list_structure_files(
 
     files = sorted(selected.values())
 
-    # Filter out files that already have the specified label
     if skip_annotated and label_key:
-        filtered = []
-        skipped = 0
-        for f in files:
-            if has_annotation_fast(f, label_key):
-                skipped += 1
-            else:
-                filtered.append(f)
-        if skipped > 0:
-            print(f"Structure Annotator: skipped {skipped} already-annotated files")
-        files = filtered
-
+        return _unannotated_files(files, label_key)
     return files
+
+
+def _unannotated_files(files: List[str], label_key: str) -> List[str]:
+    pending = [path for path in files if not has_annotation_fast(path, label_key)]
+    skipped = len(files) - len(pending)
+    if skipped:
+        print(f"Structure Annotator: skipped {skipped} already-annotated files")
+    return pending
 
 
 def _object_name_for_index(path: str, index: int) -> str:
@@ -952,11 +980,11 @@ def sa_load_dir(path: str = ".", pattern: str = STRUCTURE_PATTERN) -> None:
         pattern: Regex to filter files.
     """
     try:
-        label_key = normalize_label_key(STATE.label_name) if STATE.skip_annotated else None
-        files = _list_structure_files(
-            os.path.abspath(path), pattern, STATE.prefer_gz,
-            skip_annotated=STATE.skip_annotated, label_key=label_key
-        )
+        path = os.path.abspath(path)
+        dataset_files = _list_structure_files(path, pattern, STATE.prefer_gz)
+        files = dataset_files
+        if STATE.skip_annotated:
+            files = _unannotated_files(dataset_files, normalize_label_key(STATE.label_name))
         if _preload_panel_timer is not None:
             _preload_panel_timer.stop()
         _preload_queue.clear()
@@ -964,11 +992,13 @@ def sa_load_dir(path: str = ".", pattern: str = STRUCTURE_PATTERN) -> None:
         _delete_managed_objects()
         STATE.current_object = None
         STATE.dataset_dir, STATE.pattern, STATE.files = path, pattern, files
+        STATE.dataset_files = dataset_files
         STATE.index = 0
         STATE.undo_history.clear()
         STATE.annotated_indices.clear()
-        if not STATE.files:
-            print(f"Structure Annotator: no files matched in {path}")
+        if not files:
+            message = "all matching files are already annotated" if dataset_files else "no files matched"
+            print(f"Structure Annotator: {message} in {path}")
             return
         if not STATE.skip_annotated:
             _rescan_annotated_indices()
@@ -1162,6 +1192,11 @@ def sa_next_unannotated() -> None:
         traceback.print_exc()
 
 
+def _canonical_file_name(path: str) -> str:
+    directory, filename = os.path.split(path)
+    return os.path.normcase(os.path.join(os.path.realpath(directory), filename))
+
+
 def sa_export_csv(out_path: str = "") -> Optional[str]:
     """
     Export all annotations in the current dataset to a CSV file.
@@ -1173,7 +1208,11 @@ def sa_export_csv(out_path: str = "") -> Optional[str]:
     """
     try:
         import csv
-        if not STATE.files:
+        if STATE.dataset_files is None:
+            print("Structure Annotator: reload the dataset before exporting after an update.")
+            return None
+        files = STATE.dataset_files or STATE.files
+        if not files:
             print("Structure Annotator: no dataset loaded (use sa_load_dir)")
             return None
         label_key = normalize_label_key(STATE.label_name)
@@ -1181,19 +1220,33 @@ def sa_export_csv(out_path: str = "") -> Optional[str]:
             out_path = os.path.join(
                 STATE.dataset_dir or ".", f"annotations_{label_key}.csv"
             )
-        rows = []
-        for path in STATE.files:
-            annotations = read_structure_annotations(path)
-            rows.append((os.path.basename(path), annotations.get(label_key, ""), path))
+        requested = _long_path(out_path)
+        target = os.path.realpath(requested)
+        target_version = _source_version(target)
+        target_identity = target_version[:2] if target_version is not None else None
+        target_names = {_canonical_file_name(requested), os.path.normcase(target)}
+        target_basenames = {os.path.basename(name) for name in target_names}
+        label_column = f"label_{label_key}" if label_key in ("filename", "path") else label_key
+        report = io.StringIO(newline="")
+        writer = csv.writer(report)
+        writer.writerow(["filename", label_column, "path"])
+        annotated = 0
+        for path in files:
+            filename = os.path.basename(path)
+            if (os.path.normcase(filename) in target_basenames and
+                    _canonical_file_name(_long_path(path)) in target_names):
+                raise ValueError(f"Export destination is a dataset structure: {path}")
+            label = read_structure_annotations(path, strict=True, export_target=target_identity).get(label_key, "")
+            writer.writerow([filename, label, path])
+            annotated += bool(label)
 
-        with open(_long_path(out_path), "w", newline="", encoding="utf-8") as fh:
-            writer = csv.writer(fh)
-            writer.writerow(["filename", label_key, "path"])
-            writer.writerows(rows)
-
-        annotated = sum(1 for r in rows if r[1])
+        if target_version is None:
+            with open(target, "x", newline="", encoding="utf-8") as fh:
+                fh.write(report.getvalue())
+        else:
+            _write_text_file(target, report.getvalue(), target_version, compress=False)
         print(
-            f"Structure Annotator: exported {len(rows)} rows "
+            f"Structure Annotator: exported {len(files)} rows "
             f"({annotated} annotated) to {out_path}"
         )
         return out_path
@@ -1252,6 +1305,12 @@ _register_number_key_bindings()
 
 
 _panel = globals().get("_panel", None)
+if _panel is not None and STATE.dataset_files is None:
+    _old_panel = _panel
+    _panel = None
+    _old_panel.close()
+    _old_panel.deleteLater()
+    del _old_panel
 
 
 class StructureAnnotatorPanel(QtWidgets.QDialog):
@@ -1436,7 +1495,6 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
             self.dir_edit.setText(directory)
 
     def _sync_to_state(self) -> None:
-        STATE.dataset_dir = self.dir_edit.text().strip() or "."
         STATE.pattern = self.pattern_edit.text().strip() or STRUCTURE_PATTERN
         STATE.label_name = self.label_edit.text().strip() or "quality"
         STATE.values_text = self.values_edit.text().strip() or "Good,Bad"
@@ -1469,7 +1527,7 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
 
     def _load_dataset(self) -> None:
         self._sync_to_state()
-        sa_load_dir(STATE.dataset_dir, STATE.pattern)
+        sa_load_dir(self.dir_edit.text().strip() or ".", STATE.pattern)
         self._refresh_status()
 
     def _next(self) -> None:
@@ -1518,6 +1576,9 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
 
     def _export_csv(self) -> None:
         self._sync_to_state()
+        if STATE.dataset_files is None:
+            self.status_label.setText("Reload the dataset before exporting.")
+            return
         label_key = normalize_label_key(STATE.label_name)
         default = os.path.join(STATE.dataset_dir or ".", f"annotations_{label_key}.csv")
         out_path, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -1528,6 +1589,8 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
         written = sa_export_csv(out_path)
         if written:
             self.status_label.setText(f"Exported annotations to {written}")
+        else:
+            self.status_label.setText("Export failed. See the PyMOL console for details.")
 
     def _on_label_changed(self) -> None:
         # Rescan progress against the new label so counts/highlighting stay accurate.
@@ -1591,7 +1654,7 @@ class StructureAnnotatorPanel(QtWidgets.QDialog):
 
     def _refresh_status(self) -> None:
         if not STATE.files:
-            self.status_label.setText("No dataset loaded.")
+            self.status_label.setText("No files queued for review." if STATE.dataset_files else "No dataset loaded.")
             self.status_label.setToolTip("")
             self.goto_spin.setRange(1, 1)
             self.undo_btn.setEnabled(False)
