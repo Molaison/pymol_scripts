@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import errno
 import hashlib
 import html
 import json
@@ -10,6 +11,7 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import random
+import re
 import subprocess
 import sys
 import threading
@@ -17,6 +19,7 @@ import time
 import traceback
 from concurrent.futures import CancelledError, ThreadPoolExecutor, wait
 from collections import deque
+from contextlib import contextmanager
 from itertools import product
 from uuid import uuid4
 
@@ -29,6 +32,10 @@ def orientation_config(config):
     defaults = {"target": "chain A", "binder": "chain B", "orientation": "target",
                 "reference": "", "frame_selection": "polymer.protein", "symmetry_axis": None}
     return {key: config.get(key, value) for key, value in defaults.items()}
+
+
+class ExportInProgress(RuntimeError):
+    """Another export already owns this output directory."""
 
 
 class TaskControl:
@@ -710,7 +717,7 @@ def worker_python():
     return str(candidate)
 
 
-def run_process(arguments, log_path, control=None, progress_path=None):
+def run_process(arguments, log_path, control=None, progress_path=None, *, published_log=None):
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     with Path(log_path).open("w", encoding="utf-8") as log:
         if control:
@@ -747,7 +754,7 @@ def run_process(arguments, log_path, control=None, progress_path=None):
     if process.returncode:
         with Path(log_path).open(encoding="utf-8", errors="replace") as handle:
             last_line = next(iter(deque((line.strip() for line in handle if line.strip()), maxlen=1)), "")
-        raise RuntimeError(f"{last_line}\n后台退出码 {process.returncode}；日志: {log_path}")
+        raise RuntimeError(f"{last_line}\n后台退出码 {process.returncode}；日志: {published_log or log_path}")
 
 
 def analyze_external(config, output, python=None, control=None):
@@ -837,15 +844,30 @@ def worker_report(path, run_id):
     return report if report.get("run_id") == run_id else {"results": []}
 
 
-def collect_workers(futures, run_id, retained, count, control, progress):
+def publish_render_result(row, directory):
+    """Publish a completed worker image at its stable collection path."""
+    if not row["ok"]:
+        return row
+    image = Path(row["image"])
+    destination = directory / image.name
+    try:
+        image.replace(destination)
+    except OSError as error:
+        traceback.print_exc()
+        return {"index": row["index"], "ok": False, "error": str(error)}
+    return dict(row, image=str(destination))
+
+
+def collect_workers(futures, run_id, retained, count, control, progress, directory):
     pending, results, processes = set(futures), dict(retained), []
     while pending:
         completed, pending = wait(pending, timeout=0.1)
-        observed = dict(results)
-        for future in futures:
-            report_path, indices = futures[future]
+        for future, (report_path, indices) in futures.items():
             report = worker_report(report_path, run_id)
-            observed.update({row["index"]: row for row in report["results"]})
+            for row in report["results"]:
+                index = row["index"]
+                if index not in results:
+                    results[index] = publish_render_result(row, directory)
             if future not in completed:
                 continue
             error, cancelled = None, False
@@ -853,41 +875,85 @@ def collect_workers(futures, run_id, retained, count, control, progress):
                 future.result()
             except Exception as exception:
                 error, cancelled = str(exception), isinstance(exception, CancelledError)
-            actual = {row["index"]: row for row in report["results"]}
             for index in indices:
-                results[index] = actual.get(index, {"index": index, "ok": False,
-                                                   "cancelled": cancelled,
-                                                   "error": error or "后台未返回此样本的结果"})
+                results.setdefault(index, {"index": index, "ok": False, "cancelled": cancelled,
+                                           "error": error or "后台未返回此样本的结果"})
             if "pid" in report:
                 processes.append({key: report[key] for key in ("pid", "started", "finished")})
-        observed.update(results)
         if control:
-            control.report("渲染", len(observed), count)
+            control.report("渲染", len(results), count)
         if progress:
-            progress(len(observed), count)
+            progress(len(results), count)
     return list(results.values()), processes
 
 
-def run_render_chunks(manifest_path, pending, directory, workers, size, python, retained, control, progress):
+def publish_worker_diagnostics(results, directory, scratch=None):
+    """Keep public diagnostic files associated with the current export."""
+    logs = list(scratch.glob("01_worker_*.log")) if scratch is not None else []
+    reports = list(scratch.glob("02_worker_*.json")) if scratch is not None else []
+    current_names = {path.name for path in (*logs, *reports)}
+    for path in directory.iterdir():
+        if (path.name not in current_names and path.is_file()
+                and re.fullmatch(r"01_worker_[0-9]+\.log|02_worker_[0-9]+\.json", path.name)):
+            path.unlink()
+    for log in logs:
+        log.replace(directory / log.name)
+    by_index = {row["index"]: row for row in results}
+    for report_path in reports:
+        report = read_json(report_path)
+        report["results"] = [by_index[row["index"]] for row in report["results"]]
+        write_json(directory / report_path.name, report)
+
+
+def run_render_chunks(manifest, pending, directory, workers, size, python, retained, control, progress):
     width, height = size
     threads, run_id = max(1, (os.cpu_count() or 1) // workers), uuid4().hex
-    # Join or cancel workers before removing their staged sources.
-    with TemporaryDirectory(prefix="collections-render-") as scratch_dir, ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {}
-        for worker in range(workers):
-            indices = pending[worker::workers]
-            report = directory / f"02_worker_{worker + 1:02d}.json"
-            arguments = [python or worker_python(), str(Path(__file__).resolve()), "render",
-                         "--manifest", str(manifest_path), "--indices", ",".join(map(str, indices)),
-                         "--directory", str(directory), "--width", str(width), "--height", str(height),
-                         "--threads", str(threads), "--report", str(report), "--run-id", run_id,
-                         "--scratch-dir", scratch_dir]
-            future = executor.submit(run_process, arguments, directory / f"01_worker_{worker + 1:02d}.log",
-                                     control)
-            futures[future] = report, indices
-        results, processes = collect_workers(futures, run_id, retained, len(pending) + len(retained),
-                                            control, progress)
+    # Workers can only write into this export's private scratch directory.
+    with TemporaryDirectory(dir=directory, prefix=".render-") as scratch_dir:
+        scratch = Path(scratch_dir)
+        manifest_path = scratch / "01_collection.json"
+        write_json(manifest_path, manifest)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {}
+            for worker in range(workers):
+                indices = pending[worker::workers]
+                report = scratch / f"02_worker_{worker + 1:02d}.json"
+                log = scratch / f"01_worker_{worker + 1:02d}.log"
+                arguments = [python or worker_python(), str(Path(__file__).resolve()), "render",
+                             "--manifest", str(manifest_path), "--indices", ",".join(map(str, indices)),
+                             "--directory", scratch_dir, "--width", str(width), "--height", str(height),
+                             "--threads", str(threads), "--report", str(report), "--run-id", run_id,
+                             "--scratch-dir", scratch_dir]
+                future = executor.submit(run_process, arguments, log, control,
+                                         published_log=directory / log.name)
+                futures[future] = report, indices
+            results, processes = collect_workers(futures, run_id, retained, len(pending) + len(retained),
+                                                control, progress, directory)
+        publish_worker_diagnostics(results, directory, scratch)
     return results, processes, threads
+
+
+@contextmanager
+def export_directory_lock(directory):
+    """Own publication of one output directory for this export."""
+    lock_path = directory / ".export.lock"
+    # Keep the lock file in place so all processes lock the same file.
+    with lock_path.open("a+b") as lock:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                raise
+            raise ExportInProgress(f"此目录已有导出任务，请等待任务结束（{directory}）。") from error
+        yield
 
 
 def export_collection(manifest_path, workers=2, width=1600, height=1200,
@@ -900,27 +966,24 @@ def export_collection(manifest_path, workers=2, width=1600, height=1200,
         raise ValueError("并发数至少为 1，图像宽高至少为 64。")
     directory = manifest_path.parent / ("previews" if preview else "images")
     directory.mkdir(exist_ok=True)
-    retained = (current_images(manifest, directory, width, height, verify_contents=True, control=control)
-                if retry_failed else {})
-    pending = [index for index in range(len(manifest["samples"])) if index not in retained]
-    workers = min(workers, len(pending), os.cpu_count() or 1)
-    if pending:
-        results, processes, threads = run_render_chunks(manifest_path, pending, directory, workers,
-                                                       (width, height), python, retained, control, progress)
-    else:
-        results, processes, threads = list(retained.values()), [], 0
-    for index in pending:
-        image = directory / manifest["samples"][index]["image"]
-        temporary = image.with_name(image.stem + ".part.png")
-        if temporary.exists():
-            temporary.unlink()
-    result = {"workers": workers, "threads_per_worker": threads, "processes": processes,
-              "width": width, "height": height, "reused": len(retained),
-              "cancelled": bool(control and control.cancelled.is_set()),
-              "results": sorted(results, key=lambda row: row["index"])}
-    write_json(directory / "03_export.json", result)
-    write_gallery(manifest, directory, result)
-    return result
+    with export_directory_lock(directory):
+        retained = (current_images(manifest, directory, width, height, verify_contents=True, control=control)
+                    if retry_failed else {})
+        pending = [index for index in range(len(manifest["samples"])) if index not in retained]
+        workers = min(workers, len(pending), os.cpu_count() or 1)
+        if pending:
+            results, processes, threads = run_render_chunks(manifest, pending, directory, workers,
+                                                           (width, height), python, retained, control, progress)
+        else:
+            results, processes, threads = list(retained.values()), [], 0
+            publish_worker_diagnostics(results, directory)
+        result = {"workers": workers, "threads_per_worker": threads, "processes": processes,
+                  "width": width, "height": height, "reused": len(retained),
+                  "cancelled": bool(control and control.cancelled.is_set()),
+                  "results": sorted(results, key=lambda row: row["index"])}
+        write_json(directory / "03_export.json", result)
+        write_gallery(manifest, directory, result)
+        return result
 
 
 def write_gallery(manifest, directory, export):
@@ -989,8 +1052,11 @@ def main():
                       args.directory, args.width, args.height, args.threads, args.report,
                       args.run_id, args.scratch_dir)
     else:
-        result = export_collection(args.manifest, args.workers, args.width, args.height,
-                                   retry_failed=args.retry_failed)
+        try:
+            result = export_collection(args.manifest, args.workers, args.width, args.height,
+                                       retry_failed=args.retry_failed)
+        except ExportInProgress as error:
+            raise SystemExit(str(error)) from None
         if not all(row["ok"] for row in result["results"]):
             raise SystemExit(1)
 

@@ -202,6 +202,34 @@ class CollectionsInputIdentity(unittest.TestCase):
         self.assertIsNotNone(staged)
         self.assertFalse(staged.exists(), "Cancelled export left a staged source file")
 
+    def test_export_updates_worker_diagnostics_on_cancel_or_full_cache_hit(self):
+        manifest, _ = self.collection()
+        directory = manifest.parent / "images"
+        for state in ("cancelled", "all_cached"):
+            with self.subTest(state=state):
+                exported = self.export(manifest)
+                row = exported["results"][0]
+                self.assertTrue(row["ok"], row)
+                receipt = directory / "02_worker_01.json"
+                self.assertTrue(receipt.is_file())
+                unrelated = directory / "02_worker_notes.json"
+                unrelated.write_text("notes", encoding="utf-8")
+                image = Path(row["image"])
+                changed_at = image.stat().st_mtime_ns
+                control = self.core["TaskControl"]()
+                if state == "cancelled":
+                    control.cancelled.set()
+                report = self.core["export_collection"](
+                    manifest, workers=1, width=144, height=108, python=sys.executable,
+                    control=control, retry_failed=(state == "all_cached"),
+                )
+                self.assertEqual(report["processes"], [])
+                self.assertEqual(report["cancelled"], state == "cancelled")
+                self.assertEqual(report["reused"], int(state == "all_cached"))
+                self.assertEqual(image.stat().st_mtime_ns, changed_at)
+                self.assertFalse(receipt.exists(), "Public worker report belonged to the prior export")
+                self.assertEqual(unrelated.read_text(encoding="utf-8"), "notes")
+
     def collection(self):
         source = self.root / "model.pdb"
         shutil.copyfile(FIXTURE, source)

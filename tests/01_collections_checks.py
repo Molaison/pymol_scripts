@@ -301,6 +301,8 @@ if args.stage in ("regression", "all"):
         def cancel_after_first(completed, total):
             observed_progress.append(completed)
             if 0 < completed < total:
+                # Report a completed image after it reaches its public path.
+                assert len(list((cancellation_directory / 'images').glob('sample_*.png'))) >= completed
                 control.cancelled.set()
         cancelled = core.export_collection(cancellation_path, workers=1, width=1280, height=960,
                                             control=control, progress=cancel_after_first)
