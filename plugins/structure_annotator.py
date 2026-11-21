@@ -5,6 +5,7 @@ import gzip
 import os
 import re
 import shutil
+import stat
 import tempfile
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -99,14 +100,92 @@ def _read_text_file(path: str) -> str:
         return fh.read()
 
 
+def _copy_windows_source(source: str, destination: str) -> None:
+    """Stage an NTFS copy with the original file's access and encryption."""
+    from ctypes import POINTER, WinDLL, WinError, byref, c_void_p, get_last_error
+    from ctypes import wintypes
+
+    security = WinDLL("advapi32", use_last_error=True)
+    kernel = WinDLL("kernel32", use_last_error=True)
+    get_info = security.GetNamedSecurityInfoW
+    get_info.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD] + [c_void_p] * 5
+    get_info.restype = wintypes.DWORD
+    set_info = security.SetNamedSecurityInfoW
+    set_info.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD] + [c_void_p] * 4
+    set_info.restype = wintypes.DWORD
+    get_control = security.GetSecurityDescriptorControl
+    get_control.argtypes = [c_void_p, POINTER(wintypes.WORD), POINTER(wintypes.DWORD)]
+    get_control.restype = wintypes.BOOL
+    security.EqualSid.argtypes = [c_void_p, c_void_p]
+    security.EqualSid.restype = wintypes.BOOL
+    kernel.LocalFree.argtypes = [c_void_p]
+    kernel.LocalFree.restype = c_void_p
+    copy_file = kernel.CopyFileW
+    copy_file.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.BOOL]
+    copy_file.restype = wintypes.BOOL
+
+    file_object, owner_info, dacl_info = 1, 1, 4
+    owner, dacl, descriptor = c_void_p(), c_void_p(), c_void_p()
+    staged_owner, staged_descriptor = c_void_p(), c_void_p()
+    try:
+        error = get_info(source, file_object, owner_info | dacl_info,
+                         byref(owner), None, byref(dacl), None, byref(descriptor))
+        if error:
+            raise WinError(error)
+        error = get_info(destination, file_object, owner_info,
+                         byref(staged_owner), None, None, None, byref(staged_descriptor))
+        if error:
+            raise WinError(error)
+        control, revision = wintypes.WORD(), wintypes.DWORD()
+        if not get_control(descriptor, byref(control), byref(revision)):
+            raise WinError(get_last_error())
+        # SE_DACL_PROTECTED prevents the parent directory from contributing ACEs.
+        inheritance = 0x80000000 if control.value & 0x1000 else 0x20000000
+        set_owner = not security.EqualSid(owner, staged_owner)
+        info = dacl_info | inheritance | (owner_info if set_owner else 0)
+        error = set_info(destination, file_object, info, owner if set_owner else None, None, dacl, None)
+        if error:
+            raise WinError(error)
+    finally:
+        kernel.LocalFree(descriptor)
+        kernel.LocalFree(staged_descriptor)
+
+    # The system copy carries EFS and alternate streams into the protected staging file.
+    if not copy_file(source, destination, False):
+        raise WinError(get_last_error())
+
+
 def _write_text_file(path: str, text: str) -> None:
     path = _long_path(path)
-    if path.lower().endswith(".gz"):
-        with gzip.open(path, "wt", encoding="utf-8", newline="") as fh:
-            fh.write(text)
-        return
-    with open(path, "wt", encoding="utf-8", newline="") as fh:
-        fh.write(text)
+    target = os.path.realpath(path)
+    with open(target, "r+b") as source:
+        target_mode = stat.S_IMODE(os.fstat(source.fileno()).st_mode)
+    fd, temp_path = tempfile.mkstemp(
+        prefix=".sa-write-", suffix=".tmp", dir=os.path.dirname(target)
+    )
+    try:
+        os.close(fd)
+        if sys.platform == "win32":
+            _copy_windows_source(target, temp_path)
+        payload = text.encode("utf-8")
+        # Update just the default stream of the copy without recreating its file.
+        with open(temp_path, "r+b") as fh:
+            if path.lower().endswith(".gz"):
+                with gzip.GzipFile(filename=os.path.basename(path), fileobj=fh, mode="wb") as compressed:
+                    compressed.write(payload)
+            else:
+                fh.write(payload)
+            fh.truncate()
+        os.chmod(temp_path, target_mode)
+        os.replace(temp_path, target)
+    finally:
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+        except PermissionError:
+            os.chmod(temp_path, stat.S_IWRITE | stat.S_IREAD)
+            os.unlink(temp_path)
 
 
 def _iter_text_lines(path: str) -> Iterator[str]:
@@ -871,7 +950,7 @@ def sa_undo() -> None:
         if not STATE.undo_history:
             print("Structure Annotator: nothing to undo")
             return
-        entry = STATE.undo_history.pop()
+        entry = STATE.undo_history[-1]
         path = entry["path"]
         label_key = entry["label_key"]
         prev_value = entry["prev_value"]
@@ -886,6 +965,7 @@ def sa_undo() -> None:
             STATE.annotated_indices.add(index)
             restored = prev_value
 
+        STATE.undo_history.pop()
         print(f"Undo: {os.path.basename(path)} {label_key} -> {restored}")
         # Return to the file we just changed so the user can see the result.
         if 0 <= index < len(STATE.files):

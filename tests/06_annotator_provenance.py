@@ -1,12 +1,18 @@
 """Check that Structure Annotator labels the native PyMOL object and its source file."""
 
 import argparse
+import builtins
+from contextlib import contextmanager
 import csv
+import errno
 import gzip
+import os
 from pathlib import Path
 import runpy
 import shutil
+import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -20,6 +26,37 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPT = "plugins/structure_annotator.py"
 FIXTURE = REPO / "data/helical_bundle.pdb"
 REVISION = None
+
+
+def fail_after_prefix(open_file, attempts):
+    def open_with_failure(path, mode, *args, **kwargs):
+        stream = open_file(path, mode, *args, **kwargs)
+        if mode not in ("wt", "r+b"):
+            return stream
+
+        @contextmanager
+        def interrupted_write():
+            with stream:
+                class PartialWriter:
+                    remaining = 64
+
+                    def __getattr__(self, name):
+                        return getattr(stream, name)
+
+                    def write(self, data):
+                        written = stream.write(data[:self.remaining])
+                        self.remaining -= written
+                        if self.remaining == 0:
+                            stream.flush()
+                            attempts.append(64)
+                            raise OSError(errno.ENOSPC, "simulated disk full after a partial write")
+                        return written
+
+                yield PartialWriter()
+
+        return interrupted_write()
+
+    return open_with_failure
 
 
 class AnnotatorProvenance(unittest.TestCase):
@@ -84,6 +121,114 @@ class AnnotatorProvenance(unittest.TestCase):
         self.annotator["sa_undo"]()
         reader = self.annotator["read_structure_annotations"]
         self.assertEqual(reader(str(path))["quality"], "Needs review")
+
+    def test_failed_annotation_preserves_source_and_allows_retry(self):
+        for suffix in (".pdb", ".pdb.gz"):
+            with self.subTest(suffix=suffix):
+                dataset = self.root / f"dataset{suffix}"
+                dataset.mkdir()
+                source = dataset / f"model{suffix}"
+                data = FIXTURE.read_bytes()
+                original = gzip.compress(data) if suffix.endswith(".gz") else data
+                source.write_bytes(original)
+                self.annotator["sa_load_dir"](str(dataset))
+
+                attempts = []
+                with patch.dict(self.annotator, {"open": fail_after_prefix(builtins.open, attempts)}), \
+                        patch.object(gzip, "open", fail_after_prefix(gzip.open, attempts)):
+                    self.annotator["sa_annotate"]("Reviewed")
+                self.assertEqual(attempts, [64])
+                current = source.read_bytes()
+                self.assertTrue(current == original, f"Source changed from {len(original)} to {len(current)} bytes")
+                self.assertEqual(list(dataset.iterdir()), [source])
+
+                reader = self.annotator["read_structure_annotations"]
+                self.annotator["sa_annotate"]("Reviewed")
+                self.assertEqual(reader(str(source))["quality"], "Reviewed")
+                self.annotator["sa_undo"]()
+                self.assertNotIn("quality", reader(str(source)))
+
+    def test_annotation_preserves_symbolic_link_and_target_permissions(self):
+        target = self.root / "target.raw"
+        target.write_bytes(gzip.compress(FIXTURE.read_bytes()))
+        original_mode = target.stat().st_mode
+        source = self.root / "linked.pdb.gz"
+        try:
+            source.symlink_to(target)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314 or exc.errno in (errno.EPERM, errno.ENOTSUP, errno.EACCES):
+                self.skipTest("The filesystem does not allow creation of symbolic links")
+            raise
+
+        self.annotator["sa_load_dir"](str(self.root))
+        self.annotator["sa_annotate"]("Reviewed")
+        self.assertTrue(source.is_symlink())
+        self.assertEqual(target.stat().st_mode, original_mode)
+        with gzip.open(target, "rt", encoding="utf-8") as stream:
+            self.assertIn("REMARK 950 PYMOL_ANNOTATOR quality=Reviewed", stream.read())
+
+    def test_annotation_preserves_read_only_source_without_leaving_a_temporary_file(self):
+        dataset = self.root / "readonly"
+        dataset.mkdir()
+        source = dataset / "model.pdb"
+        original = FIXTURE.read_bytes()
+        source.write_bytes(original)
+        self.addCleanup(source.chmod, source.stat().st_mode)
+        source.chmod(stat.S_IREAD)
+        try:
+            with source.open("r+b"):
+                self.skipTest("The process can write to read-only files")
+        except PermissionError:
+            pass
+
+        self.annotator["sa_load_dir"](str(dataset))
+        self.annotator["sa_annotate"]("Reviewed")
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(list(dataset.iterdir()), [source])
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows file permissions")
+    def test_annotation_keeps_windows_permissions_and_alternate_data_stream(self):
+        source = self.root / "protected.pdb"
+        shutil.copyfile(FIXTURE, source)
+        alternate = f"{source}:annotator-regression"
+        with open(alternate, "wb") as stream:
+            stream.write(b"Existing structure metadata")
+        identity = subprocess.check_output(["whoami.exe", "/user", "/fo", "csv", "/nh"])
+        user_sid = next(csv.reader(identity.decode("ascii", errors="replace").strip().splitlines()))[1]
+        subprocess.run(
+            ["icacls.exe", str(source), "/inheritance:r", "/grant:r", f"*{user_sid}:(F)"],
+            capture_output=True, check=True,
+        )
+        read_acl = [
+            "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+            "(Get-Acl -LiteralPath $env:PYMOL_TEST_ACL_PATH).Sddl",
+        ]
+        env = dict(os.environ, PYMOL_TEST_ACL_PATH=str(source))
+        before = subprocess.check_output(read_acl, env=env).strip()
+        self.assertIn(b"D:P", before)
+
+        self.annotator["sa_load_dir"](str(self.root))
+        self.annotator["sa_annotate"]("Reviewed")
+        after = subprocess.check_output(read_acl, env=env).strip()
+        self.assertTrue(before == after, "Replacing the structure changed its protected access control list")
+        with open(alternate, "rb") as stream:
+            self.assertEqual(stream.read(), b"Existing structure metadata")
+        reader = self.annotator["read_structure_annotations"]
+        self.assertEqual(reader(str(source))["quality"], "Reviewed")
+
+    def test_undo_can_retry_after_source_is_temporarily_unavailable(self):
+        source = self.root / "model.pdb"
+        shutil.copyfile(FIXTURE, source)
+        self.annotator["sa_load_dir"](str(self.root))
+        self.annotator["sa_annotate"]("Reviewed")
+
+        parked = source.with_suffix(".parked")
+        source.rename(parked)
+        self.annotator["sa_undo"]()
+        parked.rename(source)
+        self.annotator["sa_undo"]()
+        reader = self.annotator["read_structure_annotations"]
+        self.assertNotIn("quality", reader(str(source)))
 
     def test_same_name_manual_replacement_cannot_be_annotated_or_deleted(self):
         source = self.root / "model.pdb"
