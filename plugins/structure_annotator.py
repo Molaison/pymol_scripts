@@ -695,35 +695,36 @@ if not hasattr(STATE, "dataset_files"):
         STATE.dataset_dir = os.path.dirname(STATE.files[0])
 
 
-def _structure_dedupe_key(file_path: str) -> str:
-    """Group only the plain and gzip copies of the same structure format."""
-    name = os.path.basename(file_path).lower()
-    return name[: -len(".gz")] if name.endswith(".gz") else name
-
-
 def _list_structure_files(
     path: str, pattern: str, prefer_gz: bool,
     skip_annotated: bool = False, label_key: str = None
 ) -> List[str]:
     compiled = re.compile(pattern)
     selected: Dict[str, str] = {}
+    archives = []
     for entry in os.listdir(path):
-        if compiled.match(entry):
-            full_path = os.path.join(path, entry)
-            key = _structure_dedupe_key(full_path)
-            is_gz = full_path.lower().endswith(".gz")
-            existing = selected.get(key)
-            if existing is None:
-                selected[key] = full_path
-                continue
+        if not compiled.match(entry):
+            continue
+        if _is_gz_path(entry):
+            archives.append(entry)
+        else:
+            selected[entry] = os.path.join(path, entry)
 
-            existing_is_gz = existing.lower().endswith(".gz")
-            if prefer_gz:
-                if is_gz and not existing_is_gz:
-                    selected[key] = full_path
-            else:
-                if (not is_gz) and existing_is_gz:
-                    selected[key] = full_path
+    plain_names = {entry.lower(): entry for entry in selected} if archives else {}
+    for entry in archives:
+        key = entry[:-len(".gz")]
+        if key not in selected:
+            alias = plain_names.get(key.lower())
+            if alias is not None:
+                try:
+                    if os.path.samefile(_long_path(os.path.join(path, key)),
+                                        _long_path(os.path.join(path, alias))):
+                        key = alias
+                except OSError:
+                    pass
+        existing = selected.get(key)
+        if existing is None or (prefer_gz and not _is_gz_path(existing)):
+            selected[key] = os.path.join(path, entry)
 
     files = sorted(selected.values())
 

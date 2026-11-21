@@ -453,6 +453,58 @@ class AnnotatorProvenance(unittest.TestCase):
         self.assertEqual(reader(str(compressed)).get("quality"), "Compressed")
         self.assertEqual(reader(str(plain)).get("quality"), "Needs review")
 
+    def test_distinct_case_sensitive_models_keep_their_own_compression_variants(self):
+        dataset = self.root / "case_sensitive"
+        dataset.mkdir()
+        if os.name == "nt":
+            enabled = subprocess.run(
+                ["fsutil.exe", "file", "setCaseSensitiveInfo", str(dataset), "enable"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            if enabled.returncode:
+                self.skipTest("The filesystem does not allow enabling case-sensitive filenames")
+        plain, separate = dataset / "model.pdb", dataset / "MODEL.pdb"
+        shutil.copyfile(FIXTURE, plain)
+        if separate.exists():
+            self.skipTest("The test directory is case-insensitive")
+        replacement, small_atoms = self.replacement_structure()
+        shutil.copyfile(replacement, separate)
+        archive = dataset / "model.pdb.gz"
+        archive.write_bytes(gzip.compress(plain.read_bytes()))
+        self.cmd.load(str(plain), "case_fixture")
+        large_atoms = self.cmd.count_atoms("case_fixture")
+        self.cmd.delete("case_fixture")
+
+        for prefer_gz in (False, True):
+            with self.subTest(prefer_gz=prefer_gz):
+                self.state.prefer_gz = prefer_gz
+                self.annotator["sa_load_dir"](str(dataset))
+                selected = archive if prefer_gz else plain
+                expected = {separate.name: small_atoms, selected.name: large_atoms}
+                self.assertEqual({Path(path).name for path in self.state.files}, set(expected))
+                for position, path in enumerate(self.state.files, 1):
+                    self.annotator["sa_goto"](position)
+                    self.assertEqual(self.cmd.count_atoms(self.state.current_object), expected[Path(path).name])
+                report = Path(self.annotator["sa_export_csv"]())
+                with report.open(newline="", encoding="utf-8") as stream:
+                    self.assertEqual({row["filename"] for row in csv.DictReader(stream)}, set(expected))
+
+    def test_case_insensitive_plain_archive_names_keep_the_preference(self):
+        raw = self.root / "model.pdb"
+        archive = self.root / "MODEL.pdb.gz"
+        shutil.copyfile(FIXTURE, raw)
+        if not (self.root / "MODEL.pdb").exists():
+            self.skipTest("The test directory is case-sensitive")
+        archive.write_bytes(gzip.compress(raw.read_bytes()))
+
+        for prefer_gz, intended in ((True, archive), (False, raw)):
+            with self.subTest(prefer_gz=prefer_gz):
+                self.state.prefer_gz = prefer_gz
+                self.annotator["sa_load_dir"](str(self.root))
+                self.assertEqual(self.state.files, [str(intended)])
+                self.assertGreater(self.cmd.count_atoms(self.state.current_object), 0)
+
     def test_same_stem_pdb_and_cif_are_separate_models_with_one_compression_variant_each(self):
         atom_counts = {}
         for extension, fragment in (("pdb", "ala"), ("cif", "gly")):
