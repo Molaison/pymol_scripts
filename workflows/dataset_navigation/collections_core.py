@@ -8,6 +8,7 @@ import json
 import math
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import random
 import subprocess
 import sys
@@ -649,7 +650,8 @@ def style_structure(cmd, obj, config, render=False):
             cmd.set(setting, value)
 
 
-def render_worker(manifest_path, indices, directory, width, height, threads, report_path, run_id=""):
+def render_worker(manifest_path, indices, directory, width, height, threads, report_path,
+                  run_id="", scratch_dir=None):
     import pymol2
 
     started = time.time()
@@ -668,8 +670,11 @@ def render_worker(manifest_path, indices, directory, width, height, threads, rep
             try:
                 cmd.delete("all")
                 signature = render_signature(manifest, row, width, height)
-                source_sha256 = _file_sha256(row["path"])
-                cmd.load(row["path"], "col_render", quiet=1)
+                with TemporaryDirectory(prefix="source-", dir=scratch_dir) as staging:
+                    snapshot = Path(staging) / Path(row["path"]).name
+                    with snapshot.open("wb") as staged:
+                        source_sha256 = _file_sha256(row["path"], copy_to=staged)
+                    cmd.load(str(snapshot), "col_render", quiet=1)
                 apply_pose(cmd, "col_render", row["matrix"],
                            expected_coordinates=row.get("coordinate_signature"), bounds=manifest["bounds"])
                 style_structure(cmd, "col_render", manifest["config"], render=True)
@@ -681,7 +686,8 @@ def render_worker(manifest_path, indices, directory, width, height, threads, rep
                 temporary.replace(destination)
                 results.append({"index": index, "image": str(destination), "ok": True,
                                 "signature": signature, "source_sha256": source_sha256,
-                                "image_sha256": image_sha256})
+                                "image_sha256": image_sha256,
+                                "source_snapshot": True})
             except Exception as exc:
                 traceback.print_exc()
                 results.append({"index": index, "ok": False, "error": str(exc)})
@@ -779,11 +785,13 @@ def render_signature(manifest, row, width, height):
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def _file_sha256(path):
+def _file_sha256(path, *, copy_to=None):
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
+            if copy_to is not None:
+                copy_to.write(chunk)
     return digest.hexdigest()
 
 
@@ -813,7 +821,8 @@ def current_images(manifest, directory, width=None, height=None, *, verify_conte
                 or previous_row.get("signature") != render_signature(manifest, row, width, height)):
             continue
         if verify_contents and not (
-            _file_matches(row["path"], previous_row.get("source_sha256"))
+            previous_row.get("source_snapshot") is True
+            and _file_matches(row["path"], previous_row.get("source_sha256"))
             and _file_matches(image, previous_row.get("image_sha256"))
         ):
             continue
@@ -862,7 +871,8 @@ def collect_workers(futures, run_id, retained, count, control, progress):
 def run_render_chunks(manifest_path, pending, directory, workers, size, python, retained, control, progress):
     width, height = size
     threads, run_id = max(1, (os.cpu_count() or 1) // workers), uuid4().hex
-    with ThreadPoolExecutor(max_workers=workers) as executor:
+    # Join or cancel workers before removing their staged sources.
+    with TemporaryDirectory(prefix="collections-render-") as scratch_dir, ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {}
         for worker in range(workers):
             indices = pending[worker::workers]
@@ -870,7 +880,8 @@ def run_render_chunks(manifest_path, pending, directory, workers, size, python, 
             arguments = [python or worker_python(), str(Path(__file__).resolve()), "render",
                          "--manifest", str(manifest_path), "--indices", ",".join(map(str, indices)),
                          "--directory", str(directory), "--width", str(width), "--height", str(height),
-                         "--threads", str(threads), "--report", str(report), "--run-id", run_id]
+                         "--threads", str(threads), "--report", str(report), "--run-id", run_id,
+                         "--scratch-dir", scratch_dir]
             future = executor.submit(run_process, arguments, directory / f"01_worker_{worker + 1:02d}.log",
                                      control)
             futures[future] = report, indices
@@ -957,6 +968,7 @@ def main():
     render.add_argument("--threads", type=int, required=True)
     render.add_argument("--report", required=True)
     render.add_argument("--run-id", default="")
+    render.add_argument("--scratch-dir")
     export = subparsers.add_parser("export")
     export.add_argument("--manifest", required=True)
     export.add_argument("--workers", type=int, default=2)
@@ -974,7 +986,8 @@ def main():
         revise_collection(args.manifest, read_json(args.request), progress)
     elif args.action == "render":
         render_worker(args.manifest, [int(x) for x in args.indices.split(",")],
-                      args.directory, args.width, args.height, args.threads, args.report, args.run_id)
+                      args.directory, args.width, args.height, args.threads, args.report,
+                      args.run_id, args.scratch_dir)
     else:
         result = export_collection(args.manifest, args.workers, args.width, args.height,
                                    retry_failed=args.retry_failed)
