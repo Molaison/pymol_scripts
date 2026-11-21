@@ -318,9 +318,9 @@ class CollectionActions:
         return {"workers": rendering.workers.value(), "width": rendering.width.value(),
                 "height": rendering.height.value(), "python": rendering.python.text().strip()}
 
-    def apply_pending(self, path, options, configuration, control):
+    def apply_pending(self, path, options, configuration, control, reapply=False):
         manifest = core.read_json(path)
-        if core.orientation_config(manifest["config"]) != configuration:
+        if reapply or core.orientation_config(manifest["config"]) != configuration:
             manifest = core.revise_external(path, {"action": "orient", "config": configuration},
                                             options["python"], control)
         manifest["config"].update({key: options[key] for key in ("workers", "width", "height")})
@@ -354,14 +354,14 @@ class CollectionActions:
             return path, result
         panel.task.start(work, panel.finished)
 
-    def refresh(self, exporting=False, retry=False):
+    def refresh(self, exporting=False, retry=False, reapply=False):
         panel = self.panel
         panel.require_manifest()
         path, options = panel.manifest_path, self.rendering_options()
         configuration = panel.rendering.configuration()
         panel.pending_path = path
         def work(control):
-            self.apply_pending(path, options, configuration, control)
+            self.apply_pending(path, options, configuration, control, reapply=reapply)
             preview_result = self.render(path, options, control, retry=exporting or retry)
             if exporting and not control.cancelled.is_set():
                 result = self.render(path, options, control, preview=False, retry=retry)
@@ -503,7 +503,7 @@ class CollectionDialog(QtWidgets.QDialog):
         self.add_buttons(settings_layout, (("生成 Collection", self.actions.generate),
                                            ("打开 Collection", self.open_manifest)))
         settings_layout.addWidget(self.rendering)
-        self.add_buttons(settings_layout, (("应用朝向并刷新预览", self.actions.refresh),
+        self.add_buttons(settings_layout, (("应用朝向并刷新预览", lambda: self.actions.refresh(reapply=True)),
                                            ("保存当前朝向", self.actions.capture)))
         self.add_buttons(settings_layout, (("批量导出 PNG", lambda: self.actions.refresh(exporting=True)),
                                            ("重试失败 / 未完成项", lambda: self.actions.refresh(exporting=True, retry=True))))
@@ -568,10 +568,11 @@ class CollectionDialog(QtWidgets.QDialog):
         manifest = self.manifest
         succeeded = sum(row["ok"] for row in export["results"])
         action = "已取消，后台进程已退出" if export.get("cancelled") else "已完成"
+        hint = " " + core.STALE_POSE if any(row.get("error") == core.STALE_POSE for row in export["results"]) else ""
         self.status.setText(f"{action}。样本 {len(manifest['samples'])} / {manifest['config']['count']}；"
                             f"无效 {len(manifest['invalid_structures'])}；"
                             f"未验证而暂不纳入 {len(manifest.get('unverified_candidates', []))}；"
-                            f"图像成功 {succeeded} / {len(export['results'])}，复用 {export.get('reused', 0)}。")
+                            f"图像成功 {succeeded} / {len(export['results'])}，复用 {export.get('reused', 0)}。{hint}")
 
     def open_manifest(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "打开 Collection", "", "Collection (*.json)")

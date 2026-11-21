@@ -298,6 +298,7 @@ class AnnotatorState:
     preload_interval_ms: int = 250
     background_decompress_gz: bool = True
     managed_objects: List[str] = field(default_factory=list)
+    object_name_overrides: Dict[int, str] = field(default_factory=dict)
     current_object: Optional[str] = None
     undo_history: List[dict] = field(default_factory=list)
     annotated_indices: set = field(default_factory=set)
@@ -318,6 +319,8 @@ if not hasattr(STATE, "undo_history"):
     STATE.undo_history = []
 if not hasattr(STATE, "annotated_indices"):
     STATE.annotated_indices = set()
+if not hasattr(STATE, "object_name_overrides"):
+    STATE.object_name_overrides = {}
 
 
 def _structure_dedupe_key(file_path: str) -> str:
@@ -393,7 +396,8 @@ def _object_name_for_index(path: str, index: int) -> str:
             base_lower = base_lower[: -len(ext)]
             break
     base_token = _sanitize_token(base, "structure")
-    return f"{OBJECT_PREFIX}_{index + 1:05d}_{base_token}"
+    name = f"{OBJECT_PREFIX}_{index + 1:05d}_{base_token}"
+    return STATE.object_name_overrides.get(index, name)
 
 
 def _object_exists(object_name: str) -> bool:
@@ -633,7 +637,12 @@ def _ensure_loaded(index: int, focus: bool, allow_gz_fallback: bool = True) -> O
     path = STATE.files[index]
     obj_name = _object_name_for_index(path, index)
 
-    if not _object_exists(obj_name):
+    exists = _object_exists(obj_name)
+    if exists and obj_name not in STATE.managed_objects:
+        obj_name = cmd.get_unused_name(obj_name)
+        STATE.object_name_overrides[index] = obj_name
+        exists = False
+    if not exists:
         load_path = path
         if _is_gz_path(path) and STATE.background_decompress_gz:
             requested = _request_decompressed_path(index)
@@ -719,7 +728,7 @@ def _kick_preload() -> None:
     pending = []
     for idx in desired:
         obj = _object_name_for_index(STATE.files[idx], idx)
-        if not _object_exists(obj):
+        if obj not in STATE.managed_objects or not _object_exists(obj):
             pending.append(idx)
 
     _preload_generation += 1
@@ -792,22 +801,26 @@ def sa_load_dir(path: str = ".", pattern: str = STRUCTURE_PATTERN) -> None:
         pattern: Regex to filter files.
     """
     try:
-        STATE.dataset_dir = path
-        STATE.pattern = pattern
-        _reset_bg_cache()
         label_key = normalize_label_key(STATE.label_name) if STATE.skip_annotated else None
-        STATE.files = _list_structure_files(
-            path, pattern, STATE.prefer_gz,
+        files = _list_structure_files(
+            os.path.abspath(path), pattern, STATE.prefer_gz,
             skip_annotated=STATE.skip_annotated, label_key=label_key
         )
+        if _preload_panel_timer is not None:
+            _preload_panel_timer.stop()
+        _preload_queue.clear()
+        _reset_bg_cache()
+        _delete_managed_objects(False)
+        STATE.object_name_overrides.clear()
+        STATE.dataset_dir, STATE.pattern, STATE.files = path, pattern, files
         STATE.index = 0
-        STATE.managed_objects.clear()
-        STATE.current_object = None
         STATE.undo_history.clear()
+        STATE.annotated_indices.clear()
         if not STATE.files:
             print(f"Structure Annotator: no files matched in {path}")
             return
-        _rescan_annotated_indices()
+        if not STATE.skip_annotated:
+            _rescan_annotated_indices()
         _load_current_structure()
         annotated = len(STATE.annotated_indices)
         print(

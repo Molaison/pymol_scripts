@@ -21,6 +21,7 @@ from uuid import uuid4
 
 ORIENTATION_KEYS = ("target", "binder", "orientation", "reference",
                     "frame_selection", "symmetry_axis")
+STALE_POSE = "源结构坐标已变化，请重新应用朝向后再导出。"
 
 
 def orientation_config(config):
@@ -311,15 +312,24 @@ def candidate_pose(cmd, obj, config):
 
 
 def check_diversity(cmd, row, config, selected):
-    distances = [structural_distance(cmd, "col_candidate", f"col_keep_{index}", config)
-                 for index in range(len(selected))]
-    comparable = [distance for distance in distances if distance is not None]
-    row["nearest_rmsd"] = min(comparable) if comparable else None
-    row["incomparable_with_previous"] = sum(distance is None for distance in distances)
-    row["diversity_status"] = "unverified" if row["incomparable_with_previous"] else "verified"
-    if comparable and min(comparable) < float(config.get("rmsd", 2)):
+    threshold = float(config.get("rmsd", 2))
+    shape = config.get("diversity", "shape") == "shape"
+    comparable, incomparable = [], 0
+    for index in range(len(selected)):
+        distance = structural_distance(cmd, "col_candidate", f"col_keep_{index}", config)
+        if distance is None:
+            incomparable += 1
+        elif shape and distance < threshold:
+            return "duplicate"
+        else:
+            comparable.append(distance)
+    nearest = min(comparable) if comparable else None
+    row["nearest_rmsd"] = nearest
+    row["incomparable_with_previous"] = incomparable
+    row["diversity_status"] = "unverified" if incomparable else "verified"
+    if nearest is not None and nearest < threshold:
         return "duplicate"
-    if row["incomparable_with_previous"] and not config.get("allow_unverified", False):
+    if incomparable and not config.get("allow_unverified", False):
         return "unverified"
     return "accepted"
 
@@ -391,10 +401,22 @@ def canonical_pose(cmd, obj, config):
     return matrix
 
 
-def apply_pose(cmd, obj, matrix):
+def coordinate_signature(coords):
+    return hashlib.sha256(np.asarray(coords, dtype="<f4").tobytes()).hexdigest()
+
+
+def apply_pose(cmd, obj, matrix, *, expected_coordinates=None, bounds=None):
     matrix = np.asarray(matrix)
     coords = cmd.get_coords(f"model {obj}", 1)
-    cmd.load_coords(coords @ matrix[:3, :3].T + matrix[:3, 3], f"model {obj}", 1)
+    if expected_coordinates is not None and coordinate_signature(coords) != expected_coordinates:
+        raise ValueError(STALE_POSE)
+    coords = coords @ matrix[:3, :3].T + matrix[:3, 3]
+    if bounds is not None and expected_coordinates is None:
+        # Older manifests have only the collection bounds to check a stored pose against.
+        low, high = np.asarray(bounds)
+        if np.any(coords.min(axis=0) < low - 0.001) or np.any(coords.max(axis=0) > high + 0.001):
+            raise ValueError(STALE_POSE)
+    cmd.load_coords(coords, f"model {obj}", 1)
 
 
 def common_view(low, high, width, height, rotation=None):
@@ -426,6 +448,7 @@ def update_bounds(cmd, samples):
     low, high = np.full(3, np.inf), np.full(3, -np.inf)
     for index, row in enumerate(samples):
         coords = cmd.get_coords(f"model col_keep_{index}", 1)
+        row["coordinate_signature"] = coordinate_signature(coords)
         matrix = np.asarray(row["matrix"])
         coords = coords @ matrix[:3, :3].T + matrix[:3, 3]
         low, high = np.minimum(low, coords.min(0)), np.maximum(high, coords.max(0))
@@ -547,8 +570,10 @@ def revise_collection(manifest_path, request, progress=None):
             manifest["samples"][index]["pinned"] = pinned
     else:
         if action == "orient":
+            previous_orientation = orientation_config(manifest["config"])
             manifest["config"].update(request["config"])
-            manifest.pop("view", None)
+            if orientation_config(manifest["config"]) != previous_orientation:
+                manifest.pop("view", None)
         elif action == "remove":
             removed = [row for index, row in enumerate(manifest["samples"]) if index in indices]
             manifest["samples"] = [row for index, row in enumerate(manifest["samples"]) if index not in indices]
@@ -603,8 +628,10 @@ def render_worker(manifest_path, indices, directory, width, height, threads, rep
             temporary = destination.with_name(destination.stem + ".part.png")
             try:
                 cmd.delete("all")
+                signature = render_signature(manifest, row, width, height)
                 cmd.load(row["path"], "col_render", quiet=1)
-                apply_pose(cmd, "col_render", row["matrix"])
+                apply_pose(cmd, "col_render", row["matrix"],
+                           expected_coordinates=row.get("coordinate_signature"), bounds=manifest["bounds"])
                 style_structure(cmd, "col_render", manifest["config"], render=True)
                 cmd.set_view(view)
                 cmd.png(str(temporary), width=width, height=height, dpi=300, ray=1, quiet=1)
@@ -612,7 +639,7 @@ def render_worker(manifest_path, indices, directory, width, height, threads, rep
                     raise RuntimeError(f"PyMOL 未写出图像: {destination}")
                 temporary.replace(destination)
                 results.append({"index": index, "image": str(destination), "ok": True,
-                                "signature": render_signature(manifest, row, width, height)})
+                                "signature": signature})
             except Exception as exc:
                 traceback.print_exc()
                 results.append({"index": index, "ok": False, "error": str(exc)})
@@ -704,6 +731,7 @@ def render_signature(manifest, row, width, height):
     path = Path(row["path"])
     stat = path.stat() if path.is_file() else None
     identity = [row["path"], [stat.st_size, stat.st_mtime_ns] if stat else None,
+                row.get("coordinate_signature"),
                 row["matrix"], collection_view(manifest, width, height), width, height,
                 manifest["config"].get("target", "chain A"), manifest["config"].get("binder", "chain B")]
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()
