@@ -705,9 +705,15 @@ def candidate_pose(cmd, obj, config):
     for expression in required:
         if cmd.count_atoms(selection(obj, expression, True)) < 3:
             raise ValueError(f"选择中少于 3 个 CA 原子: {expression}")
-    if mode in ("target", "binder") and "col_reference" not in cmd.get_names("objects"):
-        cmd.create("col_reference", obj, source_state=1, target_state=1)
-    return canonical_pose(cmd, obj, config)
+    needs_reference = mode in ("target", "binder") and "col_reference" not in cmd.get_names("objects")
+    try:
+        if needs_reference:
+            cmd.create("col_reference", obj, source_state=1, target_state=1)
+        return canonical_pose(cmd, obj, config)
+    except Exception:
+        if needs_reference:
+            cmd.delete("col_reference")
+        raise
 
 
 def check_diversity(cmd, row, config, selected):

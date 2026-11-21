@@ -127,6 +127,32 @@ class CollectionsSampling(unittest.TestCase):
                                         expected_coordinates=saved)
                     self.assertEqual(core.coordinate_signature(cmd.get_coords("source", 1)), saved)
 
+    def test_failed_implicit_reference_does_not_exclude_valid_samples(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            valid = root / "valid.pdb"
+            shutil.copyfile(FIXTURE, valid)
+            broken = root / "bad_residue_numbering.pdb"
+            broken.write_text("".join(
+                line[:22] + "   1" + line[26:]
+                for line in FIXTURE.read_text(encoding="ascii").splitlines(keepends=True)
+                if line.startswith("ATOM") and line[12:16].strip() == "CA"
+            ) + "END\n", encoding="ascii")
+            scores = root / "scores.json"
+            scores.write_text(json.dumps([
+                {"path": broken.name, "quality": 0}, {"path": valid.name, "quality": 1},
+            ]), encoding="utf-8")
+            for orientation in ("target", "binder"):
+                with self.subTest(orientation=orientation):
+                    config = {"scores": str(scores), "metrics": [{"name": "quality", "bins": 2}],
+                              "seed": 0, "count": 1, "rmsd": 0.2, "coverage": 1.0,
+                              "orientation": orientation, "target": "all", "binder": "all"}
+                    collection = core.create_collection(config, root / orientation)
+                    self.assertEqual([sample["path"] for sample in collection["samples"]], [str(valid)])
+                    self.assertEqual(collection["reference"], str(valid))
+                    self.assertEqual([entry["path"] for entry in collection["invalid_structures"]],
+                                     [str(broken)])
+
     def test_nonfinite_legacy_bounds_do_not_reach_the_camera(self):
         row = {"path": str(FIXTURE), "matrix": [], "image": "sample.png"}
         legacy = {"bounds": [[float("nan"), -14, -12], [float("nan"), 14, 12]],
