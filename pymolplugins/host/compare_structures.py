@@ -6,9 +6,14 @@ from uuid import uuid4
 from pymol import cmd
 from pymol.Qt import QtCore, QtGui, QtWidgets
 
-from pymolplugins.annotation.comparison import COLORS, METHODS, Overlay, _align_copy, _style_overlay
+from pymolplugins.annotation.compare_scene import CompareScene
+from pymolplugins.annotation.comparison import (
+    COLORS, METHODS, ComparisonAlignment, Overlay, _style_overlay, bake_comparison_pose,
+)
 from pymolplugins.annotation.panel_style import apply_style
 from pymolplugins.annotation.review_view_presets import loaded_molecules
+from pymolplugins.annotation.reference_track import molecule_identity
+from pymolplugins.core.pymol_display import display_updates
 
 
 _dialog = None
@@ -63,11 +68,16 @@ class AlignmentRange(QtWidgets.QWidget):
 class CompareStructuresDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("PymolPlugins · Align loaded objects")
+        self.setWindowTitle("PymolPlugins · Default mode")
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
         self.resize(610, 485)
         self.overlays = {}
         self.original_visibility = {}
+        self.reference_source = ""
+        self.alignment = None
+        self.rmsds = {}
+        self.failures = {}
+        self.scene = CompareScene(self, self._scene_changed, self.clear)
         self._build()
         self.finished.connect(lambda _result: self.clear())
         self.refresh_objects()
@@ -104,7 +114,7 @@ class CompareStructuresDialog(QtWidgets.QDialog):
             inner.addWidget(controls)
             sides.addWidget(section, 1)
         layout.addLayout(sides)
-        scope = QtWidgets.QLabel("Comparison is temporary. Closing this window clears the overlays.")
+        scope = QtWidgets.QLabel("Overlay or Align starts Compare mode. Newly loaded objects join the comparison.")
         scope.setProperty("role", "muted")
         scope.setWordWrap(True)
         layout.addWidget(scope)
@@ -113,7 +123,7 @@ class CompareStructuresDialog(QtWidgets.QDialog):
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         actions = QtWidgets.QHBoxLayout()
-        self.clear_button = QtWidgets.QPushButton("Clear comparison")
+        self.clear_button = QtWidgets.QPushButton("Return to Default mode")
         self.overlay_button = QtWidgets.QPushButton("Overlay")
         self.align_button = QtWidgets.QPushButton("Align")
         self.align_button.setProperty("role", "primary")
@@ -134,7 +144,7 @@ class CompareStructuresDialog(QtWidgets.QDialog):
                 if self.objects.item(i).checkState() == QtCore.Qt.Checked]
 
     def refresh_objects(self):
-        previous = set(self.selected())
+        previous = set(self.selected()) | set(self.overlays)
         self.objects.blockSignals(True)
         self.objects.clear()
         for name in loaded_molecules(cmd):
@@ -158,7 +168,7 @@ class CompareStructuresDialog(QtWidgets.QDialog):
         self._update_ranges()
         self.overlay_button.setEnabled(len(names) >= 2)
         self.align_button.setEnabled(len(names) >= 2)
-        self.clear_button.setEnabled(bool(self.overlays))
+        self.clear_button.setEnabled(self.scene.active)
 
     def _update_ranges(self):
         reference = self.reference.currentText()
@@ -185,80 +195,156 @@ class CompareStructuresDialog(QtWidgets.QDialog):
         sources = self.selected()
         if len(sources) < 2:
             return
-        try:
-            staged, notes = _stage_comparison(sources, self.reference.currentText(), self.method.currentData(),
-                                              self.mobile_range, self.reference_range, align)
-        except Exception as error:
-            self.status.setText(f"Comparison skipped · {error}")
+        was_active = self.scene.active
+        self.scene.start()
+        reference = self.reference.currentText()
+        with display_updates(cmd):
+            try:
+                mobile = self.mobile_range.selection() if align else ""
+                target = self.reference_range.selection() if align else ""
+                method = self.method.currentData()
+                staged, alignment, notes = _stage_comparison(sources, reference, method, mobile, target, align)
+            except Exception as error:
+                if not was_active:
+                    self.scene.stop()
+                self.status.setText(f"Comparison skipped · {error}")
+                return
+            self._clear_overlays()
+            self.reference_source, self.alignment, self.rmsds = reference, alignment, notes
+            self._show_overlays(staged)
+            cmd.zoom(" or ".join(f"%{overlay.name}" for overlay in staged.values()), 4, animate=0)
+        self.setWindowTitle("PymolPlugins · Compare mode")
+        self._update_status()
+
+    def _show_overlays(self, overlays):
+        if not overlays:
             return
-        self.clear()
-        self.overlays = staged
         visible = cmd.get_vis()
-        for source, overlay in staged.items():
-            self.original_visibility[source] = bool(visible[source][0])
+        for source, overlay in overlays.items():
+            self.original_visibility[source] = bool(visible[source][0]), molecule_identity(cmd, source)
+            self.overlays[source] = overlay
             cmd.disable(source)
             cmd.enable(overlay.name)
-        cmd.zoom(" or ".join(f"%{overlay.name}" for overlay in staged.values()), 4, animate=0)
-        if align:
-            worst_rmsd = max(rmsd for _source, rmsd in notes)
-            self.status.setText(
-                f"Aligned {len(notes)} to {self.reference.currentText()} · max RMSD {worst_rmsd:.3f} Å"
-            )
+
+    def _scene_changed(self, added, removed):
+        lost = [source for source, overlay in self.overlays.items()
+                if source in removed or overlay.name in removed]
+        added = [name for name in added if name not in self.overlays or name in lost]
+        if self.reference_source in lost:
+            self.clear()
+            self.refresh_objects()
+            self.status.setText("Reference removed · Returned to Default mode")
+            return
+        forgotten = self.failures.keys() & removed
+        if not added and not lost and not forgotten:
+            return
+        for source in forgotten:
+            self.failures.pop(source)
+        with display_updates(cmd):
+            for source in lost:
+                self._remove_overlay(source)
+            self._add_overlays(added)
+        self.refresh_objects()
+        self._update_status()
+
+    def _add_overlays(self, sources):
+        new = {}
+        used = {overlay.color for overlay in self.overlays.values()}
+        for source in sources:
+            color = next((color for color in COLORS if color not in used),
+                         COLORS[(len(self.overlays) + len(new)) % len(COLORS)])
+            overlay = None
+            try:
+                overlay = _stage_overlay(source, color, bool(self.alignment))
+                if self.alignment:
+                    self.rmsds[source] = self.alignment.apply(overlay)
+                    cmd.disable(overlay.name)
+            except Exception as error:
+                if overlay is not None:
+                    cmd.delete(overlay.name)
+                self.failures[source] = str(error)
+            else:
+                new[source] = overlay
+                used.add(color)
+                self.failures.pop(source, None)
+        self._show_overlays(new)
+
+    def _update_status(self):
+        if self.alignment:
+            worst = max(self.rmsds.values(), default=0)
+            message = f"Aligned {len(self.rmsds)} to {self.reference_source} · max RMSD {worst:.3f} Å"
         else:
-            self.status.setText(f"Showing {len(staged)} structures in their current frames.")
-        self.status.setToolTip("\n".join(f"{source} · {rmsd:.3f} Å RMSD" for source, rmsd in notes))
+            message = f"Showing {len(self.overlays)} structures in their current frames."
+        if self.failures:
+            message += f" · {len(self.failures)} skipped"
+        self.status.setText(message)
+        details = [f"{source} · {rmsd:.3f} Å RMSD" for source, rmsd in self.rmsds.items()]
+        details.extend(f"{source} · {error}" for source, error in self.failures.items())
+        self.status.setToolTip("\n".join(details))
         self._decorate()
         self.clear_button.setEnabled(True)
 
+    def _remove_overlay(self, source):
+        cmd.delete(self.overlays.pop(source).name)
+        enabled, identity = self.original_visibility.pop(source)
+        if source in cmd.get_names("objects") and molecule_identity(cmd, source) == identity:
+            (cmd.enable if enabled else cmd.disable)(source)
+        self.rmsds.pop(source, None)
+
+    def _clear_overlays(self):
+        for source in tuple(self.overlays):
+            self._remove_overlay(source)
+        self.failures.clear()
+
     def clear(self):
-        for overlay in self.overlays.values():
-            cmd.delete(overlay.name)
-        names = set(cmd.get_names("objects"))
-        for name, enabled in self.original_visibility.items():
-            if name in names:
-                (cmd.enable if enabled else cmd.disable)(name)
-        self.overlays.clear()
-        self.original_visibility.clear()
+        self.scene.stop()
+        with display_updates(cmd):
+            self._clear_overlays()
+        self.alignment, self.reference_source = None, ""
+        self.setWindowTitle("PymolPlugins · Default mode")
         self.status.setText("Check at least two objects.")
         self.status.setToolTip("")
         self._decorate()
         self.clear_button.setEnabled(False)
 
 
-def _stage_comparison(sources, reference, method, mobile_range, reference_range, align):
-    staged, notes = {}, []
+def _stage_overlay(source, color, align):
+    name = f"sa_compare_{uuid4().hex[:12]}"
+    try:
+        cmd.create(name, f"%{source}", source_state=cmd.get_object_state(source), target_state=1, zoom=0)
+        if not cmd.count_atoms(f"%{name}"):
+            raise ValueError(f"{source} has no atoms in the displayed state.")
+        cmd.disable(name)
+        if align:
+            bake_comparison_pose(name)
+        _style_overlay(name, color)
+    except Exception:
+        cmd.delete(name)
+        raise
+    return Overlay(source, color, name)
+
+
+def _stage_comparison(sources, reference, method, mobile_filter, target_filter, align):
+    staged, notes = {}, {}
+    alignment = None
     try:
         for index, source in enumerate(sources):
-            name = f"sa_compare_{uuid4().hex[:12]}"
-            overlay = staged[source] = Overlay(source, COLORS[index % len(COLORS)], name)
-            cmd.create(name, f"%{source}", source_state=cmd.get_object_state(source), target_state=1, zoom=0)
-            if not cmd.count_atoms(f"%{name}"):
-                raise ValueError(f"{source} has no atoms in the displayed state.")
-            cmd.disable(name)
-            if align:
-                # A moved object can carry a TTT or state matrix into the copy.
-                # Fit in the displayed frame without applying that matrix twice.
-                coords = cmd.get_coords(f"%{name}", state=1)
-                cmd.matrix_reset(name, state=1, mode=1)
-                cmd.matrix_reset(name, state=1, mode=2)
-                cmd.load_coords(coords, f"%{name}", state=1)
-            _style_overlay(name, overlay.color)
+            staged[source] = _stage_overlay(source, COLORS[index % len(COLORS)], align)
         if align:
-            mobile_filter, target_filter = mobile_range.selection(), reference_range.selection()
+            alignment = ComparisonAlignment(staged[reference].name, method, mobile_filter, target_filter)
             for source, overlay in staged.items():
                 if source == reference:
                     continue
                 try:
-                    rmsd = _align_copy(overlay, staged[reference].name, method, mobile_filter, target_filter)
+                    notes[source] = alignment.apply(overlay)
                 except Exception as error:
                     raise ValueError(f"{source} · {error}") from error
                 cmd.disable(overlay.name)
-                notes.append((source, rmsd))
     except Exception:
         for overlay in staged.values():
             cmd.delete(overlay.name)
         raise
-    return staged, notes
+    return staged, alignment, notes
 
 
 def show_compare():

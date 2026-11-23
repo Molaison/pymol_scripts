@@ -58,12 +58,19 @@ def _custom_connection(connection, require_configured):
 
 
 def _codex_connection(require_configured):
-    import tomllib
+    try:
+        import tomllib as toml
+    except ModuleNotFoundError:
+        try:
+            import tomli as toml
+        except ModuleNotFoundError as exc:
+            raise ValueError("Reading Codex configuration requires tomli in this PyMOL Python. "
+                             "Install tomli or select a custom API connection.") from exc
 
     home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
     try:
-        config = tomllib.loads((home / "config.toml").read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+        config = toml.loads((home / "config.toml").read_text(encoding="utf-8"))
+    except (OSError, toml.TOMLDecodeError) as exc:
         if not require_configured:
             return {"provider": "", "model": "", "api": "responses",
                     "base_url": "", "api_key": "", "configured": False}

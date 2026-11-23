@@ -9,7 +9,9 @@ from pymol import cmd
 from pymol.Qt import QtCore, QtGui, QtWidgets
 
 from pymolplugins.core.pymol_display import display_updates
+from .compare_scene import CompareScene
 from .panel_style import ElidedLabel
+from .reference_track import molecule_identity, preserve_alignment_selections
 
 
 COLORS = ("marine", "salmon", "forest", "purple", "orange", "teal", "violet", "sand")
@@ -28,6 +30,17 @@ class Overlay:
     name: str = ""
     future: object = None
     cancel: object = None
+
+
+@dataclass(frozen=True)
+class ComparisonAlignment:
+    reference: str
+    method: str
+    mobile_filter: str
+    target_filter: str
+
+    def apply(self, overlay):
+        return _align_copy(overlay, self.reference, self.method, self.mobile_filter, self.target_filter)
 
 
 class ComparisonBar(QtWidgets.QWidget):
@@ -51,7 +64,7 @@ class ComparisonBar(QtWidgets.QWidget):
         self.frame = QtWidgets.QPushButton("Frame all")
         self.align = QtWidgets.QPushButton("Align…")
         self.clear = QtWidgets.QPushButton("Clear")
-        self.done = QtWidgets.QPushButton("Done")
+        self.done = QtWidgets.QPushButton("Default mode")
         self.done.setToolTip("Return to review tools")
         for button in (self.pin, self.remove, self.frame, self.align, self.clear, self.done):
             button.setProperty("role", "compact")
@@ -70,7 +83,7 @@ class ComparisonBar(QtWidgets.QWidget):
         self.pocket_counts = QtWidgets.QPushButton("Counts…")
         self.pocket_counts.setProperty("role", "compact")
         self.pocket_counts.setToolTip("Residue counts, interaction changes, and RMSD tolerances")
-        self.pocket_done = QtWidgets.QPushButton("Done")
+        self.pocket_done = QtWidgets.QPushButton("Default mode")
         self.pocket_done.setProperty("role", "compact")
         pocket.addWidget(self.pocket_status, 1)
         pocket.addWidget(self.pocket_counts)
@@ -119,20 +132,34 @@ def _style_overlay(name, color):
     cmd.set("cartoon_transparency", 0.45, name)
 
 
+def bake_comparison_pose(name):
+    """Preserve the displayed pose when removing inherited object matrices."""
+    selection = f"%{name}"
+    coords = cmd.get_coords(selection, state=1)
+    cmd.matrix_reset(name, state=1, mode=1)
+    cmd.matrix_reset(name, state=1, mode=2)
+    cmd.load_coords(coords, selection, state=1)
+
+
 def _align_copy(overlay, target, method, mobile_filter, target_filter):
     token = uuid4().hex[:12]
     trial = f"sa_compare_{token}"
     mobile_mask = f"sa_compare_mobile_{token}"
     target_mask = f"sa_compare_reference_{token}"
+    target_copy = f"sa_compare_target_{token}"
     pairs = f"sa_compare_pairs_{token}"
     fitted = False
     try:
-        cmd.create(trial, f"%{overlay.name}", zoom=0)
+        cmd.create(trial, f"%{overlay.name}", source_state=1, target_state=1, zoom=0)
+        bake_comparison_pose(trial)
         cmd.disable(trial)
-        cmd.select(mobile_mask, mobile_filter)
-        cmd.select(target_mask, target_filter)
+        cmd.select(mobile_mask, mobile_filter, state=1)
+        cmd.select(target_mask, f"{molecular_scope(target)} and ({target_filter})", state=1)
+        cmd.create(target_copy, f"%{target_mask}", source_state=1, target_state=1, zoom=0)
+        cmd.disable(target_copy)
+        bake_comparison_pose(target_copy)
         mobile = f"%{trial} and %{mobile_mask}"
-        reference = f"{molecular_scope(target)} and %{target_mask}"
+        reference = f"%{target_copy}"
         counts = (cmd.count_atoms(mobile), cmd.count_atoms(reference))
         if min(counts) < 3:
             raise ValueError("Each selection needs at least three atoms.")
@@ -141,11 +168,13 @@ def _align_copy(overlay, target, method, mobile_filter, target_filter):
                 raise ValueError("Atom order requires equal selection sizes.")
             rmsd = cmd.pair_fit(mobile, reference, quiet=1)
         elif method == "fit":
-            rmsd = cmd.fit(mobile, reference, matchmaker=0, cycles=0, object=pairs, quiet=1)
+            rmsd = cmd.fit(mobile, reference, mobile_state=1, target_state=1,
+                           matchmaker=0, cycles=0, object=pairs, quiet=1)
             if rmsd >= 0 and len(cmd.get_raw_alignment(pairs)) < 3:
                 raise ValueError("Fewer than three atom identifiers matched.")
         else:
-            rmsd, matched, *_ = getattr(cmd, method)(mobile, reference, quiet=1)
+            with preserve_alignment_selections(cmd):
+                rmsd, matched, *_ = getattr(cmd, method)(mobile, reference, mobile_state=1, target_state=1, quiet=1)
             if matched < 3:
                 raise ValueError("Fewer than three atoms aligned.")
         if not isfinite(rmsd) or rmsd < 0:
@@ -155,6 +184,7 @@ def _align_copy(overlay, target, method, mobile_filter, target_filter):
     finally:
         cmd.delete(mobile_mask)
         cmd.delete(target_mask)
+        cmd.delete(target_copy)
         cmd.delete(pairs)
         if not fitted:
             cmd.delete(trial)
@@ -204,8 +234,13 @@ class ReviewComparison:
         self.bar = panel.compare_bar
         self.items = {}
         self.source = None
+        self.alignment = None
+        self.scene_sources = {}
+        self.scene = CompareScene(panel, self._scene_changed, self.clear)
         self.pocket = PocketComparison(panel, owner, molecular_scope)
         panel.pocket_summary_action.triggered.connect(self._pocket_selected)
+        panel.pocket_reference_action.triggered.connect(self._pocket_reference)
+        panel.protein_interface_action.triggered.connect(lambda: self._pocket_selected(choose_proteins=True))
         self.timer = QtCore.QTimer(panel)
         self.timer.setInterval(35)
         self.timer.timeout.connect(self._finish_loads)
@@ -224,8 +259,12 @@ class ReviewComparison:
         source = (state.source_mode, state.csv_path, state.dataset_dir,
                   state.scene_parent, id(state.row_annotation_store))
         if self.source != source:
-            self.clear()
+            if self.source is not None:
+                self.clear()
             self.source = source
+        if self.pocket.track.active:
+            self.pocket.track.follow()
+            return
         if self.pocket.request is not None and self.pocket.identity() != self.pocket.request.identity:
             self.close_pocket()
         if self.pocket.created:
@@ -245,14 +284,71 @@ class ReviewComparison:
 
     def _compare_opened(self, active):
         if not active:
-            self.close_pocket()
-        elif not self.bar.pocket_mode:
-            self.add_entries(self.panel.review.targets())
+            track = self.pocket.track
+            restore = track.active and track.dataset == track.dataset_key()
+            self.clear()
+            if restore and not self.panel._closed and self.owner.STATE.current_object:
+                self.owner._load_current_structure()
+        else:
+            self.scene.start()
+            if not self.bar.pocket_mode:
+                self.add_entries(self.panel.review.targets())
+            self._refresh()
 
-    def _pocket_selected(self):
+    def _scene_changed(self, added, removed):
+        track = self.pocket.track
+        if track.active:
+            if track.reference in removed:
+                self.clear()
+            elif track.source_objects & removed:
+                track.identity = None
+                track.follow()
+            return
+        state = self.owner.STATE
+        added = [name for name in added if name != state.current_object and name not in state.managed_objects]
+        if self.bar.pocket_mode:
+            if (not self.pocket.request or self.pocket.request.identity[2] in removed
+                    or self.pocket.request.captured_sources & removed):
+                self.clear()
+            else:
+                self.pocket.add_scene_objects(added)
+            return
+        if self.alignment and self.alignment.reference in removed:
+            self.clear()
+            return
+        lost = [key for key, (name, _, _) in self.scene_sources.items()
+                if name in removed or self.items[key].name in removed]
+        if not added and not lost:
+            return
+        results = []
+        with display_updates(cmd):
+            for key in lost:
+                self.remove(key, refresh=False)
+            for name in added:
+                try:
+                    rmsd = self._add_scene_object(name)
+                    results.append(name if rmsd is None else f"{name} · {rmsd:.3f} Å RMSD")
+                except Exception as error:
+                    results.append(f"Could not add {name} · {error}")
+        self._refresh()
+        if results:
+            self._status(results[-1], "\n".join(results))
+
+    def _add_scene_object(self, name):
+        key = f"scene:{name}"
+        item = self._new_overlay(name)
+        visible = name in cmd.get_names("objects", enabled_only=1)
+        rmsd = self._load(item, selection=molecular_scope(name), state=cmd.get_object_state(name))
+        self.items[key] = item
+        self.scene_sources[key] = name, visible, molecule_identity(cmd, name)
+        cmd.disable(name)
+        return rmsd
+
+    def _pocket_selected(self, *, choose_proteins=False):
         entries = tuple(self.panel._entries_by_id[key] for key in self.panel.review.targets())
         try:
-            self.pocket.start(entries)
+            if not self.pocket.start(entries, choose_proteins=choose_proteins):
+                return
         except Exception as error:
             self.close_pocket()
             self.panel._show_error(str(error))
@@ -260,11 +356,20 @@ class ReviewComparison:
         self.bar.set_pocket_mode(True)
         self.panel.compare_toggle.setChecked(True)
 
-    def close_pocket(self):
-        if self.bar.pocket_mode:
-            self.pocket.clear()
-            self.bar.set_pocket_mode(False)
-            self.panel.compare_toggle.setChecked(False)
+    def _pocket_reference(self):
+        self.pocket.clear()
+        try:
+            self.pocket.track.start()
+        except Exception as error:
+            self.close_pocket()
+            self.panel._show_error(str(error))
+            return
+        self.bar.set_pocket_mode(True)
+        self.panel.compare_toggle.setChecked(True)
+
+    def close_pocket(self, *, keep_reference=False):
+        if self.bar.pocket_mode and not (keep_reference and self.pocket.track.active):
+            self.clear()
 
     def _pin_selection(self):
         self.add_entries(self.panel.review.targets() or (self.owner.STATE.current_entry_id(),))
@@ -272,7 +377,7 @@ class ReviewComparison:
     def add_entries(self, entry_ids):
         self.sync()
         state = self.owner.STATE
-        entries = [self.panel._entries_by_id[key] for key in entry_ids
+        entries = [self.panel._entries_by_id[key] for key in dict.fromkeys(entry_ids)
                    if key in self.panel._entry_id_to_active_index and key not in self.items]
         if not entries or not state.current_object:
             return
@@ -286,9 +391,7 @@ class ReviewComparison:
 
     def _add_entry(self, entry, state):
         entry_id = entry.id
-        used = {item.color for item in self.items.values()}
-        color = next((value for value in COLORS if value not in used), COLORS[len(self.items) % len(COLORS)])
-        item = Overlay(entry.display_name, color)
+        item = self._new_overlay(entry.display_name)
         self.items[entry_id] = item
         try:
             if entry_id == state.current_entry_id() or state.source_mode == "groups":
@@ -303,20 +406,30 @@ class ReviewComparison:
         except Exception as error:
             self._load_failed(entry_id, item, error)
 
-    def _load(self, item, *, selection="", path=""):
+    def _new_overlay(self, label):
+        used = {item.color for item in self.items.values()}
+        color = next((value for value in COLORS if value not in used), COLORS[len(self.items) % len(COLORS)])
+        return Overlay(label, color)
+
+    def _load(self, item, *, selection="", path="", state=1):
         name = f"sa_compare_{uuid4().hex[:12]}"
+        item.name = name
         try:
             with display_updates(cmd):
                 if selection:
-                    cmd.create(name, selection, zoom=0)
+                    cmd.create(name, selection, source_state=state, target_state=1 if state else 0, zoom=0)
                 else:
                     cmd.load(self.owner._long_path(path), name, quiet=1, zoom=0)
                 molecular_scope(name)
                 _style_overlay(name, item.color)
+                if self.alignment:
+                    if state:
+                        bake_comparison_pose(name)
+                    return self.alignment.apply(item)
         except Exception:
-            cmd.delete(name)
+            cmd.delete(item.name)
+            item.name = ""
             raise
-        item.name = name
 
     def _load_failed(self, entry_id, item, error):
         self.items.pop(entry_id, None)
@@ -342,6 +455,10 @@ class ReviewComparison:
             self.sync()
 
     def remove(self, entry_id, *, refresh=True):
+        item = self.items.get(entry_id)
+        if item is not None and self.alignment and self.alignment.reference == item.name:
+            self.clear()
+            return
         item = self.items.pop(entry_id, None)
         if item is not None:
             if item.future is not None:
@@ -349,16 +466,27 @@ class ReviewComparison:
                 item.future.cancel()
             if item.name:
                 cmd.delete(item.name)
+        source = self.scene_sources.pop(entry_id, None)
+        if (source is not None and source[0] in cmd.get_names("objects")
+                and molecule_identity(cmd, source[0]) == source[2]):
+            (cmd.enable if source[1] else cmd.disable)(source[0])
         if refresh:
             self._refresh()
             if not self.items:
                 self._hint()
 
     def clear(self):
-        self.close_pocket()
+        if self.panel.compare_toggle.isChecked():
+            self.panel.compare_toggle.setChecked(False)
+            return
+        self.scene.stop()
         self.timer.stop()
-        for entry_id in tuple(self.items):
-            self.remove(entry_id, refresh=False)
+        self.alignment = None
+        with display_updates(cmd):
+            self.pocket.clear()
+            self.bar.set_pocket_mode(False)
+            for entry_id in tuple(self.items):
+                self.remove(entry_id, refresh=False)
         self._refresh()
         self._hint()
 
@@ -372,7 +500,7 @@ class ReviewComparison:
     def _refresh(self):
         current = self.owner.STATE.current_entry_id()
         self.panel._dataset_model.set_comparison_icons(self.bar.set_items(self.items, current))
-        self.panel.compare_toggle.setText(f"Compare ({len(self.items)})" if self.items else "Compare")
+        self.panel.compare_toggle.setText("Compare mode" if self.scene.active else "Compare")
         self._actions()
 
     def _actions(self):
@@ -386,7 +514,9 @@ class ReviewComparison:
 
     def update_selection(self, targets):
         current = self.owner.STATE.current_entry_id()
-        self.panel.pocket_summary_action.setEnabled(len(targets) >= 2 and bool(self.owner.STATE.current_object))
+        pocket_ready = len(targets) >= 2 and bool(self.owner.STATE.current_object)
+        self.panel.pocket_summary_action.setEnabled(pocket_ready)
+        self.panel.protein_interface_action.setEnabled(pocket_ready)
         is_group = bool(targets) and targets != (current,)
         pending = sum(entry_id not in self.items for entry_id in targets)
         text = f"Add selected ({pending})" if pending else "Add selected"
@@ -429,13 +559,16 @@ class ReviewComparison:
             return
         results = []
         succeeded = 0
-        for item in targets:
-            try:
-                with display_updates(cmd):
-                    rmsd = _align_copy(item, target, method, mobile_filter, target_filter)
-                results.append(f"{item.label} · {rmsd:.3f} Å RMSD")
-                succeeded += 1
-            except Exception as error:
-                results.append(f"{item.label} · {error}")
+        alignment = ComparisonAlignment(target, method, mobile_filter, target_filter)
+        with display_updates(cmd):
+            for item in targets:
+                try:
+                    rmsd = alignment.apply(item)
+                    results.append(f"{item.label} · {rmsd:.3f} Å RMSD")
+                    succeeded += 1
+                except Exception as error:
+                    results.append(f"{item.label} · {error}")
+        if succeeded:
+            self.alignment = alignment
         message = results[0] if len(results) == 1 else f"Aligned {succeeded}/{len(targets)} structures"
         self._status(message, "\n".join(results))

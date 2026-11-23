@@ -8,7 +8,7 @@ from pymol.Qt import QtCore, QtGui, QtWidgets
 
 from pymolplugins.host.ui_icons import set_tool_icon
 from .filter_values import FilterValueCatalog
-from .filtering import COMPARISON_OPERATORS, TEXT_OPERATORS, column_expression
+from .filtering import COMPARISON_OPERATORS, TEXT_OPERATORS, column_expression, compile_view
 from .history_store import fuzzy_matches
 
 
@@ -383,6 +383,61 @@ def filter_condition_dialog(parent, columns, catalog):
     return f"{name} {op} {literal!r}"
 
 
+def top_per_group_dialog(parent, columns, ranking):
+    dialog = QtWidgets.QDialog(parent)
+    dialog.setWindowTitle("Top per group")
+    form = QtWidgets.QFormLayout(dialog)
+    group = QtWidgets.QComboBox()
+    group.setObjectName("top_group_column_combo")
+    group.addItems(columns)
+    group.setCurrentText(ranking.column if ranking else "target")
+    score = QtWidgets.QComboBox()
+    score.setObjectName("top_group_score_combo")
+    score.setEditable(True)
+    score.setMinimumWidth(280)
+    score.addItems([column_expression(column) for column in columns])
+    if {"ipsae", "iptm"}.issubset(columns):
+        score.addItem("ipsae + 0.5 * iptm")
+    score.setEditText(ranking.score_text if ranking else "ipsae" if "ipsae" in columns else "")
+    score.lineEdit().setPlaceholderText("A numeric column or formula")
+    form.addRow("Group by", group)
+    form.addRow("Highest score", score)
+    error = QtWidgets.QLabel()
+    error.setWordWrap(True)
+    error.setProperty("role", "error")
+    error.hide()
+    form.addRow(error)
+    buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+    buttons.button(QtWidgets.QDialogButtonBox.Ok).setObjectName("top_group_apply_button")
+    form.addRow(buttons)
+    result = None
+
+    def choose():
+        nonlocal result
+        clause = f"top_per_group({column_expression(group.currentText())}, {score.currentText().strip()})"
+        try:
+            compile_view("where:" + clause, columns)
+        except ValueError as exc:
+            error.setText(str(exc))
+            error.show()
+            return
+        result = clause
+        dialog.accept()
+
+    def remove():
+        nonlocal result
+        result = ""
+        dialog.accept()
+
+    if ranking:
+        remove_button = buttons.addButton("Remove ranking", QtWidgets.QDialogButtonBox.ResetRole)
+        remove_button.clicked.connect(remove)
+    buttons.accepted.connect(choose)
+    buttons.rejected.connect(dialog.reject)
+    dialog.exec_()
+    return result
+
+
 class CommandCompletion(QtCore.QObject):
     """Use the same Tab completion entry point as PyMOL's command line."""
 
@@ -438,10 +493,14 @@ class CommandCompletion(QtCore.QObject):
         self.widget.removeEventFilter(self)
 
 
-class AnnotationShortcuts:
-    """One application-wide Qt route, independent of console docking."""
+class AnnotationShortcuts(QtCore.QObject):
+    """Route Review shortcuts without activating or focusing any widget."""
 
     def __init__(self, panel):
+        super().__init__(panel)
+        self.panel = panel
+        self.app = QtWidgets.QApplication.instance()
+        self.enabled = False
         shortcut_class = getattr(QtWidgets, "QShortcut", None) or QtGui.QShortcut
         callbacks = {"Alt+Right": panel._next, "Alt+Left": panel._prev, "Alt+Z": panel._undo}
         callbacks.update({f"Alt+{i}": lambda digit=i: panel._annotate_digit(digit) for i in range(1, 10)})
@@ -454,8 +513,56 @@ class AnnotationShortcuts:
             self.shortcuts.append(shortcut)
 
     def set_enabled(self, enabled):
+        enabled = bool(enabled)
         for shortcut in self.shortcuts:
-            shortcut.setEnabled(bool(enabled))
+            shortcut.setEnabled(enabled)
+        if enabled != self.enabled:
+            self.enabled = enabled
+            if enabled:
+                self.app.installEventFilter(self)
+            else:
+                self.app.removeEventFilter(self)
+
+    def eventFilter(self, widget, event):
+        if event.type() not in (QtCore.QEvent.ShortcutOverride, QtCore.QEvent.KeyPress):
+            return False
+        if event.modifiers() or event.key() not in (QtCore.Qt.Key_Left, QtCore.Qt.Key_Right):
+            return False
+        panel = self.panel
+        if not panel.isVisible() or self.app.activeModalWidget() or self.app.activePopupWidget():
+            return False
+        button = panel.prev_btn if event.key() == QtCore.Qt.Key_Left else panel.next_btn
+        if not button.isEnabled() or not self._navigation_target(widget):
+            return False
+        event.accept()
+        if event.type() == QtCore.QEvent.KeyPress and not event.isAutoRepeat():
+            # Use the existing action without transferring mouse or keyboard focus.
+            button.click()
+        return True
+
+    def _navigation_target(self, widget):
+        from pymol.gui import get_qtwindow
+
+        if not isinstance(widget, QtWidgets.QWidget):
+            return False
+        main = get_qtwindow()
+        panel = self.panel
+        window = widget.window()
+        inside_review = widget is panel or panel.isAncestorOf(widget) or window.property("annotationNavigation")
+        in_host = main is not None and window is main
+        if not (inside_review or in_host):
+            return False
+        if in_host and widget is getattr(main, "lineedit", None):
+            return not widget.text()
+        editors = (QtWidgets.QLineEdit, QtWidgets.QTextEdit, QtWidgets.QPlainTextEdit,
+                   QtWidgets.QComboBox, QtWidgets.QAbstractSpinBox, QtWidgets.QSlider)
+        while widget is not None:
+            if isinstance(widget, editors):
+                return False
+            if widget is panel or widget is main:
+                break
+            widget = widget.parentWidget()
+        return True
 
 
 class CollapsibleSection(QtWidgets.QWidget):

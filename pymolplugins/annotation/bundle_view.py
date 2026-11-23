@@ -22,7 +22,7 @@ from .review_file import bundle_matches_table
 
 SKILL_MODULES = (
     "acceptance_bundle", "acceptance_cavity_runtime", "acceptance_pocket_void",
-    "acceptance_recipes", "acceptance_collection",
+    "acceptance_interface", "acceptance_recipes", "acceptance_collection",
 )
 _BUNDLE_LEGENDS = WeakKeyDictionary()
 

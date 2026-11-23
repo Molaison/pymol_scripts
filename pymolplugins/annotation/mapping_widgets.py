@@ -45,6 +45,32 @@ def _row(*widgets):
     return widget
 
 
+def _disclosure(layout, title, description):
+    section = QtWidgets.QFrame()
+    section_layout = QtWidgets.QVBoxLayout(section)
+    section_layout.setContentsMargins(0, 0, 0, 0)
+    section_layout.setSpacing(4)
+    toggle = QtWidgets.QToolButton()
+    toggle.setText(title)
+    toggle.setCheckable(True)
+    toggle.setChecked(True)
+    toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+    toggle.setArrowType(QtCore.Qt.DownArrow)
+    toggle.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+    summary = QtWidgets.QLabel(description)
+    summary.setWordWrap(True)
+    content = QtWidgets.QWidget()
+    toggle.toggled.connect(content.setVisible)
+    toggle.toggled.connect(lambda visible: toggle.setArrowType(
+        QtCore.Qt.DownArrow if visible else QtCore.Qt.RightArrow))
+    section_layout.addWidget(toggle)
+    section_layout.addWidget(summary)
+    section_layout.addWidget(content)
+    layout.addWidget(section)
+    return {"frame": section, "toggle": toggle, "summary": summary, "description": description,
+            "content": content}
+
+
 def _table(headers):
     table = QtWidgets.QTableWidget(0, len(headers))
     table.setHorizontalHeaderLabels(headers)
@@ -100,15 +126,24 @@ def _profile_fields(dialog, layout):
 
 
 def _profile_rule_tables(dialog, layout):
-    dialog.rule_tabs = QtWidgets.QTabWidget()
-    dialog.rule_tabs.setFixedHeight(300)
-    rewrite_page, root_page = QtWidgets.QWidget(), QtWidgets.QWidget()
-    rewrite_layout, root_layout = QtWidgets.QVBoxLayout(rewrite_page), QtWidgets.QVBoxLayout(root_page)
-    dialog.rule_tabs.addTab(rewrite_page, "Text rewrites")
-    dialog.rule_tabs.addTab(root_page, "Root mappings")
-    layout.addWidget(dialog.rule_tabs)
+    order = QtWidgets.QLabel("Paths are handled in this order. Expand a step to edit it.")
+    order.setWordWrap(True)
+    layout.addWidget(order)
+    dialog.rule_order_label = order
+    dialog.rewrite_section = _disclosure(
+        layout, "1  Text rewrites",
+        "Runs first on the CSV path. Regex replacements support \\1 and \\g<name>.")
+    dialog.root_section = _disclosure(
+        layout, "2  Root mappings",
+        "Runs after rewrites. The longest matching server root wins, then priority.")
+    dialog.rule_sections = {"rewrites": dialog.rewrite_section, "roots": dialog.root_section}
+    rewrite_layout = QtWidgets.QVBoxLayout(dialog.rewrite_section["content"])
+    rewrite_layout.setContentsMargins(0, 0, 0, 0)
+    root_layout = QtWidgets.QVBoxLayout(dialog.root_section["content"])
+    root_layout.setContentsMargins(0, 0, 0, 0)
     dialog.rewrites = _table(["Operation", "Prefix / regex", "Replacement / added prefix", "Enabled"])
     dialog.rewrites.horizontalHeaderItem(2).setToolTip(r"Regex replacements support \1 and \g<name>.")
+    dialog.rewrites.setMinimumHeight(190)
     for column, width in enumerate((170, 275, 330)):
         dialog.rewrites.setColumnWidth(column, width)
     rewrite_layout.addWidget(dialog.rewrites, 1)
@@ -117,10 +152,13 @@ def _profile_rule_tables(dialog, layout):
     dialog.roots = _table(["Server root", "Computer root", "Priority", "Enabled", "Case sensitive"])
     dialog.roots.horizontalHeaderItem(1).setToolTip("For example K: or K:\\ for a drive root, or a full local/UNC folder.")
     dialog.roots.horizontalHeaderItem(2).setToolTip("The longest matching root wins, followed by priority.")
+    dialog.roots.setMinimumHeight(190)
     for column, width in enumerate((250, 340, 80, 80)):
         dialog.roots.setColumnWidth(column, width)
     root_layout.addWidget(dialog.roots, 1)
-    root_layout.addWidget(_row(_button("Add root", dialog._add_root), _button("Remove root", lambda: dialog._remove(dialog.roots))))
+    root_layout.addWidget(_row(_button("Add root", dialog._add_root), _button("Remove root", lambda: dialog._remove(dialog.roots)),
+                               _button("Move up", lambda: dialog._move_roots(-1)),
+                               _button("Move down", lambda: dialog._move_roots(1))))
 
 
 def _profile_sample(dialog, layout):
@@ -201,6 +239,7 @@ class MappingProfileDialog(QtWidgets.QDialog):
         self.roots.setRowCount(0)
         for rule in value["rules"]:
             self._add_root(rule=rule)
+        self._sync_sections()
         self.delete_button.setEnabled(value["name"].casefold() != "custom")
         self.error_label.setText("")
         self.result_label.setText("")
@@ -214,6 +253,7 @@ class MappingProfileDialog(QtWidgets.QDialog):
         set_format(self.source_format, "custom")
         set_format(self.target_format, "custom")
         self.distribution_edit.clear()
+        self._sync_sections()
         self.delete_button.setEnabled(False)
         self.name_edit.setFocus()
 
@@ -233,6 +273,7 @@ class MappingProfileDialog(QtWidgets.QDialog):
         self.rewrites.setCellWidget(row, 0, combo)
         for column, key in enumerate(("pattern", "replacement", "enabled"), 1):
             _cell(self.rewrites, row, column, rule[key])
+        self._sync_sections()
 
     def _add_root(self, checked=False, *, rule=None):
         rule = rule or dict(source_prefix="", target_prefix="", priority=0, provider="mapped", enabled=True, case_sensitive=True, require_exists=True)
@@ -241,11 +282,12 @@ class MappingProfileDialog(QtWidgets.QDialog):
         for column, key in enumerate(("source_prefix", "target_prefix", "priority", "enabled", "case_sensitive")):
             _cell(self.roots, row, column, rule[key])
         self.roots.item(row, 0).setData(QtCore.Qt.UserRole, dict(rule))
+        self._sync_sections()
 
-    @staticmethod
-    def _remove(table):
+    def _remove(self, table):
         for row in sorted({index.row() for index in table.selectedIndexes()}, reverse=True):
             table.removeRow(row)
+        self._sync_sections()
 
     def _rewrite_values(self):
         return [dict(kind=self.rewrites.cellWidget(row, 0).currentData(), pattern=_text(self.rewrites, row, 1),
@@ -264,14 +306,42 @@ class MappingProfileDialog(QtWidgets.QDialog):
             self._add_rewrite(rule=rule)
         self.rewrites.selectRow(target)
 
-    def draft(self):
-        rules = []
+    def _root_values(self):
+        values = []
         for row in range(self.roots.rowCount()):
             rule = dict(self.roots.item(row, 0).data(QtCore.Qt.UserRole))
-            rule.update({key: _text(self.roots, row, column) for column, key in enumerate(("source_prefix", "target_prefix", "priority"))})
+            rule.update({key: _text(self.roots, row, column)
+                         for column, key in enumerate(("source_prefix", "target_prefix", "priority"))})
+            rule.update({key: self.roots.cellWidget(row, column).isChecked()
+                         for column, key in enumerate(("enabled", "case_sensitive"), 3)})
+            values.append(rule)
+        return values
+
+    def _move_roots(self, offset):
+        row = self.roots.currentRow()
+        target = row + offset
+        if row < 0 or not 0 <= target < self.roots.rowCount():
+            return
+        values = self._root_values()
+        values[row], values[target] = values[target], values[row]
+        self.roots.setRowCount(0)
+        for rule in values:
+            self._add_root(rule=rule)
+        self.roots.selectRow(target)
+
+    def _sync_sections(self):
+        for name, table in (("rewrites", self.rewrites), ("roots", self.roots)):
+            count = table.rowCount()
+            section = self.rule_sections[name]
+            section["summary"].setText(
+                section["description"] + ((" %d configured rule%s." % (count, "" if count == 1 else "s"))
+                                          if count else " No rules here. Expand this step to add one."))
+            section["toggle"].setChecked(count > 0)
+
+    def draft(self):
+        rules = self._root_values()
+        for rule in rules:
             rule["priority"] = int(rule["priority"])
-            rule.update({key: self.roots.cellWidget(row, column).isChecked() for column, key in enumerate(("enabled", "case_sensitive"), 3)})
-            rules.append(rule)
         return validate_mapping_profile(dict(name=self.name_edit.text().strip(), description=self.description_edit.text().strip(), rules=rules,
                                              source_format=self.source_format.currentData(), target_format=self.target_format.currentData(),
                                              wsl_distribution=self.distribution_edit.text().strip(), rewrites=self._rewrite_values()))

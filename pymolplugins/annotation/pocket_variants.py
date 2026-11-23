@@ -62,9 +62,9 @@ def residues(model):
             for site, (name, coord) in anchors.items()}
 
 
-def reference_pocket(api, protein, ligand, radius):
+def reference_pocket(api, protein, ligand, radius, *, side_name="ligand"):
     if not api.count_atoms(f"({ligand}) and not elem H"):
-        raise ValueError("The current candidate has no ligand for this pocket. Select a ligand-bearing candidate first.")
+        raise ValueError(f"The reference candidate has no {side_name} atoms in the selected interface.")
     pocket = api.get_model(
         f"byres ((({protein}) and not elem H) within {radius:g} of (({ligand}) and not elem H))",
         state=1,
@@ -113,40 +113,58 @@ def side_chain(model, residue, bonds, rotation, offset):
     return result if result.bond else None
 
 
+def bonds_by_site(model):
+    bonds = defaultdict(list)
+    for bond in model.bond:
+        first, second = bond.index
+        site = site_key(model.atom[first])
+        if site == site_key(model.atom[second]):
+            bonds[site].append(bond)
+    return bonds
+
+
 class PocketTally:
-    def __init__(self, reference, sites):
+    def __init__(self, reference, sites, partner=None):
         self.reference = residues(reference)
-        self.sites = tuple(site for site in self.reference if site in sites)
-        if not self.sites:
-            raise ValueError("No numbered protein residues were found around the reference ligand.")
+        self.target_sites = tuple(site for site in self.reference if site in sites)
+        if not self.target_sites:
+            raise ValueError("No numbered target residues were found at the reference interface.")
+        self.partner_sites = tuple(site for site in residues(partner) if site in sites) if partner is not None else ()
+        self.sites = self.target_sites + self.partner_sites
         self.counts = defaultdict(Counter)
         self.fragments = {}
         self.total = 0
 
-    def add(self, model):
+    def prepare(self, model, partner=None):
         mapped = residues(model)
         rotation, offset = fit_backbones(mapped, self.reference)
-        bonds = defaultdict(list)
-        for bond in model.bond:
-            first, second = bond.index
-            site = site_key(model.atom[first])
-            if site == site_key(model.atom[second]):
-                bonds[site].append(bond)
-        for site in self.sites:
+        observations = self._observations(model, mapped, self.target_sites, rotation, offset)
+        if partner is not None:
+            mobile_partner = residues(partner)
+            if len(mobile_partner) < 3:
+                raise ValueError("The selected partner chains need at least three Cα atoms.")
+            observations.extend(self._observations(partner, mobile_partner, self.partner_sites, rotation, offset))
+        return (mapped, rotation, offset), observations
+
+    @staticmethod
+    def _observations(model, mapped, sites, rotation, offset):
+        observations = []
+        bonds = bonds_by_site(model)
+        for site in sites:
             residue = mapped.get(site)
             if residue is None:
                 continue
-            name = residue.name
+            fragment = side_chain(model, residue, bonds[site], rotation, offset)
+            observations.append((site, residue.name, fragment))
+        return observations
+
+    def add(self, observations):
+        for site, name, fragment in observations:
             self.counts[site][name] += 1
-            key = site, name
-            existing = self.fragments.get(key)
-            atom_count = sum(model.atom[index].name not in BACKBONE for index in residue.atoms)
-            if existing is None or atom_count > len(existing.atom):
-                fragment = side_chain(model, residue, bonds[site], rotation, offset)
-                if fragment is not None and (existing is None or len(fragment.atom) > len(existing.atom)):
-                    self.fragments[key] = fragment
+            existing = self.fragments.get((site, name))
+            if fragment is not None and (existing is None or len(fragment.atom) > len(existing.atom)):
+                self.fragments[site, name] = fragment
         self.total += 1
-        return mapped, rotation, offset
 
     def variants(self):
         rows = []

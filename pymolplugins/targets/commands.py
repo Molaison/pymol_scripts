@@ -470,7 +470,7 @@ def pp_batch(
 ):
     """Process files against a reference or by equal A/B IDs.
 
-    With no inputs, open the batch dialog. In file paired mode, A and B are
+    With no inputs, open Annotator’s Batch page. In file paired mode, A and B are
     path templates with one {id}, or use match=glob with * capturing the ID.
     With match=regex, A/B are directories and a_pattern/b_pattern are filename
     expressions with (?P<id>...) or one capture group. In CSV mode, A is the CSV filename,
@@ -519,6 +519,26 @@ def pp_batch(
             schema="pymolplugins.batch/1.0", status="error", error=str(exc), scene_preserved=True)
 
 
+def pp_compare(candidate, reference, mode="overlay", mobile_fit="all", parent_fit="all",
+               cutoff=4.0, quiet=0):
+    """Fit one candidate to a fixed reference and optionally show differences."""
+    from .comparison import compare
+    result = compare(_require_cmd(), candidate, reference, mode, mobile_fit, parent_fit, cutoff)
+    if not as_bool(quiet):
+        changes = [f"{item['reference'][1] or '-'}:{item['from']}{item['reference'][2]}{item['to']}"
+                   for item in result.get("substitutions", ())]
+        summary = f"{result['paired_ca']} C-alpha pairs, RMSD {result['rmsd']:.2f} A"
+        if "substitutions" in result:
+            summary += f", {len(changes)} substitutions"
+            if changes:
+                summary += " (" + ", ".join(changes) + ")"
+            summary += f", {len(result['insertions'])} insertions, {len(result['deletions'])} deletions"
+        if "gained_contacts" in result:
+            summary += f", +{result['gained_contacts']} / -{result['lost_contacts']} contacts"
+        print("Comparison: " + summary)
+    return result
+
+
 def register_commands(command_api=None) -> None:
     selected = command_api if command_api is not None else cmd
     if selected is None:
@@ -526,6 +546,7 @@ def register_commands(command_api=None) -> None:
     extend_command(selected, "pp_target_resolve", pp_target_resolve, literal=True)
     extend_command(selected, "pp_foreach", pp_foreach, literal=True)
     extend_command(selected, "pp_batch", pp_batch)
+    extend_command(selected, "pp_compare", pp_compare)
 
 
 register_commands()

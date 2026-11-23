@@ -1,7 +1,10 @@
 import unittest
 from types import SimpleNamespace
 
-from pymolplugins.annotation.filtering import FilterSyntaxError, compile_filter, compile_view_filter, validate_filter_presets
+from pymolplugins.annotation.filtering import (
+    FilterSyntaxError, compile_filter, compile_view, compile_view_filter, validate_filter_presets,
+)
+from pymolplugins.annotation.header_filters import with_group_ranking
 
 
 class ColumnFilterTests(unittest.TestCase):
@@ -95,6 +98,46 @@ class FilterPresetTests(unittest.TestCase):
             write_review_override(str(source), {"filter_presets": []})
             self.assertEqual(read_review_file(str(source)).config["filter_presets"], [])
             self.assertEqual(generated.read_bytes(), before)
+
+
+class GroupRankingTests(unittest.TestCase):
+    columns = ("target group", "ipsae", "iptm", "variant")
+
+    def entry(self, ordinal, group, ipsae, iptm, variant="fast"):
+        row = dict(zip(self.columns, (group, ipsae, iptm, variant)))
+        return SimpleNamespace(metadata=row, ordinal=ordinal, display_name=str(ordinal),
+                               source_path="", resolved_path="")
+
+    def test_pick_max_after_filter_and_switch_to_weighted_score(self):
+        entries = [
+            self.entry(2, "A", "0.9", "0.2"),
+            self.entry(1, "A", "0.9", "0.1"),
+            self.entry(3, "A", "0.8", "0.8"),
+            self.entry(4, "A", "1.0", "1.0", "full"),
+            self.entry(5, "B", "NaN", "0.9"),
+            self.entry(6, "B", "0.7", "0.8"),
+            self.entry(7, "C", "", "1.0"),
+        ]
+        query = "where:iptm > 0 and header_filter(variant == 'fast')"
+        for score, expected in (("ipsae", [1, 6]), ("ipsae + 0.5 * iptm", [3, 6])):
+            query = with_group_ranking(query, f"top_per_group(`target group`, {score})")
+            predicate, ranking = compile_view(query, self.columns)
+            self.assertEqual([row.ordinal for row in ranking.select(filter(predicate, entries))], expected)
+            self.assertEqual(len(validate_filter_presets(
+                [{"name": "Top", "expression": query[6:]}], self.columns
+            )), 1)
+        predicate, ranking = compile_view(with_group_ranking(query, ""), self.columns)
+        self.assertIsNone(ranking)
+        self.assertEqual([row.ordinal for row in filter(predicate, entries)], [2, 1, 3, 5, 6, 7])
+
+    def test_rank_rejects_ambiguous_or_executable_expressions(self):
+        for expression in (
+            "top_per_group(unknown, ipsae)", "top_per_group(variant, ipsae / f())",
+            "top_per_group(variant, ipsae) or iptm > 0",
+            "top_per_group(variant, ipsae) and top_per_group(variant, iptm)",
+        ):
+            with self.subTest(expression=expression), self.assertRaises(ValueError):
+                compile_view("where:" + expression, self.columns)
 
 
 if __name__ == "__main__":

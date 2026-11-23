@@ -1,6 +1,6 @@
 """PyMOL adapter for exact, residue-safe sequence motif selection.
 
-The residue index and matching implementation live in ``utilities.sequence``
+The residue index and matching implementation live in ``core.sequence``
 and do not import PyMOL.  This module is intentionally limited to reading
 models, creating an exact atom-index selection, and optional visualization.
 """
@@ -25,6 +25,7 @@ try:
         SequenceMatchLimitError,
         SequenceOccurrenceError,
         find_sequence_matches,
+        format_extended_fasta,
         index_atom_streams,
         split_queries,
     )
@@ -43,6 +44,7 @@ except ModuleNotFoundError as error:
         SequenceMatchLimitError,
         SequenceOccurrenceError,
         find_sequence_matches,
+        format_extended_fasta,
         index_atom_streams,
         split_queries,
     )
@@ -143,27 +145,63 @@ def _object_names(selection: object) -> List[str]:
 
 
 def _read_atom_streams(
-    object_names: Iterable[str], state: int, warnings: List[str]
+    object_names: Iterable[str], state: int, warnings: List[str], selection: str = "all"
 ) -> List[Tuple[str, int, Iterable[object]]]:
     streams = []
     for object_name in object_names:
-        try:
-            model = cmd.get_model("(%{})".format(object_name), state)
-        except Exception as error:
-            warnings.append(
-                "could not read object {!r} state {}: {}".format(
-                    object_name, state, error
+        states = (state,)
+        if state == 0:
+            states = range(1, cmd.count_states("%{}".format(object_name)) + 1)
+        elif state == -1:
+            states = (cmd.get_object_state(object_name),)
+        for selected_state in states:
+            try:
+                model = cmd.get_model("(%{}) and ({})".format(object_name, selection), selected_state)
+            except Exception as error:
+                warnings.append(
+                    "could not read object {!r} state {}: {}".format(
+                        object_name, selected_state, error
+                    )
                 )
-            )
-            continue
-        atoms = tuple(getattr(model, "atom", ()) or ())
-        if not atoms:
-            warnings.append(
-                "object {!r} state {} contains no atoms".format(object_name, state)
-            )
-            continue
-        streams.append((object_name, state, atoms))
+                continue
+            atoms = tuple(getattr(model, "atom", ()) or ())
+            if not atoms:
+                warnings.append(
+                    "object {!r} state {} contains no atoms".format(object_name, selected_state)
+                )
+                continue
+            streams.append((object_name, selected_state, atoms))
     return streams
+
+
+def pp_fasta(selection="enabled", include_solvent=0, state=-1, width=80, quiet=0):
+    """Return extended FASTA, optionally printing it, without changing the scene.
+
+    Tracks follow object/state/segi/chain and input residue order. Heterogeneous
+    components in a track are not asserted to form a covalent sequence.
+    State -1 reads each object's displayed state; 0 exports all states separately.
+    A token longer than width occupies its own line without being split.
+    """
+    parsed_state = as_int(state, minimum=-1, name="state")
+    parsed_width = as_int(width, minimum=1, name="width")
+    solvent = as_bool(include_solvent)
+    silent = as_bool(quiet)
+    scope = str(selection).strip()
+    names = _object_names(scope)
+    if not solvent:
+        scope = "({}) and not solvent".format(scope)
+    warnings = []
+    streams = _read_atom_streams(names, parsed_state, warnings, scope)
+    failures = [message for message in warnings if message.startswith("could not read")]
+    if failures:
+        raise ValueError("; ".join(failures))
+    index = index_atom_streams(streams)
+    if not index.records:
+        raise ValueError("selection contains no residues in the requested state")
+    result = format_extended_fasta(index, parsed_width)
+    if not silent:
+        print(result)
+    return result
 
 
 def _indices_by_object(matches: Iterable[object]) -> Mapping[Tuple[str, int], List[int]]:
@@ -533,6 +571,7 @@ def pp_select_sequence(
     color="red",
     max_matches=10000,
     replace=1,
+    residue_tokens=0,
 ):
     """Select sequence motifs and return a JSON-serializable result.
 
@@ -550,6 +589,7 @@ def pp_select_sequence(
         color: PyMOL color used when visualization is enabled.
         max_matches: Total safety bound for ``occurrence=all``.
         replace: Replace only an unchanged selection owned by this process.
+        residue_tokens: Match letters and literal (RESN) tokens in exact mode.
 
     Returns:
         A JSON-serializable dictionary containing tracks, exact matches,
@@ -558,14 +598,15 @@ def pp_select_sequence(
 
     result = _empty_result()
     try:
-        parsed_state = as_int(state, minimum=0, name="state")
+        parsed_state = as_int(state, minimum=-1, name="state")
         parsed_gap = as_int(max_gap, minimum=0, name="max_gap")
         parsed_limit = as_int(
             max_matches, minimum=1, maximum=100000, name="max_matches"
         )
         parsed_visualize = as_bool(visualize)
         parsed_replace = as_bool(replace)
-        normalized_queries = split_queries(queries, str(separator))
+        token_mode = as_bool(residue_tokens)
+        normalized_queries = split_queries(queries, str(separator), residue_tokens=token_mode)
         names = _object_names(objects)
         requested_selection_name = (
             "" if selection_name is None else str(selection_name).strip()
@@ -601,27 +642,28 @@ def pp_select_sequence(
                     "color": str(color),
                     "max_matches": parsed_limit,
                     "replace": parsed_replace,
+                    "residue_tokens": token_mode,
                 },
             }
         )
         if not names:
             raise ValueError("no molecule objects matched {!r}".format(objects))
 
-        streams = _read_atom_streams(names, parsed_state, result["warnings"])
-        sequence_index = index_atom_streams(streams, protein_only=True)
+        streams = _read_atom_streams(names, parsed_state, result["warnings"], str(objects) if token_mode else "all")
+        sequence_index = index_atom_streams(streams, protein_only=not token_mode)
         result["tracks"] = [
             {
                 "object": track.object,
                 "state": track.state,
                 "segi": track.segi,
                 "chain": track.chain,
-                "sequence": track.sequence,
+                "sequence": "".join(track.tokens) if token_mode else track.sequence,
                 "residue_count": len(track.residues),
             }
             for track in sequence_index.tracks
         ]
         if not sequence_index.tracks:
-            raise ValueError("matched objects contain no protein residue tracks")
+            raise ValueError("matched objects contain no {}residue tracks".format("" if token_mode else "protein "))
 
         chain_filter: Optional[str] = chain_text if chain_text else None
         matches = find_sequence_matches(
@@ -632,13 +674,12 @@ def pp_select_sequence(
             occurrence=occurrence_text,
             chain=chain_filter,
             max_matches=parsed_limit,
+            residue_tokens=token_mode,
         )
         grouped_indices = _indices_by_object(matches)
         result["matches"] = [match.to_dict() for match in matches]
         result["match_count"] = len(matches)
-        result["selected_atom_count"] = sum(
-            len(indices) for indices in grouped_indices.values()
-        )
+        result["selected_atom_count"] = len(_expected_identity(grouped_indices))
         matched_query_indices = {match.query_index for match in matches}
         unmatched_queries = [
             query
@@ -916,6 +957,7 @@ Legacy aliases remain available:
 
 def _register_commands(command_api=None) -> None:
     selected = cmd if command_api is None else command_api
+    extend_command(selected, "pp_fasta", pp_fasta)
     extend_command(selected, "pp_select_sequence", pp_select_sequence)
     extend_command(selected, "sbs_help", show_help)
     extend_command(selected, "sbs", select_by_sequence)
@@ -941,6 +983,7 @@ _register_commands()
 
 
 __all__ = [
+    "pp_fasta",
     "pp_select_sequence",
     "select_by_sequence",
     "show_help",

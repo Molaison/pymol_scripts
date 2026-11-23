@@ -202,29 +202,26 @@ def file_stamp(path):
     return (str(path), stat.st_size, stat.st_mtime_ns)
 
 
-def prepare_batch(config, cancel_event=None):
-    """Read, resolve and render a batch without any scene or filesystem writes."""
+def prepare_pairs(config, cancel_event=None):
+    """Resolve and validate pair inputs without requiring an output directory."""
     if config.mode not in {"reference", "paired"} or config.source not in {"files", "csv"}:
         raise ValueError("Mode must be reference/paired and source must be files/csv")
-    if config.on_error not in {"stop", "continue"}:
-        raise ValueError("On error must be stop or continue")
     if config.match not in {"template", "glob", "regex"}:
         raise ValueError("Pair matching must be template, glob or regex")
-    if not config.a.strip() or not config.b.strip() or not config.output.strip():
-        raise ValueError("A input, B reference/pattern/column and output directory are required")
+    if not config.a.strip() or not config.b.strip():
+        raise ValueError("Enter candidate input and a reference file, pattern, or table column")
     _cancelled(cancel_event)
     csv_stamp = file_stamp(native_path(config.a)) if config.source == "csv" else None
     pairs = _csv_inputs(config, cancel_event) if config.source == "csv" else _file_inputs(config)
     if not pairs:
-        raise ValueError("No A/B pairs to process")
-    output = Path(native_path(config.output))
-    if output.exists() and not output.is_dir():
-        raise ValueError("Output must be a directory")
+        raise ValueError("No candidate/reference pairs to process")
+    for pair in pairs:
+        _cancelled(cancel_event)
+        if _same_file(pair.left, pair.right):
+            raise ValueError("ID %s uses the same file for A and B" % pair.identifier)
     sources = dict.fromkeys(path for pair in pairs for path in (pair.left, pair.right))
-    if output.exists() and any(_same_file(str(output), str(Path(path).parent)) for path in sources):
-        raise ValueError("Choose a separate output directory, not an input structure directory")
-    if config.source == "csv":
-        sources[native_path(config.a)] = None
+    if csv_stamp is not None:
+        sources[csv_stamp[0]] = None
     stamps = []
     for path in sources:
         _cancelled(cancel_event)
@@ -232,6 +229,22 @@ def prepare_batch(config, cancel_event=None):
         if csv_stamp is not None and path == csv_stamp[0] and stamp != csv_stamp:
             raise ValueError("CSV changed while preparing; prepare again: " + path)
         stamps.append(stamp)
+    return pairs, tuple(stamps)
+
+
+def prepare_batch(config, cancel_event=None):
+    """Read, resolve and render a batch without any scene or filesystem writes."""
+    if config.on_error not in {"stop", "continue"}:
+        raise ValueError("On error must be stop or continue")
+    if not config.output.strip():
+        raise ValueError("Choose an output directory for processed structures")
+    pairs, stamps = prepare_pairs(config, cancel_event)
+    output = Path(native_path(config.output))
+    if output.exists() and not output.is_dir():
+        raise ValueError("Output must be a directory")
+    if output.exists() and any(_same_file(str(output), str(Path(path).parent)) for path, _, _ in stamps
+                               if config.source != "csv" or path != native_path(config.a)):
+        raise ValueError("Choose a separate output directory, not an input structure directory")
     token = uuid.uuid4().hex[:12]
     items = []
     # The 3.1 Host GUI lost selectors when deleted object names were recycled.
@@ -239,8 +252,6 @@ def prepare_batch(config, cancel_event=None):
         _cancelled(cancel_event)
         object_a, object_b, reference = ("pp_batch_%s_%d_%s" % (token, index, suffix)
                                         for suffix in ("A", "B", "ref"))
-        if _same_file(pair.left, pair.right):
-            raise ValueError("ID %s uses the same file for A and B" % pair.identifier)
         path_a = windows_long_path(str(output / ("%06d_A_%s" % (index, Path(pair.left).name))))
         path_b = windows_long_path(str(output / ("%06d_B_%s" % (index, Path(pair.right).name)))) if config.save_b else ""
         for path in (path_a, path_b):

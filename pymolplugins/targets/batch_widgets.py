@@ -1,4 +1,4 @@
-"""File/CSV batch processing dialog with main-thread PyMOL execution."""
+"""Annotator batch page with main-thread PyMOL execution."""
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -10,16 +10,14 @@ import traceback
 from pymol.Qt import QtCore, QtGui, QtWidgets
 
 from pymolplugins.annotation.mapping_store import read_mapping_store_readonly
-from pymolplugins.annotation.panel_style import apply_style
 from pymolplugins.annotation.qt_widgets import CollapsibleSection
 from pymolplugins.annotation.sources.csv_source import read_csv_header
 from pymolplugins.host.ui_icons import set_tool_icon
-from pymolplugins.host.workspace import WindowModeButton, show_workspace, workspace_closed
+from .batch_review import ComparisonReview, prepare_comparison_review, write_comparison_review
 from .batch_runner import BatchRunner
 from .batch_sources import BatchConfig, native_path, prepare_batch
 
 
-_DIALOG = None
 _PRESETS = {
     "Align": "align {A}, {B}",
     "Superpose": "super {A}, {B}",
@@ -33,6 +31,7 @@ class PairTableModel(QtCore.QAbstractTableModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.rows = []
+        self.review = False
 
     def rowCount(self, parent=QtCore.QModelIndex()):
         return 0 if parent.isValid() else len(self.rows)
@@ -52,6 +51,8 @@ class PairTableModel(QtCore.QAbstractTableModel):
             return "\n".join(row.get("commands", row["steps"]))
         if role == QtCore.Qt.ToolTipRole and index.column() in (1, 2):
             return row["A" if index.column() == 1 else "B"] + "\n" + "\n".join(row.get("planned_outputs", []))
+        if role == QtCore.Qt.DisplayRole and self.review and index.column() in (1, 2):
+            return Path(row["A" if index.column() == 1 else "B"]).name
         if role in (QtCore.Qt.DisplayRole, QtCore.Qt.ToolTipRole):
             values = (row["id"], row["A"], row["B"], row["status"],
                       row.get("failed_step") or (row["steps"][-1] if row["steps"] else ""), row.get("error", ""))
@@ -143,6 +144,9 @@ def _input_page(dialog):
     form.setContentsMargins(0, 14, 8, 8)
     form.setSpacing(14)
     form.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
+    dialog.workflow = QtWidgets.QComboBox()
+    dialog.workflow.addItem("Process and save structures", "process")
+    dialog.workflow.addItem("Review in PyMOL", "review")
     selectors = QtWidgets.QWidget()
     row = QtWidgets.QHBoxLayout(selectors)
     row.setContentsMargins(0, 0, 0, 0)
@@ -155,6 +159,18 @@ def _input_page(dialog):
     row.addWidget(dialog.source, 1)
     row.addWidget(dialog.mode, 1)
     form.addRow("Input / pairing", selectors)
+    dialog.review_view = QtWidgets.QComboBox()
+    dialog.review_view.addItem("Aligned overlay", "overlay")
+    dialog.review_view.addItem("Sequence differences", "mutations")
+    dialog.review_view.addItem("Optimization path", "lineage")
+    dialog.review_view.setItemData(2, "Requires a CSV ordered by round. Place the promoted candidate last in each round.", QtCore.Qt.ToolTipRole)
+    task_row = QtWidgets.QWidget()
+    tasks = QtWidgets.QHBoxLayout(task_row)
+    tasks.setContentsMargins(0, 0, 0, 0)
+    tasks.addWidget(dialog.workflow, 1)
+    tasks.addWidget(dialog.review_view, 1)
+    dialog.review_view.setAccessibleName("Review view")
+    form.insertRow(0, "Task", task_row)
     _pattern_options(dialog, form)
     dialog.a_edit, a_row = _line_with_browse(dialog.browse_a)
     dialog.a_label = QtWidgets.QLabel("Candidate files")
@@ -174,7 +190,9 @@ def _input_page(dialog):
     dialog.ids.setToolTip("Empty selects all IDs. Comma-separated IDs and numeric ranges are accepted.")
     form.addRow("Limit to IDs", dialog.ids)
     dialog.output, output_row = _line_with_browse(dialog.browse_output)
-    form.addRow("Output directory", output_row)
+    dialog.output_label = QtWidgets.QLabel("Output directory")
+    dialog.output_row = output_row
+    form.addRow(dialog.output_label, output_row)
     dialog.save_b = QtWidgets.QCheckBox("Also save processed reference")
     dialog.on_error = QtWidgets.QComboBox()
     dialog.on_error.addItem("Stop on error", "stop")
@@ -230,6 +248,7 @@ def _command_page(dialog):
     dialog.commands.setMaximumHeight(160)
     layout.addWidget(dialog.preset)
     layout.addWidget(dialog.commands, 1)
+
     dialog.preset.activated.connect(lambda index: dialog.commands.setPlainText(
         _PRESETS[dialog.preset.itemText(index)]) if dialog.preset.itemText(index) in _PRESETS else None)
     return page
@@ -275,21 +294,24 @@ def _footer(dialog, layout):
     dialog.export_button.setEnabled(False)
 
 
-class BatchDialog(QtWidgets.QWidget):
+class BatchPage(QtWidgets.QWidget):
+    busy_changed = QtCore.Signal()
+    review_ready = QtCore.Signal(object)
+
     def __init__(self, command_api, execute, initial=None, parent=None):
         super().__init__(parent)
-        self._closed = False
-        apply_style(self, "batchWorkspace")
+        self.setObjectName("batchWorkspace")
         self.cmd, self.execute = command_api, execute
         self.plan, self.runner, self.future = None, None, None
         self.cancel_event, self.future_kind = None, ""
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pymol-batch-input")
-        self.setWindowTitle("Pair and export files")
-        self.resize(1000, 720)
-        self.setMinimumSize(700, 560)
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(20, 16, 20, 18)
-        layout.setSpacing(14)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        self._annotator_inputs = None
+        self.source_scope = QtWidgets.QWidget()
+        source_row = QtWidgets.QHBoxLayout(self.source_scope)
+        source_row.setContentsMargins(0, 0, 0, 0)
         self.source_scope_label = QtWidgets.QLabel()
         self.source_scope_label.setWordWrap(True)
         self.source_scope_label.setProperty("role", "muted")
@@ -299,16 +321,20 @@ class BatchDialog(QtWidgets.QWidget):
         self.scope_choice.setAccessibleName("Batch input scope")
         self.scope_choice.currentIndexChanged.connect(self._scope_changed)
         self.scope_choice.hide()
-        self.source_scope_label.hide()
-        layout.addWidget(self.scope_choice)
-        layout.addWidget(self.source_scope_label)
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        splitter.setChildrenCollapsible(False)
-        self.window_mode_button = WindowModeButton(self)
-        layout.addWidget(self.window_mode_button, 0, QtCore.Qt.AlignRight)
-        self.inputs = _input_page(self)
+        source_row.addWidget(self.source_scope_label, 1)
+        self.use_annotator_source = QtWidgets.QPushButton("Use this source")
+        self.use_annotator_source.clicked.connect(self._apply_annotator_inputs)
+        source_row.addWidget(self.use_annotator_source)
+        self.source_scope.hide()
+        layout.addWidget(self.source_scope)
+        self.splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self.splitter.setChildrenCollapsible(False)
+        self.setup_area = _input_page(self)
+        self.setup_area.setAccessibleName("Batch setup")
+        layout.insertWidget(0, self.scope_choice)
         self.command_section.toggle.toggled.connect(self._reveal_recipe)
         self.table = QtWidgets.QTableView()
+        self.table.setAccessibleName("Batch results")
         self.table.setMinimumHeight(112)
         self.model = PairTableModel(self)
         self.table.setModel(self.model)
@@ -323,14 +349,14 @@ class BatchDialog(QtWidgets.QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         for index, width in enumerate((65, 220, 220, 100, 160, 180)):
             self.table.setColumnWidth(index, width)
-        splitter.addWidget(self.inputs)
-        splitter.addWidget(self.table)
         self.table.hide()
         self.model.modelReset.connect(lambda: self.table.setVisible(bool(self.model.rowCount())))
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
-        splitter.setSizes([400, 175])
-        layout.addWidget(splitter, 1)
+        self.splitter.addWidget(self.setup_area)
+        self.splitter.addWidget(self.table)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 0)
+        self.splitter.setSizes([400, 175])
+        layout.addWidget(self.splitter, 1)
         _footer(self, layout)
         self.prepare_timer = QtCore.QTimer(self)
         self.prepare_timer.setInterval(30)
@@ -339,6 +365,8 @@ class BatchDialog(QtWidgets.QWidget):
         self.run_timer.setInterval(0)
         self.run_timer.timeout.connect(self._advance)
         self._set_initial(initial or BatchConfig())
+        self.workflow.currentIndexChanged.connect(self._mode_changed)
+        self.review_view.currentIndexChanged.connect(self.invalidate)
         self.source.currentIndexChanged.connect(self._mode_changed)
         self.mode.currentIndexChanged.connect(self._mode_changed)
         self.match.currentIndexChanged.connect(self._mode_changed)
@@ -357,8 +385,33 @@ class BatchDialog(QtWidgets.QWidget):
             QtCore.QTimer.singleShot(0, self._scroll_to_recipe)
 
     def _scroll_to_recipe(self):
-        if not self._closed and self.command_section.toggle.isChecked():
-            self.inputs.ensureWidgetVisible(self.commands, 0, 8)
+        if self.command_section.toggle.isChecked():
+            self.setup_area.ensureWidgetVisible(self.commands, 0, 8)
+
+    def offer_annotator_inputs(self, config, row_count):
+        """Offer the current Annotator source without replacing an open batch draft."""
+        self._annotator_inputs = config
+        self.source_scope_label.setText(
+            f"Annotator: {Path(config.a).name} · {row_count:,} rows. Review filters stay in Annotator.")
+        self.source_scope.setVisible(bool(config.a))
+        self._refresh_annotator_source()
+
+    def _refresh_annotator_source(self):
+        source = self._annotator_inputs
+        if source is None:
+            self.use_annotator_source.hide()
+            return
+        current = self.config()
+        fields = ("a", "b", "source", "a_column", "id_column")
+        self.use_annotator_source.setVisible(any(getattr(current, key) != getattr(source, key) for key in fields))
+        self.use_annotator_source.setEnabled(self.future is None and not (self.runner and self.runner.running))
+
+    def _apply_annotator_inputs(self):
+        current = self.config()
+        self.scope_choice.setCurrentIndex(self.scope_choice.findData(""))
+        self._set_initial(replace(self._annotator_inputs, output=current.output, commands=current.commands,
+                                  on_error=current.on_error, save_b=current.save_b))
+        self._mode_changed()
 
     def _commands_changed(self):
         text = self.commands.toPlainText().strip()
@@ -401,6 +454,7 @@ class BatchDialog(QtWidgets.QWidget):
         self.scope_choice.setCurrentIndex(self.scope_choice.findData(preferred))
         self.scope_choice.blockSignals(False)
         self.scope_choice.show()
+        self.source_scope.show()
         self.source_scope_label.show()
         self._scope_changed()
 
@@ -435,8 +489,24 @@ class BatchDialog(QtWidgets.QWidget):
                            review_rows=self.review_scopes.get(self.scope_choice.currentData()))
 
     def _mode_changed(self, *args):
+        review = self.workflow.currentData() == "review"
+        self.review_view.setVisible(review)
+        for widget in (self.output_label, self.output_row, self.save_b, self.on_error, self.export_button):
+            widget.setVisible(not review)
+        self.command_section.setVisible(not review)
+        self.run_button.setText("Create and open review…" if review else "Run batch")
+        self.model.headers = ("ID", "Candidate file", "Reference file", "Status", "Last step", "Error") if review else PairTableModel.headers
+        self.model.review = review
+        self.model.headerDataChanged.emit(QtCore.Qt.Horizontal, 0, len(self.model.headers) - 1)
+        for column in (4, 5):
+            self.table.setColumnHidden(column, review)
         csv, paired = self.source.currentData() == "csv", self.mode.currentData() == "paired"
         regex = paired and not csv and self.match.currentData() == "regex"
+        lineage = self.review_view.model().item(2)
+        lineage.setEnabled(csv and paired)
+        if not lineage.isEnabled() and self.review_view.currentData() == "lineage":
+            self.review_view.setCurrentIndex(0)
+        self.mode.setItemText(1, "Reference per row" if review and csv else "Match files by ID")
         self.match_box.setVisible(paired and not csv)
         self.regex_box.setVisible(regex)
         self.a_label.setText("CSV file" if csv else "Candidate folder" if regex else "Candidate pattern" if paired else "Candidate files")
@@ -451,24 +521,34 @@ class BatchDialog(QtWidgets.QWidget):
         self.invalidate()
 
     def invalidate(self, *args):
-        if self.runner is not None and self.runner.running:
+        if self.future is not None or (self.runner is not None and self.runner.running):
             return
         self.plan = self.runner = None
-        if self.model.rowCount():
+        if self.model.rows:
             self.model.set_rows([])
         self.run_button.setEnabled(False)
         self.export_button.setEnabled(False)
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
         self.progress.hide()
-        self.summary.setText("Choose inputs, then preview the pairs.")
+        self.summary.setText("Preview the current inputs.")
+        self.summary.setToolTip("")
+        self._refresh_annotator_source()
+
+    @property
+    def busy(self):
+        return self.future is not None or (self.runner is not None and self.runner.running)
 
     def _busy(self, busy):
-        self.inputs.setEnabled(not busy)
+        self.setup_area.setEnabled(not busy)
         self.scope_choice.setEnabled(not busy)
         self.preview_button.setEnabled(not busy)
         self.run_button.setEnabled(not busy and self.plan is not None and self.runner is None)
         self.stop_button.setEnabled(busy)
         self.stop_button.setVisible(busy)
         self.progress.setVisible(busy)
+        self.use_annotator_source.setEnabled(not busy)
+        self.busy_changed.emit()
 
     def _error(self, exc):
         traceback.print_exception(type(exc), exc, exc.__traceback__)
@@ -480,7 +560,10 @@ class BatchDialog(QtWidgets.QWidget):
         self.future_kind = kind
         self.future = self.pool.submit(function, *args, **kwargs)
         self._busy(True)
-        self.summary.setText("Reading columns" if kind == "headers" else "Preparing pairs")
+        self.progress.setRange(0, 0)
+        self.summary.setText({
+            "headers": "Reading CSV columns…", "write review": "Creating review…",
+        }.get(kind, "Resolving candidate and reference pairs…"))
         self.prepare_timer.start()
 
     def read_headers(self):
@@ -499,20 +582,33 @@ class BatchDialog(QtWidgets.QWidget):
         self.runner = None
         self.plan = None
         self.model.set_rows([])
+        self.table.hide()
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
         self.export_button.setEnabled(False)
         self.cancel_event = threading.Event()
-        self._prepare("pairs", prepare_batch, config, self.cancel_event)
+        if self.workflow.currentData() == "review":
+            self._prepare("comparison", prepare_comparison_review, config,
+                          self.review_view.currentData(), self.cancel_event)
+        else:
+            self._prepare("pairs", prepare_batch, config, self.cancel_event)
 
     def _poll_preparation(self):
         if not self.future.done():
             return
         self.prepare_timer.stop()
         future, self.future = self.future, None
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
         try:
             result = future.result()
-            if self.cancel_event is not None and self.cancel_event.is_set():
+            if self.future_kind == "write review":
+                self.summary.setText(f"Review created: {result.parent.name}")
+                self.summary.setToolTip(str(result))
+                self._busy(False)
+                self.review_ready.emit(result)
+                return
+            elif self.cancel_event is not None and self.cancel_event.is_set():
                 self.summary.setText("Cancelled")
             elif self.future_kind == "headers":
                 for combo in (self.a_column, self.id_column, self.b_column):
@@ -522,6 +618,13 @@ class BatchDialog(QtWidgets.QWidget):
                     combo.addItems(list(result["columns"]))
                     combo.setCurrentText(selected)
                 self.summary.setText("%d columns" % len(result["columns"]))
+            elif isinstance(result, ComparisonReview):
+                self.plan = result
+                rows = [dict(id=pair.identifier, A=pair.left, B=pair.right,
+                             status=f"Round {result.rounds[i]}" if result.rounds else "Ready",
+                             steps=[], error="") for i, pair in enumerate(result.pairs)]
+                self.model.set_rows(rows)
+                self.summary.setText(f"{len(rows):,} pairs ready to review")
             else:
                 self.plan = result
                 rows = [dict(id=item.pair.identifier, A=item.pair.left, B=item.pair.right,
@@ -538,9 +641,18 @@ class BatchDialog(QtWidgets.QWidget):
             self.summary.setText("Preparation failed")
         self._busy(False)
 
+    def _create_comparison_review(self):
+        start = Path(native_path(self.a_edit.text())).parent
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Save comparison review in", str(start))
+        if folder:
+            self.cancel_event = threading.Event()
+            self._prepare("write review", write_comparison_review, self.plan, folder, self.cancel_event)
+
     def run_batch(self):
-        if self.plan is None:
+        if self.plan is None or self.future is not None or self.runner is not None:
             return
+        if isinstance(self.plan, ComparisonReview):
+            return self._create_comparison_review()
         self.error_box.hide()
         self.runner = BatchRunner(self.plan, self.cmd, self.execute)
         try:
@@ -638,35 +750,20 @@ class BatchDialog(QtWidgets.QWidget):
             except Exception as exc:
                 self._error(exc)
 
-    def closeEvent(self, event):
-        global _DIALOG
-        if self._closed:
-            super().closeEvent(event)
-            return
+    def shutdown(self):
+        """Stop active scene work before Annotator releases its scene."""
         if self.runner is not None and self.runner.running:
             self.stop()
-            event.ignore()
-            return
+            return False
         if self.cancel_event is not None:
             self.cancel_event.set()
         self.prepare_timer.stop()
         self.pool.shutdown(wait=False, cancel_futures=True)
-        self._closed = True
-        if _DIALOG is self:
-            _DIALOG = None
-        super().closeEvent(event)
-        workspace_closed(self)
+        return True
 
 
 def show_batch_dialog(initial=None, mode=None):
-    """Open the batch tool without loading data or modifying the current scene."""
-    global _DIALOG
-    from .commands import _execute_checked, _require_cmd
-    if _DIALOG is None:
-        _DIALOG = BatchDialog(_require_cmd(), _execute_checked, initial)
-        try:
-            return show_workspace(_DIALOG, "batch_processing", mode)
-        except Exception:
-            _DIALOG.close()
-            raise
-    return show_workspace(_DIALOG, "batch_processing", mode)
+    """Open the batch page in the shared Annotator workspace."""
+    from pymolplugins.annotation.plugin import show_structure_annotator_panel
+
+    return show_structure_annotator_panel(mode)._show_batch_processing(initial=initial)

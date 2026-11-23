@@ -17,19 +17,20 @@ BOOL_PARAMETERS = frozenset((
     "snapshot", "render", "surface", "labels", "async_mode", "align",
     "delete_sources", "allow_gaps", "enabled", "keep_previous", "preload_enabled",
     "restore_saved", "raise_errors", "include_entries", "require_exists", "descending",
+    "residue_tokens", "include_solvent",
 ))
 SELECTION_PARAMETERS = frozenset((
-    "target", "targets", "selection", "objects", "mobile", "reference", "move",
+    "target", "targets", "selection", "objects", "mobile", "reference", "candidate", "move",
     "focus", "partner", "partner1", "partner2", "ligand", "receptor", "binder",
     "driver", "followers", "mobile_anchor", "target_anchor", "mobile_obj",
     "target_obj", "mobile_ligand", "target_ligand", "secondary_selection",
-    "protein_obj_sele", "model_selection", "entries", "subunits",
+    "protein_obj_sele", "model_selection", "entries", "subunits", "mobile_fit", "parent_fit",
 ))
 PATH_PARAMETERS = frozenset((
     "path", "filename", "directory", "output", "output_json", "input_or_selection",
     "executable", "source_base", "review_path", "csv_path", "state_path",
     "out_path", "stage_root", "target_prefix",
-    "a", "b",
+    "a", "b", "manifest",
 ))
 ENUMS = {
     "on_error": ("stop", "continue"),
@@ -57,6 +58,7 @@ COMMAND_ENUMS = {
     ("pp_batch", "source"): ("files", "csv"),
     ("pp_batch", "mode"): ("reference", "paired"),
     ("pp_batch", "match"): ("template", "glob", "regex"),
+    ("pp_compare", "mode"): ("fit", "overlay", "mutations", "contacts"),
     ("pp_align_anchor", "match"): ("identifier", "name", "order"),
     ("pp_align_ligand", "match"): ("identifier", "name", "order"),
     ("pp_orient", "axis"): ("pca", "cyclic", "x", "y", "z"),

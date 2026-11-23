@@ -10,6 +10,7 @@ from html import escape
 from pymol.Qt import QtCore, QtWidgets
 
 from pymolplugins.core.source_paths import clean_pasted_path, file_url_path, is_file_url
+from pymolplugins.host.workspace import window_settings
 from pymolplugins.remote.ssh import (
     SshClient, SshLocation, default_ssh_program, is_ssh_path, parse_ssh_path,
     ssh_profiles, ssh_progress,
@@ -17,6 +18,9 @@ from pymolplugins.remote.ssh import (
 from pymolplugins.remote.otp import DEFAULT_OTP_PROMPT, configure_otp, get_otp_settings
 from .history_store import fuzzy_matches
 from .qt_widgets import CollapsibleSection, ColumnCompletion
+
+
+_HIDDEN_HOSTS_KEY = "ssh/hidden_hosts"
 
 
 class SourceLocationControls(QtWidgets.QWidget):
@@ -45,6 +49,7 @@ class SourceLocationControls(QtWidgets.QWidget):
         self.error.setWordWrap(True)
         self.error.setProperty("role", "error")
         layout.addWidget(self.error)
+        self._hidden_draft = set()
         self._build_settings()
         self._build_quick_start()
         self.completion = ColumnCompletion(self.connection.lineEdit())
@@ -77,6 +82,15 @@ class SourceLocationControls(QtWidgets.QWidget):
             button.clicked.connect(lambda _checked=False, widget=editor, selected_filter=filters: self._browse_setting(widget, selected_filter))
             row.addWidget(button)
             (advanced_form if editor is self.program else form).addRow(title, row)
+        shown = CollapsibleSection("Shown in Open from")
+        shown_layout = QtWidgets.QVBoxLayout(shown.content)
+        shown_layout.setContentsMargins(0, 0, 0, 0)
+        self.shown_hosts = QtWidgets.QListWidget()
+        self.shown_hosts.setAccessibleName("SSH hosts shown in Open from")
+        self.shown_hosts.setMaximumHeight(150)
+        self.shown_hosts.setToolTip("Uncheck a host to hide it from the Open from list.")
+        shown_layout.addWidget(self.shown_hosts)
+        form.addRow(shown)
         self._build_otp_settings(form, advanced_form)
         form.addRow(self.advanced_section)
         self.setup_help_button = QtWidgets.QPushButton("First SSH connection…")
@@ -128,12 +142,31 @@ class SourceLocationControls(QtWidgets.QWidget):
             profiles = ssh_profiles(self.config.text().strip())
         except (OSError, ValueError):
             return  # OK reports invalid config paths without discarding edits.
+        self._refresh_shown_hosts(profiles)
         self.otp_host.blockSignals(True)
         self.otp_host.clear()
         self.otp_host.addItems(profiles)
         self.otp_host.setCurrentText(chosen)
         self.otp_host.blockSignals(False)
         self._load_otp_settings()
+
+    @staticmethod
+    def _hidden_hosts():
+        return set(window_settings().value(_HIDDEN_HOSTS_KEY, [], type=list))
+
+    def _refresh_shown_hosts(self, profiles):
+        for index in range(self.shown_hosts.count()):
+            item = self.shown_hosts.item(index)
+            name = item.text().casefold()
+            if item.checkState() == QtCore.Qt.Checked:
+                self._hidden_draft.discard(name)
+            else:
+                self._hidden_draft.add(name)
+        self.shown_hosts.clear()
+        for profile in profiles:
+            item = QtWidgets.QListWidgetItem(profile, self.shown_hosts)
+            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+            item.setCheckState(QtCore.Qt.Unchecked if profile.casefold() in self._hidden_draft else QtCore.Qt.Checked)
 
     def _load_otp_settings(self, *_args):
         host = self.otp_host.currentText().strip()
@@ -179,7 +212,8 @@ class SourceLocationControls(QtWidgets.QWidget):
             "file paths, not a score or candidate name. Leave Import options alone unless needed.</p>"
             "<h3>Review and save</h3>"
             "<p>Inspect the structure, choose labels, then use <b>Save and next</b>. "
-            "Ordinary label clicks are drafts; <b>Previous / Next</b> navigate. "
+            "By default a single-choice label click saves one candidate when required fields are complete. "
+            "Use <b>More</b> to change click-saving or automatic advance. "
             "Use <b>Data → Recent configurations…</b> to reopen your work. "
             "SSH annotations are saved locally; remote files are not changed.</p>"
             "<h3>No SSH server listed?</h3>"
@@ -211,18 +245,23 @@ class SourceLocationControls(QtWidgets.QWidget):
         self.quick_start_dialog.exec_()
 
     def _update_connection_action(self):
-        self.settings_button.setText("Connections…" if self.remote or self.connection.count() > 1 else "Set up SSH…")
+        has_connections = self.remote or self.connection.count() > 1 or self._hidden_hosts()
+        self.settings_button.setText("Connections…" if has_connections else "Set up SSH…")
 
     def _browse_setting(self, editor, filters):
         selected, _ = QtWidgets.QFileDialog.getOpenFileName(self.settings_dialog, "Select file", editor.text() or os.path.expanduser("~/.ssh"), filters)
         if selected:
             editor.setText(selected)
+            if editor is self.config:
+                self._refresh_otp_hosts()
 
     def _configure(self):
         before = self.config.text(), self.program.text()
         program = self.program.text().strip() or default_ssh_program()
         self.program.setPlaceholderText(program or "SSH is not installed")
         self.dialog_error.hide()
+        self.shown_hosts.clear()
+        self._hidden_draft = self._hidden_hosts()
         self.otp_host.blockSignals(True)
         self.otp_host.setCurrentText(self.connection.currentText().strip() if self.remote else "")
         self.otp_host.blockSignals(False)
@@ -243,11 +282,18 @@ class SourceLocationControls(QtWidgets.QWidget):
             if enabled and not secret:
                 raise ValueError("Enter the authenticator setup key, not the current six-digit code.")
             prompt = (self.otp_prompt.text().strip() or DEFAULT_OTP_PROMPT) if enabled else DEFAULT_OTP_PROMPT
-            ssh_profiles(config)
+            profiles = ssh_profiles(config)
             SshClient(SshLocation(profile or "connection-check", "~", config, self.program.text().strip()),
                       otp_secret=secret, otp_prompt=prompt)
             if profile:
                 configure_otp(profile, secret, config, self.otp_remember.isChecked(), prompt)
+            self._refresh_shown_hosts(profiles)
+            if self._hidden_draft != self._hidden_hosts():
+                settings = window_settings()
+                settings.setValue(_HIDDEN_HOSTS_KEY, sorted(self._hidden_draft))
+                settings.sync()
+                if settings.status() != QtCore.QSettings.NoError:
+                    raise OSError("Could not save the host list in " + settings.fileName())
         except (OSError, ValueError, RuntimeError) as exc:
             traceback.print_exc()
             self.dialog_error.setText(str(exc))
@@ -276,14 +322,15 @@ class SourceLocationControls(QtWidgets.QWidget):
             self.error.show()
             return False
         self.error.hide()
+        hidden = self._hidden_hosts()
+        shown = [profile for profile in profiles if profile.casefold() not in hidden]
         self.connection.blockSignals(True)
         try:
             self.connection.clear()
             self.connection.addItem("This computer")
-            for profile in profiles:
-                self.connection.addItem(profile)
+            self.connection.addItems(shown)
             self.connection.setCurrentText(chosen or "This computer")
-            self.completion.set_columns(["This computer"] + profiles)
+            self.completion.set_columns(["This computer"] + shown)
         finally:
             self.connection.blockSignals(False)
         self._update_connection_action()

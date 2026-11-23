@@ -15,6 +15,7 @@ from .model import COLUMN_INTEGER, COLUMN_NUMBER, format_numeric_cell
 class ScoreProfileHeader(QtWidgets.QHeaderView):
     filterRequested = QtCore.Signal(str, object)
     choicesRequested = QtCore.Signal(str, object)
+    sortRequested = QtCore.Signal(str)
 
     def __init__(self, table, model, get_executor):
         super().__init__(QtCore.Qt.Horizontal, table)
@@ -26,6 +27,7 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
         self._show_profiles = False
         self.has_profiles = False
         self._expanded = False
+        self._title_click = False
         self._profile_lines = 3
         self._future = None
         self._cancel = Event()
@@ -34,7 +36,29 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
         self._timer.setInterval(30)
         self._timer.timeout.connect(self._collect)
         self._brush = _HeaderFilterInteraction(self)
+        self.setSectionsClickable(True)
+        self.sectionClicked.connect(self._sort_section)
         model.modelReset.connect(self._refresh)
+
+    def mouseReleaseEvent(self, event):
+        self._title_click = (event.button() == QtCore.Qt.LeftButton
+                             and (not self._expanded or event.pos().y() < super().sizeHint().height()))
+        try:
+            super().mouseReleaseEvent(event)
+        finally:
+            self._title_click = False
+
+    def _sort_section(self, index):
+        column = self.model().sortable_column(index)
+        if self._title_click and column:
+            self.sortRequested.emit(column)
+        self._refresh_sort_indicator()
+
+    def _refresh_sort_indicator(self):
+        index, descending = self.model().sort_indicator()
+        order = QtCore.Qt.DescendingOrder if descending else QtCore.Qt.AscendingOrder
+        self.setSortIndicator(index, order)
+        self.setSortIndicatorShown(index >= 0)
 
     def set_profiles_visible(self, visible):
         self._show_profiles = bool(visible)
@@ -58,6 +82,7 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
         self.selections = {index: filters.selections[column]
                            for index, column in enumerate(columns, self._first_profile)
                            if column in filters.selections}
+        self._refresh_sort_indicator()
         if self._expanded:
             self._cancel = Event()
             self._future = self._get_executor().submit(
@@ -254,6 +279,8 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
                 name = self.model().headerData(index, QtCore.Qt.Horizontal, QtCore.Qt.DisplayRole)
                 scope = "rows matching the other filters" if index in self.selections else "displayed rows"
                 lines = [str(name), f"{profile.total:,} {scope} · {profile.distinct:,} distinct"]
+                if self.model().sortable_column(index):
+                    lines.append("Click the column title to switch sort direction")
                 if profile.missing:
                     lines.append(f"Missing: {profile.missing:,} ({format_proportion(profile.missing, profile.total)})")
                 if self.is_selected(index, "missing"):
@@ -265,6 +292,7 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
                         lines.append(f"Selected range: {limits[0]} to {limits[1]}")
                     if self.can_filter:
                         lines.append("Drag across the histogram to set the range for this column")
+                        lines.append("Double-click the histogram to clear this column's header filter")
                 elif profile.categories and self.can_filter:
                     lines.append("Click categories to select or clear them")
                     if self.has_other(index, profile):
@@ -287,12 +315,29 @@ class _HeaderFilterInteraction(QtCore.QObject):
         self.viewport = header.viewport()
         self.viewport.setMouseTracking(True)
         self.viewport.installEventFilter(self)
+        self._click_timer = QtCore.QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.setTimerType(QtCore.Qt.PreciseTimer)
+        self._click_timer.timeout.connect(self._apply_click)
         self.reset()
 
     def reset(self):
+        self._click_timer.stop()
+        self._pending_click = None
+        self._reset_press()
+
+    def _reset_press(self):
         self.pressed = None
         self.current_bin = None
         self.viewport.unsetCursor()
+
+    def _apply_click(self):
+        if self._pending_click is not None:
+            click, self._pending_click = self._pending_click, None
+            self.header.filterRequested.emit(*click)
+
+    def _column_name(self, index):
+        return self.header.model().headerData(index, QtCore.Qt.Horizontal, QtCore.Qt.DisplayRole)
 
     def selected_bins(self, index):
         if self.pressed and self.pressed[:2] == (index, "bins"):
@@ -346,6 +391,19 @@ class _HeaderFilterInteraction(QtCore.QObject):
 
     def eventFilter(self, _widget, event):
         event_type = event.type()
+        if event_type == QtCore.QEvent.MouseButtonDblClick and event.button() == QtCore.Qt.LeftButton:
+            point = event.pos()
+            index = self.header.logicalIndexAt(point)
+            active_range = any(choice.kind == "range" for choice in self.header.selections.get(index, ()))
+            target = self._hit(point)
+            histogram = target and target[1] == "bins"
+            if (self.header.can_filter and self.header._expanded
+                    and (histogram or (active_range and self._summary(index).contains(point)))):
+                self.reset()
+                self.viewport.update()
+                if index in self.header.selections:
+                    self.header.choicesRequested.emit(self._column_name(index), ())
+                return True
         if event_type == QtCore.QEvent.MouseMove:
             if self.pressed and self.pressed[1] == "bins":
                 self.current_bin = self._bin_at(self.pressed[0], event.pos().x())
@@ -365,18 +423,26 @@ class _HeaderFilterInteraction(QtCore.QObject):
                 return True
         if event_type == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.LeftButton and self.pressed:
             target = self._hit(event.pos())
+            single_bin = False
             if self.pressed[1] == "bins":
                 self.current_bin = self._bin_at(self.pressed[0], event.pos().x())
+                single_bin = self.current_bin == self.pressed[2]
                 target = self.pressed
             same_target = target == self.pressed
             choice = self._choice(*target) if same_target and target[1] != "other" else None
-            self.reset()
+            self._reset_press()
             self.viewport.update()
             if same_target and target[1] == "other":
                 self.header.open_other(target[0], event.pos())
             elif choice is not None:
-                name = self.header.model().headerData(target[0], QtCore.Qt.Horizontal, QtCore.Qt.DisplayRole)
-                self.header.filterRequested.emit(name, choice)
+                name = self._column_name(target[0])
+                if single_bin:
+                    self._pending_click = name, choice
+                    self._click_timer.start(QtWidgets.QApplication.doubleClickInterval())
+                else:
+                    self._click_timer.stop()
+                    self._pending_click = None
+                    self.header.filterRequested.emit(name, choice)
             return True
         return False
 

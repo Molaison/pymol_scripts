@@ -724,6 +724,7 @@ def pp_view(preset="", object_name="", mode="auto", radius="4", scope="nearby",
 
 def __init_plugin__(app=None):
     from pymol.plugins import addmenuitemqt
+    from pymolplugins.collections.commands import pp_collections
     from pymolplugins.navigation.qt_keys import install_qt_navigation_keys
     from .toolbar import install_toolbar
 
@@ -732,7 +733,8 @@ def __init_plugin__(app=None):
         ("Change scene view…", "Scene view", "Change a loaded object's view or the scene lighting", pp_view),
         ("Click to focus", "Click to focus", "Inspect contacts around a point in the scene", toggle_interactive_focus),
         ("Align loaded objects…", "Align objects", "Compare objects already in the PyMOL scene", show_comparison_from_toolkit),
-        ("Pair and export files…", "Batch files", "Pair input files and write processed structures", show_batch_processing_from_toolkit),
+        ("Compare or process structures…", "Batch", "Compare a candidate set or process paired structures", show_batch_processing_from_toolkit),
+        ("Structure Collections…", "Collections", "Sample, cluster and preview a structure manifest", pp_collections),
         ("RFD4 · Proteina", "RFD4", "Open the RFD4 Studio workflow", show_rfd4_from_toolkit),
     )
     for label, _, _, callback in entries:

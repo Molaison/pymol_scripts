@@ -55,13 +55,15 @@ design_a,structures/model_a.pdb,0.82,典型模式
 
 点击类别或 **Missing** 的复选框可选中或取消。点 **Other…** 展开其余类别，用复选框逐项选，或用 **Select all**、**Clear all** 批量选择，再点 **Apply**。打开明细时保留原来的勾选。
 
-同列选项用 `or` 组合，各列之间用 `and`。直方图重新拖选会替换该列的表头范围，端点取所选柱子内的实际最小值和最大值。已筛选的列会保留满足其他条件的选项和范围，选中的类别即使当前计数为零也可以取消。
+同列选项用 `or` 组合，各列之间用 `and`。直方图重新拖选会替换该列的表头范围，端点取所选柱子内的实际最小值和最大值。双击直方图清除该列的表头筛选。已筛选的列会保留满足其他条件的选项和范围，选中的类别即使当前计数为零也可以取消。
 
 **Filter** 中的 `header_filter(…)` 显示表头管理的条件，可继续编辑。提交或保存组时会移除引号外的落单括号。打开旧表头叠加格式的筛选时，会合并重复类别，并保留每列最后一个范围。
 
 输入字段比较或匹配函数的值时，补全会提供该列的实际取值。类别值会按输入匹配，并在表达式中自动加引号。数值列会建议实际数值。**Add condition…** 里的 Value 也使用所选列的取值。
 
 分布图默认展开，CSV 来源行号显示在表格左侧的窄行头。在候选表旁，用 **Columns…** 选择要显示的列，用 **Table options** 切换分布图、来源行号和文件状态、查看行详情或导出带标注的 CSV。**Filter / sort…** 打开筛选和排序。打开分布图后，仍可拖选数字范围或点击分类来筛选。
+
+在 **Filter / sort… → Top per group…** 选分组列和评分，再点 **Apply filter**。例如用 `target` 分组，评分选 `ipsae` 或 `ipsae + 0.5 * iptm`。先应用行筛选，再按原始精度保留每组分数最高的可导航行。分组或分数缺失的行跳过，同分时保留原表中先出现的行。分组列会显示在结果里。可以把两个规则分别保存为命名筛选组，也可以在同一对话框点 **Remove ranking** 清掉排名。
 
 点击 Filter 旁箭头切换命名分组，或选 **New filter group…** 创建。编辑条件和排序后点 **Save group…**，用 **Delete** 删除所选组。CSV 源的人工修改写入 `review.override.json`，目录和场景组的修改写入各自的审阅状态。`filter_presets` 数组的每项包含唯一的 `name`、`expression` 及可选的 `sort_column`、`sort_descending`。组可重叠、可为空；override 中的 `[]` 清空全部组。需要自动整理分组时使用 [统一生成提示词](02_agent_review.md#复制提示词) 中的筛选组要求。
 
@@ -85,7 +87,11 @@ SSH 数据源默认在原 SSH profile 对应的服务器上跑，使用服务器
 
 ## 配置标注、恢复和导出
 
-在 **Settings → Annotations** 设置单选、多选或文本字段及必填条件。普通选择是草稿；**Save and next** 保存并前进。对单个候选的标注值按 Ctrl+点选可保存并前进；多选字段的普通点击仍是草稿。选择多行后显式保存；**More actions → Undo last save** 撤销上一次完整保存。失败时草稿和当前位置保留。评分卡的相对排名针对当前筛选集合；绝对方向和阈值需由用户配置。
+在 **Settings → Annotations** 设置单选、多选或文本字段及必填条件。单候选的单选标签在必填项完整时默认点击即保存。按住 Shift 点选可暂留草稿，多选字段的普通点击也保留草稿。选择多行后显式保存，**More actions → Undo last save** 撤销上一次完整保存。失败时草稿和当前位置保留。评分卡的相对排名针对当前筛选集合；绝对方向和阈值需由用户配置。
+
+点击保存、保存后前进、表格显示以及加载和预取偏好在修改时自动保存。换数据源或重开 PyMOL 时继续使用已选的偏好。
+
+在 **More → Highlight antibody CDRs (IMGT)** 可开启抗体可变区编号。表格有 `binder_chain` 或 `binder_chains` 时按该列选链，可写 `H+L`；否则从候选蛋白链中识别抗体可变区，并跳过声明的靶链。CDR1、CDR2、CDR3 在 cartoon 中分别为蓝色、橙色和洋红色。**More → IMGT numbering…** 可查结构残基号与 IMGT 编号的对应关系。编号用本机 ANARCII，结构残基号和 sticks 颜色保留。
 
 暂时不能判断时选择 **More → Mark current for later**；**Next marked for later** 用于回看。下次主动选择 **Open data… → Continue last review** 恢复最近的数据源、筛选和位置；打开面板不会自动连接历史 SSH 源。首次导入后的历史记录可能仍在后台写入，暂不可用时等保存完成再试。
 
@@ -125,7 +131,7 @@ sa_export_csv "D:/review/scores_reviewed.csv"
 
 先在运行 PyMOL 的电脑完成现有 SSH 设置并确认 `ssh my-lab` 可以连接；Windows 默认读取 `%USERPROFILE%/.ssh/config`。首次主机信任以及私钥或密码步骤仍由现有 SSH setup 完成。远端需要 `python3`，不需要 SSHFS 或 WSL worker。SSH profile 是 Host 别名，不是密码。
 
-在 **Open from** 选该别名，填写远端绝对路径或 `~/` 路径，例如 `/data/review/scores.tsv`，再点 **Open**。**Connections…** 可选择已有 SSH config 和登录程序。表格相对路径按远端表格目录解析，可设置远端 Base folder；插件按需下载结构到本机缓存，并复用认证连接。原 SSH config、跳板或代理和 `known_hosts` 继续生效。远端配置先读、本地 override 优先，远端源文件只读。
+在 **Open from** 选该别名，填写远端绝对路径或 `~/` 路径，例如 `/data/review/scores.tsv`，再点 **Open**。**Connections…** 可选择已有 SSH config 和登录程序。在 **Shown in Open from** 取消勾选可隐藏别名，再勾选可恢复显示。隐藏的别名仍可手输，也可通过 **Continue last review** 恢复。表格相对路径按远端表格目录解析，可设置远端 Base folder；插件按需下载结构到本机缓存，并复用认证连接。原 SSH config、跳板或代理和 `known_hosts` 继续生效。远端配置先读、本地 override 优先，远端源文件只读。
 
 ### 为服务器启用内置 OTP
 

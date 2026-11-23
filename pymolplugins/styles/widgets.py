@@ -11,6 +11,7 @@ class AppearancePage(QtWidgets.QWidget):
         super().__init__(parent)
         self.kind = kind
         self.source = source
+        self._owned_snapshots = []
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(6, 10, 6, 6)
         form = QtWidgets.QFormLayout()
@@ -73,17 +74,26 @@ class AppearancePage(QtWidgets.QWidget):
     def _apply(self):
         try:
             preset, selection, variant = self._arguments()
-            registry.pp_style_apply(preset, selection, variant=variant)
+            snapshot = registry.pp_style_apply(preset, selection, variant=variant)
         except Exception as error:
             self.status.setText(str(error))
             return
+        if snapshot is not None:
+            self._owned_snapshots.append(int(snapshot))
         target = "the whole scene" if self.kind == "lighting" else self.source()
         self.status.setText(f"{self.preset.currentText()} applied to {target}.")
 
     def _undo(self):
+        active = {snapshot.snapshot_id for snapshot in registry._REGISTRY.snapshots}
+        self._owned_snapshots = [key for key in self._owned_snapshots if key in active]
+        if not self._owned_snapshots:
+            self.status.setText("No style from this page to undo.")
+            return
         try:
-            snapshot = registry.pp_style_revert()
+            snapshot = registry.pp_style_revert(self._owned_snapshots[-1])
         except Exception as error:
             self.status.setText(str(error))
             return
+        if snapshot is not None:
+            self._owned_snapshots.pop()
         self.status.setText("Previous style restored." if snapshot else "No style to undo.")

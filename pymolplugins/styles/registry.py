@@ -8,6 +8,7 @@ view or starts a render unless the caller explicitly opts in.
 from dataclasses import dataclass, field, replace
 from difflib import get_close_matches
 from functools import wraps
+import math
 import os
 import sys
 import traceback
@@ -575,6 +576,59 @@ def _effect_inventory(presets):
     }
 
 
+def _b_range_targets(command_api, presets, target):
+    operations = [
+        operation
+        for preset in presets
+        for operation in preset.color_operations
+        if operation["action"] == "b_range"
+    ]
+    if not operations:
+        return {}
+
+    values = {}
+    try:
+        command_api.iterate(
+            target.selection,
+            "_pp_b_range_values[(model, index)] = b",
+            space={"_pp_b_range_values": values},
+        )
+    except Exception as exc:
+        raise ValueError(
+            "could not read pLDDT values from the selected B field: %s" % exc
+        ) from exc
+    if set(values) != set(target.atom_keys):
+        raise RuntimeError("style target changed while pLDDT values were being read")
+
+    numeric_values = {}
+    for key, raw_value in values.items():
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            value = float("nan")
+        if not math.isfinite(value) or value < 0.0 or value > 100.0:
+            raise ValueError(
+                "pLDDT values stored in the B field must be finite and in 0..100 "
+                "for every selected atom; atom %s:%s has %r" % (key[0], key[1], raw_value)
+            )
+        numeric_values[key] = value
+    targets = {}
+    for operation in operations:
+        bins = [[] for _ in operation["ranges"]]
+        for key, value in numeric_values.items():
+            for index, rule in enumerate(operation["ranges"]):
+                upper_matches = (
+                    value <= rule["upper"]
+                    if rule.get("upper_inclusive", False)
+                    else value < rule["upper"]
+                )
+                if rule["lower"] <= value and upper_matches:
+                    bins[index].append(key)
+                    break
+        targets[id(operation)] = tuple(tuple(atom_keys) for atom_keys in bins)
+    return targets
+
+
 def _revert_limitations(snapshot_enabled, inventory):
     if snapshot_enabled:
         limitations = [
@@ -770,9 +824,27 @@ class StyleRegistry:
             for name, value in preset.selection_settings.items():
                 self.cmd.set(name, value, selection)
 
-    def _apply_operations(self, presets, selection):
+    def _apply_operations(self, presets, selection, b_range_targets, snapshot):
         for preset in presets:
             for operation in preset.color_operations:
+                if operation["action"] == "b_range":
+                    for rule_index, (rule, atom_keys) in enumerate(
+                        zip(
+                            operation["ranges"],
+                            b_range_targets[id(operation)],
+                        ),
+                        start=1,
+                    ):
+                        _apply_to_atom_groups(
+                            self.cmd,
+                            snapshot,
+                            "b_range_%d" % rule_index,
+                            _group_atom_keys(atom_keys),
+                            lambda target_selection, color=rule["color"]: self.cmd.color(
+                                color, target_selection
+                            ),
+                        )
+                    continue
                 target = _selection(operation, selection)
                 if operation["action"] == "color":
                     self.cmd.color(operation["color"], target)
@@ -905,6 +977,7 @@ class StyleRegistry:
             raise ValueError("MASS requires protein residues in the selected target")
         snapshot_enabled = _as_bool(snapshot)
         render_requested = _as_bool(render)
+        b_range_targets = _b_range_targets(self.cmd, presets, target)
         # A transient snapshot is always captured so a failed apply is atomic,
         # even when the caller opts out of retaining a successful snapshot.
         record = self._new_snapshot(presets, target, consume_id=False)
@@ -912,7 +985,7 @@ class StyleRegistry:
             for preset in presets:
                 self._register_colors(preset)
             self._apply_settings(presets, target.selection)
-            self._apply_operations(presets, target.selection)
+            self._apply_operations(presets, target.selection, b_range_targets, record)
             if render_requested:
                 defaults = presets[-1].render_defaults
                 self.render(

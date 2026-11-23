@@ -1,6 +1,6 @@
 # 项目上下文
 
-更新：2026-10-05
+更新：2026-11-24
 
 ## 目标与成功标准
 新手目标：没有历史配置时，靠布局、明确控件和状态反馈完成首次打开、查看和保存，而不是阅读常驻教程。每次增加文字前先判断能否用UI表达；解释按需打开，错误、进度和未保存状态不得隐藏。连续审阅目标：显式恢复、later路线、分数解释和可交接摘要，不改变质量标签含义。
@@ -89,3 +89,13 @@ reference当前合同（0.15.1）：用户明确要求常驻固定对象，已�
 ## 2026-11-15 RFD4 统一插件
 
 0.19.0 将 RFD4-PyMOL 0.2.1 纳入 `pymolplugins.rfd4`，唯一入口 **Plugin → PymolPlugins: RFD4 · Proteina**；统一 ZIP/更新，延迟导入，直接复用同包配色、Contacts 与序列选择。beta 和本机真实用户目录均已迁移，旧独立包及快捷入口备份退役，地址/默认 f102/凭据字节保持。两端各两次正常启动的最终 JSON passed，46 项现有检查通过。来源、安装哈希、原生宿主脚本和科学证据复用边界见 [RFD4 合并验收](docs/validation/03_rfd4_integration_2026-11-15.md)。本轮无新推理，不重提原两轮任务。
+
+## 2026-11-23 未合并修改审查与整合
+
+本次以 `origin/main` 的 `542a57a` 为统一实现基线，在独立工作树 `D:/SyncPath/GitRepo/PymolPlugins-reviewed-integration` 的 `codex/reviewed-integration-20261123` 整合有独立价值的增量。原分支、原工作树和全部原始修改的本地快照保留；产品分支排除依赖缓存、实验输出与重复实现。
+
+保留 main 的 Review 布局和独立 Color / Lighting 页面。Collections、批量比较、参考 / pocket / CDR、扩展序列及映射 / 命令草稿分别归现有 canonical owner；不恢复第二套导航、PLIP runner 或旧样式对话框。
+
+文件源质量标签绑定成功加载时的可携带版本身份，缓存位置与标注版本分开。新结构不自动沿用旧版本质量标签；旧版本与未绑定历史保留，Later 继续跟随行 ID。版本精度沿用已有元数据和可用摘要，标注回调不增加源文件或 SSH 读取。
+
+审查取舍、实际验证和保留的基线问题见 [整合验收](docs/validation/04_reviewed_integration_2026-11-23.md)。本机唯一恢复入口为 [状态与证据](D:/SyncPath/GitRepo/PymolPlugins/output/07_reviewed_integration/01_recovery.md)。发布和用户安装仍按原授权边界处理。

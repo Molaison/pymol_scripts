@@ -13,10 +13,11 @@ from pymolplugins.core.windows_paths import windows_long_path
 from .command_templates import validate_commands
 from .filtering import validate_filter_presets
 from .review_steps import effective_steps, validate_steps
+from .reference_track import validate_reference_track
 from pymolplugins.remote.ssh import SshClient, is_ssh_path, parse_ssh_path, ssh_source_root
 
 
-REVIEW_KEYS = ("path_column", "id_column", "display_columns", "label_column", "reference_column", "step_cmd", "bucket_cmds", "filter_presets", "steps", "filter_text", "sort_column", "sort_descending")
+REVIEW_KEYS = ("path_column", "id_column", "display_columns", "label_column", "reference_column", "step_cmd", "bucket_cmds", "filter_presets", "steps", "filter_text", "sort_column", "sort_descending", "reference_track")
 _BUNDLE_TABLE_FIELDS = ("path_column", "display_columns", "label_column", "id_column")
 _LEGACY_BUNDLE_STEPS = {
     (
@@ -73,7 +74,7 @@ def review_table_layer(path, raw, table_path):
     if raw.get("mode") == "bundle":
         if not bundle_matches_table(raw, table_path):
             return {}
-        raw = {name: raw[name] for name in (*_BUNDLE_TABLE_FIELDS, "step_cmd") if name in raw}
+        raw = {name: raw[name] for name in (*_BUNDLE_TABLE_FIELDS, "step_cmd", "reference_track") if name in raw}
         raw.setdefault("step_cmd", "")
     return {**raw, "step_cmd": ""} if is_legacy_bundle_step(raw.get("step_cmd")) else raw
 
@@ -189,6 +190,8 @@ def validate_review_config(raw, *, validate_order=True):
         validate_commands(raw.get("step_cmd", ""), buckets, names)
     if "filter_presets" in raw:
         result["filter_presets"] = validate_filter_presets(raw["filter_presets"])
+    if "reference_track" in raw:
+        result["reference_track"] = validate_reference_track(raw["reference_track"])
     return result
 
 

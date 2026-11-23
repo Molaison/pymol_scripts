@@ -39,12 +39,13 @@ _PAGES = (
     ),
     (
         "审阅并保存",
-        "默认先编辑标签草稿，再用 Save and next 保存并继续。",
+        "默认点击完整的单候选单选标签即可保存。",
         "<h3>一次候选的审阅循环</h3>"
         "<p><b>查看</b>：检查当前结构、分数及配置好的 Review steps / reference。</p>"
         "<p><b>判断</b>：选择标签。暂时不能判断时，使用 "
         "<b>Review tools → Mark current for later</b>。</p>"
-        "<p><b>保存</b>：点击 <b>Save and next</b> 保存当前标签并进入下一条。"
+        "<p><b>保存</b>：单候选的单选标签在必填项完整时，点击即保存。"
+        "<b>More</b> 中可调整点击保存和保存后前进，这些偏好会自动保存。"
         "<b>Previous / Next</b> 用于导航。</p>"
         "<h3>下次继续</h3>"
         "<p><b>Open data… → Continue last review</b> 恢复最近一次审阅；"

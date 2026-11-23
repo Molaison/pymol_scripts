@@ -5,24 +5,30 @@ from uuid import uuid4
 
 from pymol import cmd
 from pymol.wizard import Wizard
+from pymolplugins.annotation.compare_scene import molecule_signature
 
 from .focus_pocket import close_pocket, pocket_for
 from .focus_view import RADIUS, draw_focus, focus_identity, picked_source
+from .workspace import _check_settings, window_settings
 
 
 _CAMERAS = {"keep": "Keep view", "center": "Center smoothly", "frame": "Frame pocket"}
+_SCOPES = {"scene": "Whole scene", "object": "Per object"}
+_SCOPE_SETTING = "interactive_focus/scope"
 _CONTACT_LEVELS = {
     "off": ("Off", ()),
-    "polar": ("Polar", ("polar_contacts",)),
-    "ionic": ("Polar + salts", ("polar_contacts", "salt_bridges")),
-    "interface": ("Interface", ("polar_contacts", "salt_bridges", "pi_stacks")),
+    "polar": ("Polar", ("polar_contacts", "buried_unsatisfied_polar")),
+    "ionic": ("Polar + salts", ("polar_contacts", "buried_unsatisfied_polar", "salt_bridges")),
+    "interface": ("Interface", ("polar_contacts", "buried_unsatisfied_polar", "salt_bridges", "pi_stacks")),
 }
 
 
 class InteractiveFocus(Wizard):
     def __init__(self, api):
         super().__init__(_self=api)
-        self.layer = None
+        self.layers = {}
+        saved_scope = window_settings().value(_SCOPE_SETTING, "scene", type=str)
+        self.scope = saved_scope if saved_scope in _SCOPES else "scene"
         self.camera = self.session.get("camera", "keep")
         self.contacts = self.session.get("contacts", "interface")
         self.error = ""
@@ -39,6 +45,10 @@ class InteractiveFocus(Wizard):
             )
         }
 
+    @property
+    def layer(self):
+        return next(reversed(self.layers.values()), None)
+
     def start(self):
         for name, (_, value) in self.settings.items():
             self.cmd.set(name, value)
@@ -49,16 +59,24 @@ class InteractiveFocus(Wizard):
                 Wizard.event_mask_dirty | Wizard.event_mask_state)
 
     def get_panel(self):
+        clear = [[2, "Clear focus", "cmd.get_wizard().clear_active()"]]
+        if self.scope == "object":
+            clear.append([2, "Clear all focuses", "cmd.get_wizard().clear()"])
         return [
             [1, f"Interactive focus ({RADIUS:g} A)", ""],
+            [3, f"Scope: {_SCOPES[self.scope]}", "scope"],
             [3, f"Camera: {_CAMERAS[self.camera]}", "camera"],
             [3, f"Contacts: {_CONTACT_LEVELS[self.contacts][0]}", "contacts"],
             [3, "Pocket options", "pocket"],
-            [2, "Clear focus", "cmd.get_wizard().clear()"],
+            *clear,
             [2, "Done", "cmd.set_wizard()"],
         ]
 
     def get_menu(self, tag):
+        if tag == "scope":
+            return [[2, "Focus scope", ""]] + [
+                [1, label, f"cmd.get_wizard().set_scope({key!r})"] for key, label in _SCOPES.items()
+            ]
         if tag == "pocket":
             return pocket_for(self).menu()
         if tag == "camera":
@@ -87,6 +105,8 @@ class InteractiveFocus(Wizard):
         prompt = [self.layer.label]
         if kinds:
             prompt.append("  |  ".join(label for kind, label in labels if kind in kinds))
+        if self.layer.buried_count and "buried_unsatisfied_polar" in kinds:
+            prompt.append(f"Orange spheres: buried unsatisfied polar {self.layer.buried_count}")
         pocket = pocket_for(self)
         prompt.extend(pocket.notes)
         if pocket.cavity_note:
@@ -105,14 +125,28 @@ class InteractiveFocus(Wizard):
 
     def set_contacts(self, level):
         self.contacts = self.session["contacts"] = level
-        if self.layer:
-            self.layer.show_contacts(self.cmd, _CONTACT_LEVELS[level][1])
+        for layer in self.layers.values():
+            layer.show_contacts(self.cmd, _CONTACT_LEVELS[level][1])
+        self.cmd.refresh_wizard()
+
+    def set_scope(self, scope):
+        if scope not in _SCOPES:
+            raise ValueError(f"Unknown focus scope: {scope}")
+        settings = window_settings()
+        settings.setValue(_SCOPE_SETTING, scope)
+        settings.sync()
+        _check_settings(settings)
+        self.scope = scope
+        if scope == "scene" and self.layer:
+            self._remove_layers([source for source in self.layers if source != self.layer.source])
+        else:
+            pocket_for(self).update()
         self.cmd.refresh_wizard()
 
     def set_pocket_option(self, key, value):
         pocket = pocket_for(self)
         pocket.set_option(key, value)
-        pocket.update(self.layer)
+        pocket.update()
         self.cmd.refresh_wizard()
 
     def do_select(self, name):
@@ -141,44 +175,68 @@ class InteractiveFocus(Wizard):
         if self.capture not in self.cmd.get_names("selections", enabled_only=1):
             self.clear()
             self.cmd.select(self.capture, "none", enable=1, quiet=1)
-        elif self.layer and self.layer.source not in self.cmd.get_names("objects", enabled_only=1):
-            self.clear()
+        elif self.layers:
+            enabled = set(self.cmd.get_names("objects", enabled_only=1))
+            stale = [source for source, layer in self.layers.items()
+                     if source not in enabled or molecule_signature(self.cmd, source) != layer.source_signature]
+            if stale:
+                self._remove_layers(stale)
+                self.cmd.refresh_wizard()
 
     def do_state(self, _state):
-        if self.layer and not self.handling_pick:
-            source = self.layer.source
-            if source not in self.cmd.get_names("objects") or self.layer.state != self.cmd.get_object_state(source):
-                self.clear()
+        if self.closed or self.handling_pick or not self.layers:
+            return
+        objects = set(self.cmd.get_names("objects", enabled_only=1))
+        stale = [source for source, layer in self.layers.items()
+                 if source not in objects or layer.state != self.cmd.get_object_state(source)]
+        if stale:
+            self._remove_layers(stale)
+            self.cmd.refresh_wizard()
 
     def _focus_pick(self, selection):
         try:
-            picked = picked_source(self.cmd, selection, self.layer)
+            picked = picked_source(self.cmd, selection, self.layers.values())
             if picked is None:
                 return
             source, index = picked
             state, residue = focus_identity(self.cmd, source, index)
-            previous = self.layer
-            if previous and (source, state, residue) == (previous.source, previous.state, previous.residue):
-                self.clear()
-                return
-            self.layer = draw_focus(self.cmd, self.prefix, source, index, state, residue)
-            if previous:
-                previous.delete(self.cmd)
-            self.layer.show_contacts(self.cmd, _CONTACT_LEVELS[self.contacts][1])
-            pocket_for(self).update(self.layer)
-            self.layer.move_camera(self.cmd, self.camera)
+            previous = self.layers.get(source)
+            if previous and (state, residue) == (previous.state, previous.residue):
+                self._remove_layers([source])
+            else:
+                layer = draw_focus(self.cmd, self.prefix, source, index, state, residue)
+                if self.scope == "scene":
+                    replaced = tuple(self.layers.values())
+                    self.layers.clear()
+                else:
+                    replaced = (self.layers.pop(source),) if previous else ()
+                self.layers[source] = layer
+                for old in replaced:
+                    old.delete(self.cmd)
+                layer.show_contacts(self.cmd, _CONTACT_LEVELS[self.contacts][1])
+                pocket_for(self).update()
+                layer.move_camera(self.cmd, self.camera)
             self.error = ""
         except Exception as error:
             self.error = f"Focus skipped: {error}"
             print_exc()
         self.cmd.refresh_wizard()
 
-    def clear(self):
-        layer, self.layer = self.layer, None
-        self.error = ""
-        pocket_for(self).update(None)
-        if layer:
+    def _remove_layers(self, sources):
+        removed = [self.layers.pop(source) for source in sources]
+        for layer in removed:
             layer.delete(self.cmd)
+        pocket_for(self).update()
+
+    def clear_active(self):
+        if self.layer:
+            self._remove_layers([self.layer.source])
+        self.error = ""
+        self.cmd.refresh_wizard()
+
+    def clear(self):
+        self._remove_layers(tuple(self.layers))
+        self.error = ""
         if not self.closed:
             self.cmd.refresh_wizard()
 

@@ -23,11 +23,13 @@ from acceptance_bundle import (
     acc_bind_review_keys,
     acc_contact_sidechains,
     acc_ligand_sticks,
-    acc_polar_contacts,
     acc_publication_defaults,
     acc_sidechain_sticks,
     acc_store_scene,
     asset_name,
+)
+from acceptance_interface import (
+    assembly_details, atom_selection, draw_buried_unsatisfied, polar_pairs, show_interface_sticks,
 )
 from acceptance_pocket_void import pocket_cavity_layers
 
@@ -68,20 +70,17 @@ def _contact_residue_sticks(residue_selection: str) -> str:
     return f"(({residue_selection}) and polymer.protein and not elem H)"
 
 
-def _pocket_distances(identity, protein, ligand, cutoff, covalent_link):
+def _pocket_distances(identity, protein, ligand, cutoff, covalent_link, state):
     polar = f"({protein}) and elem N+O+S"
     ligand_polar = f"({ligand}) and elem N+O+S"
     interactions = {}
+    endpoints = set()
     if _count(polar) and _count(ligand_polar):
-        pairs = set()
-        for left, right in (("donors", "acceptors"), ("acceptors", "donors")):
-            pairs.update(cmd.find_pairs(
-                f"({polar}) and {left}", f"({ligand_polar}) and {right}",
-                cutoff=cutoff, mode=1, angle=45,
-            ))
+        pairs = polar_pairs(cmd, polar, ligand_polar, state, cutoff)
         for (receptor, receptor_id), (binder, binder_id) in sorted(pairs):
-            first = f"{receptor} and index {receptor_id}"
-            second = f"{binder} and index {binder_id}"
+            endpoints.update(((receptor, receptor_id), (binder, binder_id)))
+            first = atom_selection([(receptor, receptor_id)])
+            second = atom_selection([(binder, binder_id)])
             kind = "short_contacts" if cmd.get_distance(first, second) < 2.4 else "polar_contacts"
             reset = kind not in interactions
             name = interactions.setdefault(kind, asset_name(identity, kind))
@@ -93,6 +92,7 @@ def _pocket_distances(identity, protein, ligand, cutoff, covalent_link):
         name = asset_name(identity, "covalent_link")
         cmd.distance(name, first, second, label=1, quiet=1, reset=1)
         interactions["covalent_link"] = name
+        endpoints.update(cmd.index(f"({first}) or ({second})"))
 
     for kind, name in interactions.items():
         color = {"polar_contacts": "teal", "short_contacts": "magenta", "covalent_link": "orange"}[kind]
@@ -100,7 +100,15 @@ def _pocket_distances(identity, protein, ligand, cutoff, covalent_link):
         cmd.set("dash_radius", 0.07, name)
         cmd.set("label_size", 11, name)
         cmd.disable(name)
-    return interactions
+    return interactions, endpoints
+
+
+def _interface_atom_details(identity, first, second, residues, state):
+    buried = assembly_details(cmd, first, second, residues, state)
+    marker = draw_buried_unsatisfied(cmd, str(identity), buried.values())
+    if marker:
+        cmd.disable(marker)
+    return buried, marker
 
 
 def style_residue_labels(api, labels, *, atom_size=False):
@@ -301,7 +309,11 @@ def ligand_pocket_review(
     _require_atoms(pocket_sticks, "pocket contact-residue display")
 
     contact_scope = pocket_name if _truthy(show_polar_contacts, True) else "none"
-    distances = _pocket_distances(identity, contact_scope, ligand_name, float(polar_cutoff), covalent_link)
+    state = cmd.get_state()
+    distances, endpoints = _pocket_distances(identity, contact_scope, ligand_name, float(polar_cutoff), covalent_link, state)
+    buried, buried_marker = _interface_atom_details(
+        identity, protein, ligand_name, f"({pocket_sticks}) or ({ligand_name})", state
+    )
     cavity_layers = {}
     if _truthy(show_cavity, True):
         cavity_layers = pocket_cavity_layers(identity, protein, ligand_name, centers=cavity_centers)
@@ -328,11 +340,14 @@ def ligand_pocket_review(
     cmd.show("surface", pocket_surface_name)
     _set("transparency", float(focus_surface_transparency), pocket_surface_name)
     cmd.show("cartoon", protein)
-    cmd.show("sticks", pocket_sticks)
     if anchor_residues:
         anchors = f"({protein}) and ({anchor_residues})"
         _require_atoms(anchors, "pocket anchors")
         acc_sidechain_sticks(anchors, carbon_color=pocket_carbon_color, stick_radius=0.22)
+    cmd.hide("sticks", pocket_sticks)
+    show_interface_sticks(cmd, pocket_sticks, atom_selection(endpoints), atom_selection(buried))
+    if buried_marker:
+        cmd.enable(buried_marker)
     if distances:
         for distance in distances.values():
             cmd.enable(distance)
@@ -340,6 +355,8 @@ def ligand_pocket_review(
     for cavity_object in cavity_layers:
         cmd.enable(cavity_object)
     message = [str(identity)]
+    if buried_marker:
+        message.append(f"Orange spheres: {len(buried)} buried unsatisfied polar atoms")
     message.extend(legend for legend, count in cavity_layers.values())
     for kind, legend in (
         ("polar_contacts", "Teal dashes: candidate polar contacts"),
@@ -390,6 +407,7 @@ def ligand_pocket_review(
         "ligand": ligand_name,
         "pocket_residues": pocket_name,
         "pocket_surface": pocket_surface_name,
+        "buried_unsatisfied_polar": buried_marker,
         "polar_contacts": distances.get("polar_contacts", ""),
         "distances": distances,
         "cavity_dots": next(iter(cavity_layers), ""),
@@ -473,20 +491,22 @@ def protein_interface_review(
     _require_atoms(partner_sticks, "partner interface contact-residue display")
 
     polar_object = ""
+    endpoints = set()
+    state = cmd.get_state()
     if _truthy(show_polar_contacts, True):
         target_polar = f"({target_contacts}) and not elem H and elem N+O+S"
         partner_polar = f"({partner_contacts}) and not elem H and elem N+O+S"
         if _count(target_polar) and _count(partner_polar):
-            polar_object = acc_polar_contacts(
-                polar_name,
-                target_polar,
-                partner_polar,
-                cutoff=float(polar_cutoff),
-                color="yelloworange",
-                dash_radius=0.06,
-                hide_distance_labels=1,
-            )
+            for first, second in sorted(polar_pairs(cmd, target_polar, partner_polar, state, float(polar_cutoff))):
+                endpoints.update((first, second))
+                cmd.distance(polar_name, atom_selection([first]), atom_selection([second]), label=0, quiet=1)
+                polar_object = polar_name
+            if polar_object:
+                cmd.set("dash_color", "yelloworange", polar_object)
+                cmd.set("dash_radius", 0.06, polar_object)
 
+    interface = f"({target_sticks}) or ({partner_sticks})"
+    buried, buried_marker = _interface_atom_details(identity, target, partner, interface, state)
     cmd.hide("sticks", target_sticks)
     cmd.hide("sticks", partner_sticks)
     if polar_object:
@@ -503,8 +523,9 @@ def protein_interface_review(
     cmd.hide("surface", target)
     cmd.show("cartoon", target)
     cmd.show("cartoon", partner)
-    cmd.show("sticks", target_sticks)
-    cmd.show("sticks", partner_sticks)
+    show_interface_sticks(cmd, interface, atom_selection(endpoints), atom_selection(buried))
+    if buried_marker:
+        cmd.enable(buried_marker)
     if polar_object:
         cmd.enable(polar_object)
     acc_store_scene(
@@ -514,6 +535,7 @@ def protein_interface_review(
         message=(
             f"Interface residues: any cross-partner heavy-atom contact <= "
             f"{float(interface_cutoff):g} A; dashes are donor/acceptor geometry candidates."
+            + (f"\nOrange spheres: {len(buried)} buried unsatisfied polar atoms." if buried_marker else "")
         ),
     )
 
@@ -525,6 +547,7 @@ def protein_interface_review(
         "target_interface": target_contacts,
         "partner_interface": partner_contacts,
         "polar_contacts": polar_object,
+        "buried_unsatisfied_polar": buried_marker,
         "scenes": [overview_scene, focus_scene],
         "initial_scene": chosen,
         "target_interface_atoms": _count(target_contacts),

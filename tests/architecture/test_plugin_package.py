@@ -95,7 +95,8 @@ assert set(menus) == {
     "PymolPlugins|Maintenance|Reload toolkit", "PymolPlugins|Maintenance|Doctor",
     "PymolPlugins|Maintenance|Capabilities", "PymolPlugins|Command Help…",
     "PymolPlugins|Review structures…",
-    "PymolPlugins|Pair and export files…",
+    "PymolPlugins|Compare or process structures…",
+    "PymolPlugins|Structure Collections…",
     "PymolPlugins|RFD4 · Proteina",
     "PymolPlugins|Maintenance|Updates",
 }, menus

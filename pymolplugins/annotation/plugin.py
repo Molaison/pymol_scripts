@@ -23,14 +23,18 @@ from dataclasses import dataclass, field, fields, replace
 from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 import traceback
 import sys
-from pymolplugins.annotation.filtering import compile_filter, compile_view_filter
-from pymolplugins.annotation.header_filters import normalize_filter_query, read_header_filters
+from pymolplugins.annotation.filtering import compile_filter, compile_view
+from pymolplugins.annotation.header_filters import normalize_filter_query, read_header_filters, with_group_ranking
 from pymolplugins.annotation.persistence import pending_errors, submit_write
 from pymolplugins.annotation.sources.csv_source import CsvReadCancelled, CsvSourceError, read_csv_header
 from pymolplugins.annotation.review_config import default_fields, decode_value, field_key, missing_required, validate_fields, validate_score_config
 from pymolplugins.annotation.review_steps import ReviewObjects, effective_steps, validate_steps
 from pymolplugins.annotation.scene_groups import CandidateBundles, ancestors, candidates as scene_candidates, delete_owned, group_parents, write_manifest
 from pymolplugins.annotation.review_actions import save_annotations, undo_annotations
+from pymolplugins.annotation.provenance import (
+    LoadedSourceVersion, record_loaded_source, activate_loaded_source,
+    loaded_source_token, forget_loaded_source,
+)
 from pymolplugins.annotation.score_summary import prepare_score_summary
 from pymolplugins.annotation.model import format_numeric_cell
 from pymolplugins.annotation.command_templates import format_commands
@@ -478,6 +482,7 @@ class AnnotatorState:
     id_column: str = ""
     label_column: str = ""
     reference_column: str = ""
+    reference_track: Dict[str, str] = field(default_factory=dict)
     steps: list = field(default_factory=list)
     step_assets: dict = field(default_factory=dict)
     step_materialized: dict = field(default_factory=dict)
@@ -510,7 +515,7 @@ class AnnotatorState:
     bucket_cmds: Dict[str, str] = field(default_factory=dict)
     step_cmd: str = "zoom {object}"
     auto_advance: bool = True
-    save_on_label_click: bool = False
+    save_on_label_click: bool = True
     show_source_row: bool = True
     show_file_status: bool = False
     keep_previous: bool = False
@@ -533,6 +538,7 @@ class AnnotatorState:
     annotation_generation: int = 0
     row_annotation_store: Optional[RowAnnotationStore] = None
     materialized_paths: Dict[str, MaterializedStructure] = field(default_factory=dict)
+    loaded_source_versions: Dict[str, LoadedSourceVersion] = field(default_factory=dict)
     materialization_errors: Dict[str, str] = field(default_factory=dict)
     navigation_session: Optional[NavigationSession] = None
     navigation_generation: int = -1
@@ -600,6 +606,31 @@ _PERSISTED_INT_BOUNDS = {
     "preload_ahead": (0, 20),
     "preload_interval_ms": (50, 5000),
 }
+_REVIEW_CHECKBOX_PREFERENCES = {
+    "save_on_label_click": "save_on_label_click_cb",
+    "auto_advance": "auto_advance_cb",
+    "antibody_cdrs": "antibody_cdrs_cb",
+    "keep_previous": "keep_previous_cb",
+    "prefer_gz": "prefer_gz_cb",
+    "skip_annotated": "skip_annotated_cb",
+    "preload_enabled": "preload_enabled_cb",
+    "background_decompress_gz": "bg_decompress_cb",
+    "cache_enabled": "cache_enabled_cb",
+}
+_REVIEW_ACTION_PREFERENCES = {
+    "save_on_label_click": "save_on_label_click_action",
+    "auto_advance": "auto_advance_action",
+    "antibody_cdrs": "antibody_cdrs_action",
+    "show_source_row": "show_source_row_action",
+    "show_file_status": "show_file_status_action",
+    "score_distributions": "column_profiles_action",
+}
+_REVIEW_SPIN_PREFERENCES = {
+    "preload_ahead": "preload_ahead_spin",
+    "preload_interval_ms": "preload_interval_spin",
+}
+_REVIEW_PREFERENCES_PREFIX = "structure_annotator/preferences/"
+_REVIEW_VIEW_PREFERENCE_DEFAULTS = {"score_distributions": True, "antibody_cdrs": False}
 _PERSISTED_SOURCE_STRING_FIELDS = (
     "source_mode",
     "csv_path",
@@ -775,7 +806,8 @@ def _view_entries(
         if sort_descending is None
         else bool(sort_descending)
     )
-    predicate = _filter_predicate(entries, active_filter)
+    columns = tuple(entries[0].metadata) if entries else ()
+    predicate, ranking = compile_view(active_filter, columns)
     visible = [
         entry
         for entry in entries
@@ -785,7 +817,7 @@ def _view_entries(
         and predicate(entry)
     ]
     return _sort_entries(
-        visible,
+        ranking.select(visible) if ranking else visible,
         column=active_sort,
         descending=active_descending,
     )
@@ -822,10 +854,16 @@ def _sort_entries(
 
 def _table_view_entries(
     entries: Sequence[AnnotationEntry],
+    view=None,
 ) -> List[AnnotationEntry]:
     """Filter/sort Scores rows while retaining matching diagnostic rows."""
 
-    predicate = _filter_predicate(entries, STATE.filter_text)
+    if view is None:
+        columns = tuple(entries[0].metadata) if entries else ()
+        view = compile_view(STATE.filter_text, columns)
+    predicate, ranking = view
+    if ranking:
+        return list(STATE.entries)
     filtered = [
         entry
         for entry in entries
@@ -842,10 +880,6 @@ def _table_view_entries(
         column=str(STATE.sort_column or ""),
         descending=bool(STATE.sort_descending),
     )
-
-
-def _filter_predicate(entries, query):
-    return compile_view_filter(query, tuple(entries[0].metadata) if entries else ())
 
 
 def _resume_entry_index(
@@ -891,7 +925,7 @@ def _runtime_snapshot() -> Dict[str, object]:
         "mapping_profile", "filter_text", "sort_column", "sort_descending",
         "stage_root", "stage_alias", "pattern", "dataset", "all_entries",
         "dataset_generation", "entries", "files", "index", "undo_history", "annotated_indices",
-        "annotated_entry_ids", "row_annotation_store", "materialized_paths",
+        "annotated_entry_ids", "row_annotation_store", "materialized_paths", "loaded_source_versions",
         "materialization_errors", "navigation_session", "managed_objects",
         "navigation_generation", "current_object", "state_path", "review_reference", "bundle_view",
         "sampling", "cluster_scope", "filtered_count", "steps", "step_assets", "step_materialized", "step_context",
@@ -949,6 +983,7 @@ def _persisted_config() -> Dict[str, object]:
     config["score_guidance"] = copy.deepcopy(STATE.score_guidance)
     config["filter_presets"] = copy.deepcopy(STATE.filter_presets)
     config["steps"] = copy.deepcopy(STATE.steps)
+    config["reference_track"] = dict(STATE.reference_track)
     config.update({name: bool(getattr(STATE, name)) for name in _PERSISTED_BOOL_FIELDS})
     config.update({name: int(getattr(STATE, name)) for name in _PERSISTED_INT_BOUNDS})
     config["bucket_cmds"] = {
@@ -966,6 +1001,9 @@ def _validate_persisted_config(raw: object) -> Dict[str, object]:
     try:
         if "steps" in raw:
             config["steps"] = validate_steps(raw["steps"], raw.get("step_cmd", ""))
+        if "reference_track" in raw:
+            from .reference_track import validate_reference_track
+            config["reference_track"] = validate_reference_track(raw["reference_track"])
         if "annotation_fields" in raw:
             config["annotation_fields"] = validate_fields(raw["annotation_fields"])
         if "score_guidance" in raw:
@@ -1057,6 +1095,7 @@ def _validate_persisted_position(raw: object) -> Dict[str, object]:
 
 
 def _apply_persisted_config(config: Dict[str, object]) -> None:
+    config = {**config, **getattr(_panel, "_review_preferences", {})}
     for name in (
         _PERSISTED_STRING_FIELDS
         + _PERSISTED_SOURCE_STRING_FIELDS
@@ -1071,7 +1110,7 @@ def _apply_persisted_config(config: Dict[str, object]) -> None:
         STATE.bucket_cmds = dict(config["bucket_cmds"])
     if "display_columns" in config:
         STATE.display_columns = list(config["display_columns"])
-    for name in ("annotation_fields", "score_guidance", "filter_presets", "steps"):
+    for name in ("annotation_fields", "score_guidance", "filter_presets", "steps", "reference_track"):
         if name in config:
             setattr(STATE, name, copy.deepcopy(config[name]))
 
@@ -1610,6 +1649,13 @@ def _verify_current_object_enabled(*, check_parents=False) -> bool:
         return False
 
 
+def _current_candidate_is_displayed() -> bool:
+    if _panel is not None and _panel.compare_bar.pocket_mode:
+        # Pocket changes can hide the original object while showing its overlay.
+        return _object_exists(STATE.current_object)
+    return _verify_current_object_enabled(check_parents=True)
+
+
 def _get_index_for_object(obj_name: str) -> Optional[int]:
     """Extract the index from an object name like 'sa_00001_filename'."""
     m = re.match(rf"^{re.escape(OBJECT_PREFIX)}_(\d+)_", obj_name)
@@ -1900,17 +1946,18 @@ def _materialize_entry_in_background(entry, context, cancel_event, bridge):
 
 
 def _cancel_materialization_key(key):
-    event = _materialization_cancel_events.get(key)
+    # Detach before signalling so an immediate retry owns a fresh request.
+    event = _materialization_cancel_events.pop(key, None)
+    future = _materialization_futures.pop(key, None)
     if event is not None:
         event.set()
-    future = _materialization_futures.get(key)
-    return bool(future is not None and (future.cancel() or future.done()))
+    if future is not None:
+        future.cancel()
 
 
 def _cancel_materialization_record(record):
-    if record is None:
-        return False
-    return _cancel_materialization_key((record[0], record[1]))
+    if record is not None:
+        _cancel_materialization_key(record[:2])
 
 
 def _materialize_index(
@@ -1964,12 +2011,6 @@ def _materialize_index(
         _materialization_cancel_events[future_key] = cancel_event
         _materialization_futures[future_key] = future
 
-        def forget_cancelled(done, key=future_key, event=cancel_event):
-            if event.is_set() and _materialization_futures.get(key) is done:
-                _materialization_futures.pop(key, None)
-                _materialization_cancel_events.pop(key, None)
-
-        future.add_done_callback(forget_cancelled)
         return None
     result = _materialize_entry(entry, context)
     if context.generation == _materialization_generation:
@@ -2312,6 +2353,7 @@ def _delete_managed_objects(keep: bool) -> None:
     for obj in list(STATE.managed_objects):
         try:
             cmd.delete(obj)
+            forget_loaded_source(STATE.loaded_source_versions, obj, STATE.materialized_paths)
         except Exception:
             pass
     _candidate_bundles.remove(cmd, list(STATE.managed_objects))
@@ -2346,6 +2388,7 @@ def _evict_unneeded_objects() -> None:
     keep_objects = []
     for obj in list(STATE.managed_objects):
         if obj not in existing:
+            forget_loaded_source(STATE.loaded_source_versions, obj, STATE.materialized_paths)
             continue
         keep_objects.append(obj)
     STATE.managed_objects = keep_objects
@@ -2363,6 +2406,7 @@ def _evict_unneeded_objects() -> None:
             _candidate_bundles.remove(cmd, [obj])
             try:
                 cmd.delete(obj)
+                forget_loaded_source(STATE.loaded_source_versions, obj, STATE.materialized_paths)
             except Exception:
                 pass
             if obj in STATE.managed_objects:
@@ -2395,6 +2439,7 @@ def _ensure_candidate_loaded(
         # PyMOL can retain invalid named selections after an aligned object is
         # deleted. Give each actual load a fresh name; live objects keep theirs.
         if obj_name in STATE.managed_objects:
+            forget_loaded_source(STATE.loaded_source_versions, obj_name, STATE.materialized_paths)
             STATE.managed_objects.remove(obj_name)
             obj_name = _object_name_for_index(path, index)
         load_path = path
@@ -2423,6 +2468,12 @@ def _ensure_candidate_loaded(
             _candidate_load_serial += 1
             # Step commands own the camera; loading must not preempt keep-view recipes.
             cmd.load(load_path_resolved, obj_name, quiet=1, zoom=0)
+            if STATE.entries and STATE.row_annotation_store is not None and STATE.row_annotation_store.versioned:
+                entry = STATE.entries[index]
+                record_loaded_source(
+                    STATE.loaded_source_versions, obj_name, entry.id, materialized.identity,
+                    logical_source=entry.source_path if entry.source_kind == "csv" else entry.id,
+                )
         except Exception:
             # Some Host loaders can leave a partial object before raising. Keep
             # that name owned so a transaction rollback can delete it exactly.
@@ -2556,6 +2607,13 @@ _preload_generation = globals().get("_preload_generation", 0)
 _preload_queue = globals().get("_preload_queue", [])
 
 
+def _batch_owns_scene() -> bool:
+    page = getattr(_panel, "_batch_page", None)
+    return page is not None and (
+        page.busy or _panel.main_tabs.currentWidget() is page
+    )
+
+
 def _schedule_preload_tick() -> None:
     global _preload_panel_timer
     if QtWidgets is None or QtCore is None:
@@ -2571,6 +2629,8 @@ def _schedule_preload_tick() -> None:
 
 def _kick_preload() -> None:
     global _preload_generation, _preload_queue
+    if _batch_owns_scene():
+        return
     if STATE.source_mode == "groups" or _has_review_steps():
         return
     if not STATE.preload_enabled:
@@ -2586,20 +2646,14 @@ def _kick_preload() -> None:
     desired_entry_ids = {
         STATE.entries[idx].id for idx in desired if idx < len(STATE.entries)
     }
-    for key, future in list(_materialization_futures.items()):
-        if (
-            not isinstance(key, tuple)
-            or len(key) != 2
-            or key[0] != generation
-            or key[1] in desired_entry_ids
-        ):
-            continue
-        try:
-            removable = _cancel_materialization_key(key)
-        except Exception:
-            removable = True
-        if removable:
-            _materialization_futures.pop(key, None)
+    navigation = _panel._pending_navigation if _panel is not None else None
+    if navigation is not None and navigation[0] == generation:
+        pending.append(navigation)
+        desired_entry_ids.add(navigation[1])
+        desired = [idx for idx in desired if idx != navigation[2]]
+    for key in list(_materialization_futures):
+        if key[0] == generation and key[1] not in desired_entry_ids:
+            _cancel_materialization_key(key)
     for idx in desired:
         obj = _object_name_for_index(STATE.files[idx], idx)
         if not _object_exists(obj):
@@ -2626,6 +2680,8 @@ def _kick_preload() -> None:
 
 def _process_preload_tick() -> None:
     global _preload_queue
+    if _batch_owns_scene():
+        return
     if _has_review_steps():
         _preload_queue = []
         return
@@ -2672,6 +2728,8 @@ def _process_preload_tick() -> None:
 def _load_current_structure(*, trust_materialized: bool = False) -> str:
     if not STATE.current_file():
         raise RuntimeError("Structure Annotator: no dataset loaded")
+    if _panel is not None and not _panel._closed and _panel.comparison.pocket.track.active:
+        _panel.comparison.pocket.track.save_view()
     views = ([], [])
     loaded = _ensure_loaded(
         STATE.index,
@@ -2693,6 +2751,11 @@ def _load_current_structure(*, trust_materialized: bool = False) -> str:
         _finish_console_views(*views)
         _evict_unneeded_objects()
         _kick_preload()
+    store = STATE.row_annotation_store
+    if store is not None and store.versioned:
+        if activate_loaded_source(store, STATE.loaded_source_versions, loaded, STATE.current_entry_id()):
+            STATE.annotation_generation += 1
+            _rescan_annotated_indices(refresh=False)
     return loaded
 
 
@@ -2707,16 +2770,18 @@ def _finish_console_views(recipes, warnings):
         print(f"Structure Annotator: {warning}")
 
 
-def _navigate_annotation(method: str, *args) -> str:
+def _navigate_annotation(method: str, *args, refresh: bool = False) -> str:
     """Transition the shared cursor and roll it back if display loading fails."""
     session = _ensure_navigation_session()
     previous = session.cursor
     previous_object = STATE.current_object
-    previous_view = cmd.get_view()
-    previous_enabled = set(cmd.get_names("objects", enabled_only=1))
     getattr(session, method)(*args)
     target = session.cursor
     session.goto(previous)
+    if not refresh and target == previous and _current_candidate_is_displayed():
+        return previous_object
+    previous_view = cmd.get_view()
+    previous_enabled = set(cmd.get_names("objects", enabled_only=1))
     if _has_review_steps() and STATE.entries[target].id not in STATE.step_assets:
         entry = STATE.entries[target]
         prepared = _prepare_step_navigation(STATE.dataset, entry, target, _configured_steps(), STATE.step_cmd,
@@ -2792,7 +2857,11 @@ def _clear_review_status_entries(entry_ids: Sequence[str]) -> None:
 
 def _set_entry_annotation(index: int, label: str, value: str) -> Dict[str, object]:
     if STATE.row_annotation_store is not None:
-        return STATE.row_annotation_store.set(STATE.entries[index].id, label, value)
+        store = STATE.row_annotation_store
+        entry_id = STATE.entries[index].id
+        token = (loaded_source_token(STATE.loaded_source_versions, STATE.current_object, entry_id)
+                 if store.versioned else None)
+        return store.set(entry_id, label, value, source_version=token)
     path = _resolve_annotation_path(STATE.files[index])
     previous = read_structure_annotations(path).get(label)
     annotate_structure_file(path, label, value)
@@ -3309,6 +3378,7 @@ class _CsvRuntimeContext:
     entry_id: str = ""
     dataset_dir: str = ""
     step_materialized: dict = field(default_factory=dict)
+    review_preferences: dict = field(default_factory=dict)
 
 
 def _capture_csv_runtime_context() -> _CsvRuntimeContext:
@@ -3339,6 +3409,7 @@ def _capture_csv_runtime_context() -> _CsvRuntimeContext:
         entry_id=STATE.current_entry_id(),
         dataset_dir=str(STATE.dataset_dir),
         step_materialized=dict(STATE.step_materialized),
+        review_preferences=dict(getattr(_panel, "_review_preferences", {})),
     )
 
 
@@ -3570,6 +3641,7 @@ def _prepare_csv_load(
         and _path_identity(runtime.csv_path) == _path_identity(canonical_csv)
     )
     persisted = _read_persisted_dataset_state(canonical_csv, "csv") if restore_saved else None
+    resume_saved_view = persisted is not None and config_override is not None
     saved_csv = dict(persisted.get("csv") or {}) if persisted else {}
     if persisted is not None:
         saved_csv["source_base"] = _saved_csv_source_base(persisted)
@@ -3674,12 +3746,12 @@ def _prepare_csv_load(
         next_filter = runtime.filter_text
         next_sort_column = runtime.sort_column
         next_sort_descending = runtime.sort_descending
-    if config_override is not None:
+    if config_override is not None and not resume_saved_view:
         next_filter = str(config_override.get("filter_text", next_filter))
         next_sort_column = str(config_override.get("sort_column", next_sort_column))
         next_sort_descending = bool(config_override.get("sort_descending", next_sort_descending))
 
-    if not same_active_csv or config_override is None:
+    if not resume_saved_view and (not same_active_csv or config_override is None):
         next_filter = str(review.config.get("filter_text", next_filter))
         next_sort_column = str(review.config.get("sort_column", next_sort_column))
         next_sort_descending = bool(review.config.get("sort_descending", next_sort_descending))
@@ -3827,12 +3899,12 @@ def _prepare_csv_load(
     annotation_baseline = _csv_annotation_baseline(dataset)
     row_annotation_store = RowAnnotationStore(
         annotation_sidecar_path(dataset.source_path),
-        baseline=annotation_baseline,
+        baseline=annotation_baseline, versioned=True, unversioned_labels=(REVIEW_STATUS_LABEL,),
     )
     persisted_config = (
         dict(persisted.get("config") or {}) if persisted is not None else None
     )
-    if config_override is not None:
+    if config_override is not None and not resume_saved_view:
         persisted_config = _validate_persisted_config(dict(config_override))
     if review.config:
         persisted_config = dict(persisted_config or {})
@@ -3843,7 +3915,7 @@ def _prepare_csv_load(
                 persisted_config[name] = copy.deepcopy(review.config[name])
         if "display_columns" in review.config:
             persisted_config["display_columns_selected"] = True
-    if review_options:
+    if review_options and not resume_saved_view:
         persisted_config = dict(persisted_config or {})
         for name in ("step_cmd", "bucket_cmds", "steps"):
             if name in review_options:
@@ -3853,6 +3925,8 @@ def _prepare_csv_load(
         raise ValueError(f"Unknown reference column: {reference_column}")
     persisted_config = dict(persisted_config or {})
     persisted_config["reference_column"] = reference_column
+    persisted_config["reference_track"] = review.config.get(
+        "reference_track", persisted_config.get("reference_track", {}) if same_active_csv or persisted else {})
     step_cmd = persisted_config.get("step_cmd", runtime.config.get("step_cmd", ""))
     bundle_view = bundle_view_config(review, canonical_csv, step_cmd=step_cmd,
                                      dataset=dataset, selected=selected_entry)
@@ -4123,6 +4197,7 @@ def _prepare_directory_load(path, pattern, runtime, *, restore_saved=True, detec
     config = dict(runtime.config)
     if saved and restore_saved:
         config.update(saved["config"])
+    config.update(runtime.review_preferences)
     config["filter_presets"] = (saved or {}).get("config", {}).get("filter_presets", [])
     config["pattern"] = str(pattern or (saved or {}).get("config", {}).get("pattern") or STRUCTURE_PATTERN)
     if is_ssh_path(directory):
@@ -4137,7 +4212,8 @@ def _prepare_directory_load(path, pattern, runtime, *, restore_saved=True, detec
         baseline = _directory_annotation_baseline(all_entries, cancel_event=cancel_event, progress=progress)
     if not all_entries:
         raise ValueError(f"No structure files matched the filename pattern in {directory}")
-    store = RowAnnotationStore(directory_annotation_sidecar_path(directory), baseline=baseline)
+    store = RowAnnotationStore(directory_annotation_sidecar_path(directory), baseline=baseline,
+                               versioned=True, unversioned_labels=(REVIEW_STATUS_LABEL,))
     values = store.snapshot()
     review_fields = config.get("annotation_fields") or default_fields(normalize_label_key(config["label_name"]), _split_values(config["values_text"]))
     annotated = frozenset(entry.id for entry in all_entries if _reviewed(review_fields, values.get(entry.id, {})))
@@ -4177,6 +4253,7 @@ def _commit_prepared_directory_load(plan):
         STATE.id_column = ""
         STATE.label_column = ""
         STATE.reference_column = ""
+        STATE.reference_track = {}
         STATE.steps = []
         STATE.step_assets = {}
         STATE.step_materialized = {}
@@ -4336,6 +4413,7 @@ def sa_load_groups(parent: str = "", review_path: str = "scene-review.json", res
         STATE.scene_groups, STATE.scene_parent = names, parent
         STATE.dataset_dir, STATE.csv_path, STATE.state_path = os.path.dirname(path), "", path
         STATE.reference_column, STATE.steps = "", []
+        STATE.reference_track = {}
         STATE.step_assets, STATE.step_materialized, STATE.materialized_paths = {}, {}, {}
         STATE.filter_text, STATE.sort_column = "", ""
         STATE.filter_presets = (saved or {}).get("config", {}).get("filter_presets", [])
@@ -4556,7 +4634,7 @@ def sa_undo() -> None:
         print(f"Undo: {display} {label_key} -> {restored}")
         # Return to the file we just changed so the user can see the result.
         if 0 <= index < len(STATE.files):
-            _navigate_annotation("goto", index)
+            _navigate_annotation("goto", index, refresh=True)
         else:
             _save_current_dataset_state()
     except Exception as e:
@@ -5142,6 +5220,8 @@ def _commit_prepared_view(plan):
         _rollback_scene_swap(previous, parked)
         raise
     _discard_parked_objects(parked)
+    if selected is None and _panel is not None and not _panel._closed:
+        _panel._start_candidate_views()
     _save_current_dataset_state(background=True)
 
 
@@ -5247,7 +5327,7 @@ def sa_bind_keys() -> Dict[str, object]:
             if _key_lease is not None and _key_lease.active:
                 _key_lease.release()
             _panel._enable_qt_shortcuts()
-            return {"status": "bound", "mode": "qt", "keys": ["Alt+1..9", "Alt+Left", "Alt+Right", "Alt+Z"]}
+            return {"status": "bound", "mode": "qt", "keys": ["Left", "Right", "Alt+1..9", "Alt+Left", "Alt+Right", "Alt+Z"]}
         if _key_lease is not None and _key_lease.active:
             return {"status": "already_bound", "keys": list(_key_lease.callbacks)}
         callbacks = {
@@ -5668,6 +5748,18 @@ class _DatasetTableModel(QtCore.QAbstractTableModel):
         source = tuple(STATE.all_entries) if filters.selections and self._display_columns else ()
         return self._rows, self._display_columns, self._column_kinds, preview, filters, source
 
+    def sortable_column(self, section):
+        offset = section - (len(self._headers) - len(self._display_columns))
+        if self._mode == "active" and self._source_mode == "csv" and 0 <= offset < len(self._display_columns):
+            return self._display_columns[offset]
+        return ""
+
+    def sort_indicator(self):
+        if self._mode == "active" and self._source_mode == "csv" and STATE.sort_column in self._display_columns:
+            offset = len(self._headers) - len(self._display_columns)
+            return offset + self._display_columns.index(STATE.sort_column), STATE.sort_descending
+        return -1, False
+
     def _entry_id(self, row: int) -> str:
         if not 0 <= row < len(self._rows):
             return ""
@@ -5919,6 +6011,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._csv_task_kind = ""
         self._csv_task_epoch = 0
         self._closed = False
+        self._batch_page = None
+        self._batch_close_pending = False
         self._last_csv_completion_on_main_thread = None
         self._last_ssh_progress_message = ""
         self._last_ssh_progress_on_main_thread = None
@@ -5949,13 +6043,19 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._maintenance_timer.timeout.connect(self._preload_maintenance)
         self._error_poll_timer = QtCore.QTimer(self)
         self._error_poll_timer.timeout.connect(self._poll_background_errors)
+        self._load_review_preferences()
         self._build_ui()
+        self._connect_review_preferences()
         from .comparison import ReviewComparison
         self.comparison = ReviewComparison(self, sys.modules[__name__])
+        from .reference_track import ReferenceTrack
         from .view_jobs import ViewJobs
+        self._reference_track = ReferenceTrack()
         self._view_jobs = ViewJobs(self, self._view_is_current, self._prepare_candidate_view, self._draw_candidate_view)
         from .review_controller import ReviewController
         self.review = ReviewController(self, sys.modules[__name__])
+        from .antibody_cdrs import AntibodyCartoon
+        self._antibody_cartoon = AntibodyCartoon()
         self._install_history_completers()
         self._sync_from_state()
         self._rebuild_value_controls(sync_to_state=False)
@@ -5975,10 +6075,16 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             self.status_label.setText("Saving annotations; close the panel after saving finishes.")
             event.ignore()
             return
+        if self._batch_page is not None and not self._batch_page.shutdown():
+            self._batch_close_pending = True
+            event.ignore()
+            return
         self._closed = True
         if getattr(self, "_cluster_dialog", None) is not None:
             self._cluster_dialog.dispose()
         self._view_jobs.close()
+        self._reference_track.clear(cmd)
+        self._clear_antibody_view()
         self.comparison.clear()
         _review_objects.clear(cmd)
         _delete_managed_objects(False)
@@ -6006,6 +6112,46 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
     def _build_ui(self) -> None:
         from .panel_layout import build_panel
         build_panel(self)
+
+    def _load_review_preferences(self):
+        from pymolplugins.host.workspace import window_settings
+
+        self._preference_settings = window_settings()
+        defaults = {"save_on_label_click": True, **_REVIEW_VIEW_PREFERENCE_DEFAULTS}
+        self._review_preferences = dict(defaults)
+        fields = _REVIEW_CHECKBOX_PREFERENCES.keys() | _REVIEW_ACTION_PREFERENCES.keys() | _REVIEW_SPIN_PREFERENCES.keys()
+        for name in fields:
+            key = _REVIEW_PREFERENCES_PREFIX + name
+            default = defaults[name] if name in defaults else getattr(_DEFAULT_STATE, name)
+            if self._preference_settings.contains(key):
+                self._review_preferences[name] = self._preference_settings.value(key, default, type=type(default))
+            if name in self._review_preferences and name not in _REVIEW_VIEW_PREFERENCE_DEFAULTS:
+                setattr(STATE, name, self._review_preferences[name])
+
+    def _connect_review_preferences(self):
+        for controls, signal in (
+            (_REVIEW_CHECKBOX_PREFERENCES, "clicked"),
+            (_REVIEW_ACTION_PREFERENCES, "triggered"),
+            (_REVIEW_SPIN_PREFERENCES, "valueChanged"),
+        ):
+            for name, control in controls.items():
+                getattr(getattr(self, control), signal).connect(
+                    lambda value, field=name: self._save_review_preference(field, value)
+                )
+
+    def _save_review_preference(self, name, value):
+        if self._syncing_widgets:
+            return
+        self._review_preferences[name] = value
+        if name not in _REVIEW_VIEW_PREFERENCE_DEFAULTS:
+            setattr(STATE, name, value)
+        settings = self._preference_settings
+        settings.setValue(_REVIEW_PREFERENCES_PREFIX + name, value)
+        settings.sync()
+        if settings.status() != QtCore.QSettings.NoError:
+            self._show_error("Could not save review preferences in " + settings.fileName())
+        if name == "antibody_cdrs":
+            self._toggle_antibody_view(value)
 
     def _show_overview(self):
         if not STATE.all_entries or self._csv_task_id:
@@ -6067,22 +6213,27 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             STATE.reference_column = ""
             _save_current_dataset_state(background=True)
             if STATE.entries:
-                self._request_navigation(STATE.index)
+                self._request_navigation(STATE.index, refresh=True)
 
     def _page_changed(self, *args):
+        if self._batch_is_busy() and self.main_tabs.currentWidget() is not self._batch_page:
+            with QtCore.QSignalBlocker(self.main_tabs):
+                self.main_tabs.setCurrentWidget(self._batch_page)
         index = self.main_tabs.currentIndex()
+        batch = self.main_tabs.currentWidget() is self._batch_page
         source = STATE.csv_path if STATE.source_mode == "csv" else _active_dataset_directory()
         name_path = parse_ssh_path(source).path if is_ssh_path(source) else source
-        title = os.path.basename(name_path or "") if index == 0 else "Open data" if index == 1 else "Settings"
+        title = "Batch" if batch else os.path.basename(name_path or "") if index == 0 else "Open data" if index == 1 else "Settings"
         if index == 0 and STATE.source_mode == "groups":
             title = STATE.scene_parent or "Scene groups"
             source = STATE.state_path
         self.active_source_label.setText(title or "Structure Annotator")
         self.active_source_label.setToolTip(source or "")
-        self.back_button.setVisible(index == 2 or (index == 1 and STATE.dataset is not None))
+        self.back_button.setVisible(batch or index == 2 or (index == 1 and STATE.dataset is not None))
         self.import_button.setVisible(index == 0)
         self.view_open_button.setVisible(index == 0)
         self.compare_toggle.setVisible(index == 0)
+        self.reference_track_button.setVisible(index == 0)
         self.more_button.setVisible(index == 0)
         if index != 0:
             self.review_view_dialog.close()
@@ -6104,7 +6255,10 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             self._qt_shortcuts.set_enabled(index == 0)
 
     def _back_to_review(self):
+        if self._batch_is_busy():
+            return
         self.main_tabs.setCurrentIndex(0 if STATE.dataset is not None else 1)
+        self._queue_preload_maintenance()
         self.window().activateWindow()
         (self.dataset_table if STATE.dataset is not None else self.source_path_edit).setFocus()
 
@@ -6122,6 +6276,29 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             self.filter_edit.clear()
         self.filter_mode_combo.setCurrentIndex(1)
         self._refresh_filter_presets(preferred="")
+
+    def _add_top_per_group(self):
+        from .qt_widgets import top_per_group_dialog
+
+        if STATE.dataset is None or not STATE.dataset.columns:
+            return
+        self._show_filters()
+        try:
+            columns = STATE.dataset.columns
+            query = self._filter_input()
+            _, ranking = compile_view(query, columns)
+            clause = top_per_group_dialog(self.filter_dialog, columns, ranking)
+            if clause is None:
+                return
+            query = with_group_ranking(query, clause)
+            compile_view(query, columns)
+        except (ValueError, SyntaxError) as exc:
+            self.filter_error_label.setText(str(exc))
+            self.filter_error_label.show()
+            return
+        conditional = query.startswith("where:")
+        self.filter_mode_combo.setCurrentIndex(1 if conditional else 0)
+        self.filter_edit.setText(query[6:] if conditional else query)
 
     def _add_filter_condition(self):
         from .qt_widgets import filter_condition_dialog
@@ -6159,6 +6336,24 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
     def _set_header_filter_choices(self, column, choices):
         self._apply_header_filters(read_header_filters(STATE.filter_text).set_choices(column, choices))
 
+    def _sort_csv_header(self, column):
+        if (self._table_mode != "active" or self._csv_task_id or self._pending_navigation is not None
+                or STATE.source_mode != "csv" or STATE.dataset is None or column not in STATE.dataset.columns):
+            return
+        descending = column == STATE.sort_column and not STATE.sort_descending
+        if STATE.entries:
+            members = {entry.id: entry for entry in STATE.entries}
+            order = STATE.cluster_scope.get("ids") or (entry.id for entry in STATE.all_entries)
+            entries = _sort_entries([members[key] for key in order if key in members],
+                                    column=column, descending=descending)
+            _install_entries(STATE.all_entries, resume_entry_id=STATE.current_entry_id(), active_entries=entries)
+            _rescan_annotated_indices(refresh=False)
+        STATE.sort_column, STATE.sort_descending = column, descending
+        self.sort_column_combo.setCurrentText(column)
+        self.sort_desc_cb.setChecked(descending)
+        self._refresh_status()
+        _save_current_dataset_state(background=True)
+
     def _apply_header_filters(self, filters):
         if self._table_mode != "active" or self._csv_task_id or STATE.dataset is None:
             return
@@ -6188,14 +6383,15 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
     def _apply_filters(self):
         try:
             query = self._filter_input()
-            if query.startswith("where:") and STATE.dataset is not None:
-                compile_filter(query[6:], STATE.dataset.columns)
+            ranking = None
+            if STATE.dataset is not None:
+                _, ranking = compile_view(query, STATE.dataset.columns)
         except ValueError as exc:
             self.filter_error_label.setText(str(exc))
             self.filter_error_label.show()
             return
         self.filter_dialog.accept()
-        self._apply_view()
+        self._apply_view(sampling={} if ranking else None)
 
     def _refresh_filter_presets(self, preferred=None):
         has_dataset = STATE.dataset is not None
@@ -6291,6 +6487,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             action.triggered.connect(lambda _checked=False, name=preset["name"]: self._apply_filter_preset(name))
         self.filter_menu.addSeparator()
         self.filter_menu.addAction("Edit filters…", self._show_filters)
+        self.filter_menu.addAction("Top per group…", self._add_top_per_group).setEnabled(STATE.dataset is not None)
         self.filter_menu.addAction("New filter group…", self._show_new_filter_group).setEnabled(STATE.dataset is not None)
 
 
@@ -6505,6 +6702,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             self._show_error(str(exc))
 
     def _show_import(self) -> None:
+        if self._batch_is_busy():
+            return
         self.main_tabs.setCurrentIndex(1)
         (self.csv_edit if self._source_mode() == "csv" else self.dir_edit).setFocus()
 
@@ -6576,7 +6775,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             )
             return
         try:
-            self._restore_history_snapshot(snapshot, load_dataset=True)
+            self._restore_history_snapshot(snapshot, load_dataset=True, resume_saved=True)
         except Exception as exc:
             traceback.print_exc()
             self._show_error(
@@ -6584,7 +6783,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                 "Recent configurations… to choose another source.\n" + str(exc)
             )
 
-    def _restore_history_snapshot(self, snapshot, *, load_dataset=False) -> None:
+    def _restore_history_snapshot(self, snapshot, *, load_dataset=False, resume_saved=False) -> None:
         """Apply an explicitly chosen workflow; source identity changes only on load."""
         raw = snapshot["config"]
         config = _validate_persisted_config(raw)
@@ -6600,6 +6799,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             self._sync_from_state()
             self._rebuild_value_controls(sync_to_state=False)
             self._history_restore = copy.deepcopy(snapshot)
+            self._history_restore["resume_saved"] = resume_saved
             self._set_history_source_inputs(snapshot, config)
             if STATE.files:
                 _rescan_annotated_indices()
@@ -6781,15 +6981,42 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
     def _annotate_digit(self, digit):
         self.review.quick_digit(digit)
 
-    def _show_batch_processing(self):
+    def _batch_is_busy(self):
+        return self._batch_page is not None and self._batch_page.busy
+
+    def _refresh_batch_navigation(self):
+        self._source_mode_changed()
+        self._refresh_status()
+        busy = self._batch_is_busy()
+        for button in (self.back_button, self.import_button, self.settings_button):
+            button.setEnabled(not busy)
+        if self._batch_close_pending and not busy:
+            self._batch_close_pending = False
+            QtCore.QTimer.singleShot(0, self.close)
+
+    def _show_batch_processing(self, *, initial=None):
         from pymolplugins.targets.batch_sources import BatchConfig, csv_review_key
-        from pymolplugins.targets.batch_widgets import show_batch_dialog
-        if not STATE.all_entries or STATE.source_mode not in {"csv", "directory"}:
-            return show_batch_dialog()
-        if is_ssh_path(_active_source_reference()):
+        from pymolplugins.targets.batch_widgets import BatchPage
+        if self._csv_task_id or self._pending_navigation is not None:
+            self.status_label.setText("Wait for the current review action to finish before opening Batch.")
+            return None
+        if initial is None and is_ssh_path(_active_source_reference()):
             self._show_error("Batch uses local inputs. Open a local copy of this review source before transferring rows.")
             return None
-        initial = BatchConfig(
+        if self._batch_page is None:
+            self._batch_page = BatchPage(cmd, _execute_checked, initial=initial, parent=self)
+            self._batch_page.busy_changed.connect(self._refresh_batch_navigation)
+            self._batch_page.review_ready.connect(self._open_batch_review)
+            self.main_tabs.addWidget(self._batch_page)
+        elif initial is not None and not self._batch_is_busy():
+            self._batch_page._set_initial(initial)
+        page = self._batch_page
+        self._view_jobs.cancel()
+        self.main_tabs.setCurrentWidget(page)
+        if not STATE.all_entries or STATE.source_mode not in {"csv", "directory"} or is_ssh_path(_active_source_reference()):
+            self._refresh_batch_navigation()
+            return page
+        current = BatchConfig(
             a=STATE.csv_path if STATE.source_mode == "csv" else STATE.dataset_dir,
             b=STATE.reference_column if STATE.source_mode == "csv" else "",
             mode="paired" if STATE.source_mode == "csv" and STATE.reference_column else "reference",
@@ -6800,7 +7027,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             wsl_distribution=STATE.mapping_wsl_distribution,
             encoding=STATE.csv_encoding, delimiter=STATE.csv_delimiter)
         def members(entries):
-            if initial.source == "csv":
+            if current.source == "csv":
                 return tuple(csv_review_key(entry) for entry in entries)
             return tuple((entry.ordinal, entry.resolved_path or entry.source_path) for entry in entries)
 
@@ -6808,10 +7035,23 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         scopes = {"Current review": members(STATE.entries), "Entire source": members(STATE.all_entries)}
         if selected:
             scopes = {"Selected rows": members(selected), **scopes}
-        dialog = show_batch_dialog(initial)
+        page.offer_annotator_inputs(current, len(STATE.all_entries))
         use_selected = bool(selected) and (len(selected) > 1 or selected[0].id != STATE.current_entry_id())
-        dialog.offer_review(initial, scopes, "Selected rows" if use_selected else "Current review")
-        return dialog
+        if initial is None:
+            page.offer_review(current, scopes, "Selected rows" if use_selected else "Current review")
+        self._refresh_batch_navigation()
+        return page
+
+    def _open_batch_review(self, table):
+        if self._csv_task_id or self._pending_navigation is not None:
+            self._batch_page._error(RuntimeError(f"Annotator is busy. Open the saved review when it finishes:\n{table}"))
+            return
+        self._show_import()
+        path = self.source_location.set_source(str(table))
+        self._set_source_type_for_path(path, "csv")
+        self.source_path_edit.setText(path)
+        self._source_location_changed()
+        self._load_dataset()
 
     def _enable_qt_shortcuts(self):
         from .qt_widgets import AnnotationShortcuts
@@ -6828,7 +7068,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             self._maintenance_timer.start(0)
 
     def _preload_maintenance(self):
-        if self._closed:
+        if self._closed or _batch_owns_scene():
             return
         _evict_unneeded_objects()
         _kick_preload()
@@ -6851,9 +7091,9 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             traceback.print_exc()
             self._show_error(str(exc))
 
-    def _request_navigation(self, index):
+    def _request_navigation(self, index, *, refresh=False):
         try:
-            self._request_navigation_impl(index)
+            self._request_navigation_impl(index, refresh=refresh)
         except Exception as exc:
             self._pending_navigation = None
             self._source_mode_changed()
@@ -6866,48 +7106,49 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                 "target_entry": STATE.entries[index].id if 0 <= index < len(STATE.entries) else "",
                 "steps": json.dumps(_configured_steps(), sort_keys=True), "step_cmd": STATE.step_cmd}
 
-    def _request_navigation_impl(self, index):
+    def _request_navigation_impl(self, index, *, refresh=False):
         global _preload_queue
-        if self._csv_task_kind in {"annotations", "annotation_undo"}:
+        if _batch_owns_scene():
+            return
+        if self._csv_task_id and self._csv_task_kind != "steps":
             return
         if not STATE.entries or self._filter_empty or self._table_mode == "preview":
             self._show_error("Load a dataset with matching rows before navigating.")
             return
-        self.comparison.close_pocket()
-        self.error_label.hide()
-        self._sync_to_state(update_directory=False, persist=False)
         index %= len(STATE.entries)
-        self.review.selection.select_entry(STATE.entries[index].id)
-        if STATE.source_mode == "groups":
-            _navigate_annotation("goto", index)
-            self._refresh_status()
+        entry = STATE.entries[index]
+        record = (_materialization_generation, entry.id, index)
+        if self._pending_navigation == record:
             return
-        if _has_review_steps():
-            if self._csv_task_id:
-                if self._csv_task_kind != "steps":
-                    return
-                self._cancel_csv_task(announce=False)
-            entry = STATE.entries[index]
-            self._start_csv_task("steps", _prepare_step_navigation, self._step_arguments(index),
+        self._sync_to_state(update_directory=False, persist=False)
+        step_arguments = self._step_arguments(index) if _has_review_steps() else None
+        job = _CSV_ASYNC_JOBS.get(self._csv_task_id)
+        if step_arguments is not None and job and (
+            job["dataset_generation"] == STATE.dataset_generation
+            and job["arguments_fingerprint"] == self._csv_arguments_fingerprint(step_arguments)
+        ):
+            return
+        self.review.selection.select_entry(entry.id)
+        if not refresh and index == STATE.index and _current_candidate_is_displayed():
+            if self._pending_navigation is not None or self._csv_task_id:
+                self._cancel_pending_task()
+            return
+        self._cancel_pending_task(announce=False)
+        self.comparison.close_pocket(keep_reference=True)
+        self.error_label.hide()
+        if step_arguments is not None:
+            self._start_csv_task("steps", _prepare_step_navigation, step_arguments,
                 worker_arguments={"dataset": STATE.dataset, "entry": entry, "index": index,
                     "steps": copy.deepcopy(_configured_steps()), "step_cmd": STATE.step_cmd,
                     "mapping": _step_mapping(), "context": _materialization_context(),
                     "cache": dict(STATE.step_materialized), "candidate": STATE.materialized_paths.get(entry.id)})
             return
-        if self._pending_navigation is not None:
-            previous = self._pending_navigation
-            _cancel_materialization_record(previous)
-            _preload_queue = [value for value in _preload_queue if value != previous]
-        target = _object_name_for_index(STATE.files[index], index)
-        if _object_exists(target):
-            self._pending_navigation = None
-            self._source_mode_changed()
-            _navigate_annotation("goto", index)
+        if STATE.source_mode == "groups" or _object_exists(_object_name_for_index(STATE.files[index], index)):
+            _navigate_annotation("goto", index, refresh=refresh)
             self._refresh_status()
             return
-        entry = STATE.entries[index]
-        self._pending_navigation = (_materialization_generation, entry.id, index)
-        _preload_queue = [self._pending_navigation] + [value for value in _preload_queue if value != self._pending_navigation]
+        self._pending_navigation = record
+        _preload_queue = [record] + [value for value in _preload_queue if value != record]
         _materialize_index(index, allow_background=True, trust_cached=True)
         self._source_mode_changed()
         self.status_label.setText(f"Preparing structure {index + 1}: {entry.display_name}…")
@@ -7068,7 +7309,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
 
     def _source_mode_changed(self, *args) -> None:
         csv_mode = self._source_mode() == "csv"
-        busy = bool(self._csv_task_id)
+        busy = bool(self._csv_task_id) or self._batch_is_busy()
         navigating = self._pending_navigation is not None
         self.overview_button.setEnabled(bool(STATE.all_entries) and not busy)
         self.cluster_button.setEnabled(bool(STATE.all_entries) and STATE.source_mode != "groups"
@@ -7081,7 +7322,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.source_path_edit.setPlaceholderText("Remote folder or table path" if self.source_location.remote else "Paste a path or file link")
         self.history_button.setEnabled(not busy)
         self.history_action.setEnabled(not busy)
-        annotation_busy = self._csv_task_kind in {"annotations", "annotation_undo"}
+        annotation_busy = self._csv_task_kind in {"annotations", "annotation_undo"} or self._batch_is_busy()
         self.dataset_table.setEnabled(not annotation_busy)
         self.more_button.setEnabled(not annotation_busy)
         if annotation_busy:
@@ -7351,7 +7592,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                 STATE.materialized_paths[entry.id] = result["candidate"]
                 STATE.step_assets[entry.id] = result["assets"]
                 STATE.step_materialized.update(result["cache"])
-                _navigate_annotation("goto", index)
+                _navigate_annotation("goto", index, refresh=True)
                 self._refresh_status()
             except Exception as exc:
                 self._show_error(f"Review step failed: {exc}")
@@ -7438,19 +7679,25 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         arguments = self._csv_arguments()
         runtime = _capture_csv_runtime_context()
         config = copy.deepcopy(runtime.config)
-        if self._history_restore is not None and self._history_restore["source_mode"] == "csv" and _path_identity(self._history_restore["csv_path"]) == _path_identity(arguments["csv_path"]):
-            restored = self._history_restore["config"]
+        history = self._history_restore or {}
+        same_source = _path_identity(runtime.csv_path) == _path_identity(arguments["csv_path"])
+        from_history = history.get("source_mode") == "csv" and (
+            _path_identity(history["csv_path"]) == _path_identity(arguments["csv_path"])
+        )
+        resume_saved = from_history and history.get("resume_saved", False)
+        if from_history and not (resume_saved and same_source):
+            restored = history["config"]
             config.update({key: restored.get(key, default) for key, default in
                            (("filter_text", ""), ("sort_column", ""), ("sort_descending", False))})
-        elif runtime.source_mode != "csv" or _path_identity(runtime.csv_path) != _path_identity(arguments["csv_path"]):
+        elif runtime.source_mode != "csv" or not same_source:
             config["score_guidance"] = {}
             config["reference_column"] = ""
             config["steps"] = []
             config["filter_presets"] = []
-        worker_arguments = dict(arguments, validate_paths=False, restore_saved=False, config_override=config)
-        if self._history_restore is not None and self._history_restore["source_mode"] == "csv" and _path_identity(self._history_restore["csv_path"]) == _path_identity(arguments["csv_path"]):
-            worker_arguments["review_options"] = self._history_restore["config"]
-        elif runtime.source_mode == "csv" and _path_identity(runtime.csv_path) == _path_identity(arguments["csv_path"]) and STATE.step_cmd != STATE.review_reference.get("step_cmd", STATE.step_cmd):
+        worker_arguments = dict(arguments, validate_paths=False, restore_saved=resume_saved and not same_source, config_override=config)
+        if from_history and not (resume_saved and same_source):
+            worker_arguments["review_options"] = history["config"]
+        elif runtime.source_mode == "csv" and same_source and STATE.step_cmd != STATE.review_reference.get("step_cmd", STATE.step_cmd):
             worker_arguments["review_options"] = {"step_cmd": STATE.step_cmd}
         if self._preview_arguments_fingerprint == self._csv_arguments_fingerprint(arguments):
             worker_arguments["reuse_preview"] = self._prepared_preview
@@ -7692,16 +7939,93 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         return context
 
     def _view_identity(self):
-        return id(STATE), STATE.index, STATE.current_object
+        from .reference_track import molecule_identity
+        owner = STATE.current_object
+        names = cmd.get_object_list(f"%{owner}") if owner else ()
+        molecules = tuple((name, molecule_identity(cmd, name)) for name in sorted(names))
+        return (id(STATE.dataset), STATE.dataset_generation,
+                STATE.current_entry_id(), owner, molecules)
 
     def _view_is_current(self, identity):
-        return (not self._closed and identity == self._view_identity()
+        return (not self._closed and not _batch_owns_scene() and identity == self._view_identity()
                 and STATE.current_object in cmd.get_names("objects"))
 
+    def _edit_reference_track(self):
+        from .reference_track_widgets import ReferenceTrackDialog
+
+        config = STATE.reference_track
+        saved = next((entry for entry in STATE.all_entries if entry.id == config.get("value")), None)
+        dialog = ReferenceTrackDialog(self, config, STATE.current_entry(), saved)
+        if dialog.exec_() != QtWidgets.QDialog.Accepted or dialog.config == config:
+            return
+        STATE.reference_track = dialog.config
+        _save_current_dataset_state(background=True)
+        self._reference_track.clear(cmd)
+        self.reference_track_status.setText("")
+        if STATE.current_object and config.get("direction") == "row_to_reference":
+            selection = config.get("row_selection") or "all"
+            cmd.center(f"%{STATE.current_object} and ({selection})", state=1, origin=0, animate=0)
+        self.comparison.close_pocket()
+        self.pocket_reference_action.setEnabled(bool(dialog.config and STATE.current_object))
+        if not dialog.config or not STATE.current_object:
+            return
+        self._view_jobs.append(self._view_identity(), (STATE.current_object, self._reference_track),
+                               title="Reference track")
+
+    def _reference_products(self, owner):
+        return _candidate_bundles.products.get(owner, ()) if owner in STATE.managed_objects else ()
+
+    def _reference_source(self, config):
+        from .reference_track import fetch_pdb_reference
+        source, value = config["source"], config["value"]
+        entry = next((row for row in STATE.all_entries if row.id == value), None) if source == "row" else None
+        if source == "row" and entry is None:
+            raise ValueError("The reference row is no longer in this CSV")
+        if source == "pdb":
+            cache = _ensure_bg_cache_dir()
+            return value, lambda: fetch_pdb_reference(value, cache)
+        if entry is not None:
+            context = _materialization_context()
+            return entry.display_name, lambda: _materialize_entry(entry, context).path
+        path = value if os.path.isabs(value) else os.path.join(os.path.dirname(STATE.csv_path), value)
+        return os.path.basename(value), lambda: path
+
+    def _prepare_reference_track(self, owner):
+        track, config = self._reference_track, dict(STATE.reference_track)
+        if not config:
+            return owner, track, None, lambda _: None
+        csv_path = STATE.csv_path
+        key = (csv_path, config["source"], config["value"], config["selection"])
+        label, resolve = self._reference_source(config)
+        compute = None if track.loaded(cmd, key) else resolve
+
+        def draw(path):
+            if config != STATE.reference_track or csv_path != STATE.csv_path or self.comparison.pocket.created or self.comparison.pocket.track.active:
+                return
+            if path is not None:
+                track.load(cmd, key, path, config["selection"])
+            result = track.apply(cmd, owner, config, self._reference_products(owner))
+            direction = "row → reference" if config["direction"] == "row_to_reference" else "reference → row"
+            self.reference_track_status.setText(f"Reference {label} · {direction} · {result}")
+
+        return owner, track, compute, draw
+
     def _prepare_candidate_view(self, owner, line):
+        if line is self._reference_track:
+            return self._prepare_reference_track(owner)
+        from .antibody_cdrs import AntibodyRequest, capture_chains, number_chains
         from .bundle_view import BundleViewRequest, prepare_bundle_view
         from .review_view_presets import REVIEW_VIEW_COMMANDS, prepare_review_command
 
+        if isinstance(line, AntibodyRequest):
+            chains = capture_chains(cmd, owner, line) if self._review_preferences["antibody_cdrs"] else ()
+
+            def draw(numbered):
+                if self._review_preferences["antibody_cdrs"]:
+                    self._antibody_cartoon.draw(cmd, chains, numbered)
+                    self._imgt_numbering_action.setEnabled(bool(self._antibody_cartoon.rows))
+
+            return owner, None, (lambda: number_chains(chains)) if chains else None, draw
         if isinstance(line, BundleViewRequest):
             return prepare_bundle_view(cmd, owner, line)
         if owner in STATE.managed_objects:
@@ -7716,6 +8040,10 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         from .review_view_presets import draw_review_view
         from pymolplugins.core.pymol_display import display_updates
 
+        if action is self._reference_track:
+            with display_updates(cmd):
+                draw(data)
+            return
         if action is None:
             with _capture_command_products(owner):
                 draw(data)
@@ -7740,6 +8068,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         def show_cavity(result):
             with display_updates(cmd), _capture_command_products(owner):
                 rendered = draw_review_view(cmd, source, draw_candidate_cavity, draw_cavity, result)
+            self._reference_track.move_products(cmd, owner, self._reference_products(owner))
             if followup.interface:
                 self.interface_cavity_controls.show_result(rendered)
                 return "", rendered.tooltip
@@ -7753,8 +8082,13 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
 
         if not hasattr(self, "_view_jobs"):
             return
+        self._clear_antibody_view()
+        self._reference_track.suspend(cmd)
+        self.reference_track_status.setText("")
+        if not STATE.reference_track or (self._reference_track.key and self._reference_track.key[0] != STATE.csv_path):
+            self._reference_track.clear(cmd)
         self.comparison.sync()
-        if self.comparison.pocket.created:
+        if self.comparison.pocket.created or self.comparison.pocket.track.active:
             return
         clear_bundle_legend(cmd)
         bundle = _bundle_view_for_index(STATE.index)
@@ -7778,8 +8112,51 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                 )
                 recipes = [*recipes, (owner, request)]
                 title = "Bundle view"
+        if owner and self._review_preferences["antibody_cdrs"]:
+            recipes = [*recipes, self._antibody_recipe(owner)]
+            title = title or "Antibody numbering"
+        if owner and STATE.source_mode == "csv" and STATE.reference_track:
+            recipes = [*recipes, (owner, self._reference_track)]
+            title = title or "Reference track"
         self._view_jobs.start(self._view_identity(), recipes, title=title,
                               warnings=warnings, exclusive=bool(self._quick_view))
+
+    def _antibody_recipe(self, owner):
+        from .antibody_cdrs import AntibodyRequest
+        return owner, AntibodyRequest.from_entry(STATE.current_entry())
+
+    def _clear_antibody_view(self):
+        self._antibody_cartoon.clear(cmd)
+        self._imgt_numbering_action.setEnabled(False)
+
+    def _toggle_antibody_view(self, enabled):
+        self._clear_antibody_view()
+        owner = STATE.current_object
+        if enabled and owner in cmd.get_names("objects"):
+            self._view_jobs.append(self._view_identity(), self._antibody_recipe(owner), title="Antibody numbering")
+
+    def _show_imgt_numbering(self):
+        rows = self._antibody_cartoon.rows
+        if not rows:
+            return
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Antibody IMGT numbering")
+        dialog.resize(690, 460)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.addWidget(QtWidgets.QLabel("CDR1 blue   ·   CDR2 orange   ·   CDR3 magenta"))
+        headings = ("Object", "Segment", "Chain", "Residue", "AA", "Domain", "Type", "IMGT", "Region")
+        table = QtWidgets.QTableWidget(len(rows), len(headings))
+        table.setHorizontalHeaderLabels(headings)
+        table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        for row, values in enumerate(rows):
+            for column, value in enumerate(values):
+                table.setItem(row, column, QtWidgets.QTableWidgetItem(value))
+        table.resizeColumnsToContents()
+        layout.addWidget(table)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec_()
 
     def _choose_quick_view(self, name, radius=None):
         self.comparison.close_pocket()
@@ -7814,6 +8191,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         available = (
             bool(STATE.files)
             and bool(STATE.current_object)
+            and not self._batch_is_busy()
             and not self._csv_task_id
             and self._pending_navigation is None
             and not self._filter_empty
@@ -7960,14 +8338,18 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.values_edit.setText(STATE.values_text or "Good,Bad")
         self.auto_advance_cb.setChecked(bool(STATE.auto_advance))
         self.save_on_label_click_cb.setChecked(bool(STATE.save_on_label_click))
+        self.antibody_cdrs_cb.setChecked(self._review_preferences["antibody_cdrs"])
         self.show_source_row_action.setChecked(bool(STATE.show_source_row))
         self.show_file_status_action.setChecked(bool(STATE.show_file_status))
+        self.column_profiles_action.setChecked(self._review_preferences["score_distributions"])
         self.keep_previous_cb.setChecked(bool(STATE.keep_previous))
         self.prefer_gz_cb.setChecked(bool(STATE.prefer_gz))
         self.skip_annotated_cb.setChecked(bool(STATE.skip_annotated))
         self.preload_enabled_cb.setChecked(bool(STATE.preload_enabled))
-        self.preload_ahead_spin.setValue(int(STATE.preload_ahead or 0))
-        self.preload_interval_spin.setValue(int(STATE.preload_interval_ms or 250))
+        for name, control in _REVIEW_SPIN_PREFERENCES.items():
+            spin = getattr(self, control)
+            with QtCore.QSignalBlocker(spin):
+                spin.setValue(getattr(STATE, name))
         self.bg_decompress_cb.setChecked(bool(STATE.background_decompress_gz))
         self.cache_enabled_cb.setChecked(bool(STATE.cache_enabled))
         self.step_cmd_edit.setPlainText(STATE.step_cmd or "")
@@ -7991,6 +8373,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         return {"path": self.source_location.source(self.dir_edit.text().strip()), "pattern": self.pattern_edit.text().strip() or STRUCTURE_PATTERN}
 
     def _load_dataset(self) -> None:
+        if self._batch_is_busy():
+            return
         if not self._normalize_source_entry():
             return
         self._update_source_mode()
@@ -8008,9 +8392,13 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             _path_identity(history["dataset_dir"]) == _path_identity(arguments["path"])
         )
         detect_table = self.source_type_combo.currentData() == "auto" and not resume_directory
+        same_directory = STATE.dataset is not None and STATE.source_mode == "directory" and (
+            _path_identity(STATE.dataset_dir) == _path_identity(arguments["path"])
+        )
+        restore_saved = resume_directory and history.get("resume_saved", False) and not same_directory
         self._start_csv_task("directory", _prepare_directory_load, arguments,
                              runtime=_capture_csv_runtime_context(),
-                             worker_arguments=dict(arguments, restore_saved=False, detect_table=detect_table))
+                             worker_arguments=dict(arguments, restore_saved=restore_saved, detect_table=detect_table))
 
     def _next(self) -> None:
         self._request_navigation(STATE.index + 1)
@@ -8236,6 +8624,14 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
 
     def _refresh_dataset_table(self) -> None:
         display_columns = list(STATE.display_columns)
+        all_entries = STATE.all_entries or STATE.entries
+        available_columns = STATE.dataset.columns if STATE.dataset is not None else (
+            tuple(all_entries[0].metadata) if all_entries else ()
+        )
+        view = compile_view(STATE.filter_text, available_columns)
+        _, ranking = view
+        if ranking and ranking.column not in display_columns:
+            display_columns.insert(0, ranking.column)
         label_key = _active_annotation_key()
         source_token, signature = self._current_table_identity()
         store = STATE.row_annotation_store
@@ -8256,7 +8652,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             selected = selection.ids if same_source else (STATE.current_entry_id(),)
             cursor_row = self.dataset_table.currentIndex().row()
             cursor = self._dataset_model.entry_id_at(cursor_row) if same_source else STATE.current_entry_id()
-            entries = _table_view_entries(STATE.all_entries or STATE.entries)
+            entries = _table_view_entries(all_entries, view)
             self._table_mode = "active"
             self._table_source_token = source_token
             self._preview_rows_by_id = {}
@@ -8282,7 +8678,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             self.dataset_table.setColumnWidth(3, 80)
             self._display_source_columns()
             columns = STATE.dataset.columns if STATE.dataset is not None else tuple(entries[0].metadata) if entries else ()
-            self.column_picker.set_columns(columns, display_columns)
+            self.column_picker.set_columns(columns, list(STATE.display_columns))
             self._column_bindings["filter"].set_columns(columns)
             self._column_bindings["filter"].set_value_dataset(STATE.dataset)
             self._column_bindings["sort"].set_columns(columns)
@@ -8302,14 +8698,15 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.review.selection.follow_current(STATE.current_entry_id())
         sampled = bool(STATE.sampling.get("enabled"))
         cluster = STATE.cluster_scope.get("title", "")
-        title = cluster or ("Sample" if sampled else "Candidates")
+        title = cluster or ("Sample" if sampled else f"Top per {ranking.column}" if ranking else "Candidates")
         self.view_summary_label.setText(title)
         show_scope = bool(cluster or sampled or len(STATE.entries) != len(STATE.all_entries))
         self.view_summary_label.setVisible(not show_scope)
         self.view_scope_label.setVisible(show_scope)
         self.view_scope_label.setText(f"{len(STATE.entries):,} / {len(STATE.all_entries):,} rows")
         self.view_scope_label.setToolTip(
-            f"{title}: {len(STATE.entries):,} shown · {STATE.filtered_count:,} matched filters · "
+            f"{title} by {ranking.score_text} · {len(STATE.entries):,} shown · {len(STATE.all_entries):,} total"
+            if ranking else f"{title}: {len(STATE.entries):,} shown · {STATE.filtered_count:,} matched filters · "
             f"{len(STATE.all_entries):,} total")
         self.overview_button.setText("Statistics… •" if sampled else "Statistics…")
         self.cluster_button.setText("Cluster •" if cluster else "Cluster…")
@@ -8349,7 +8746,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
 
     def _refresh_status(self) -> None:
         self._page_changed()
-        busy = self._csv_task_kind in {"annotations", "annotation_undo"}
+        busy = self._csv_task_kind in {"annotations", "annotation_undo"} or self._batch_is_busy()
         ready = bool(STATE.files) and not self._filter_empty and self._table_mode != "preview" and not busy
         view_available = ready and bool(STATE.current_object)
         self.column_picker.setEnabled(STATE.dataset is not None and STATE.source_mode == "csv" and not busy)
@@ -8357,6 +8754,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.quick_views.setEnabled(view_available)
         self.view_open_button.setEnabled(view_available)
         self.compare_toggle.setEnabled(view_available)
+        self.reference_track_button.setEnabled(view_available and STATE.source_mode == "csv")
+        self.pocket_reference_action.setEnabled(view_available and STATE.source_mode == "csv" and bool(STATE.reference_track))
         self.compare_bar.setEnabled(ready and bool(STATE.current_object))
         self._refresh_live_actions()
         for widget in (self.next_btn, self.prev_btn, self.next_unann_btn, self.goto_btn, self.apply_btn, *self._value_buttons):

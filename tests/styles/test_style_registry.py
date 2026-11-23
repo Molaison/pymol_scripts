@@ -17,6 +17,7 @@ from pymolplugins.styles.presets import StylePreset, validate_presets
 ROOT = Path(__file__).resolve().parents[2]
 STYLE_DIR = ROOT / "visualization" / "styles"
 PLUGIN_DIR = ROOT / "visualization" / "plugins"
+QT_STYLE_PLUGIN = ROOT / "pymolplugins" / "styles" / "qt_plugin.py"
 
 
 REP_BITS = {
@@ -602,6 +603,124 @@ class StyleRegistryTests(unittest.TestCase):
                 ),
                 1,
             )
+
+    def test_alphafold_plddt_uses_inclusive_lower_bins_and_selection_scope(self):
+        color_names = (
+            "pp_alphafold_plddt_orange",
+            "pp_alphafold_plddt_yellow",
+            "pp_alphafold_plddt_cyan",
+            "pp_alphafold_plddt_blue",
+        )
+        cases = (
+            (0.0, color_names[0]),
+            (49.999, color_names[0]),
+            (50.0, color_names[1]),
+            (69.999, color_names[1]),
+            (70.0, color_names[2]),
+            (89.999, color_names[2]),
+            (90.0, color_names[3]),
+            (100.0, color_names[3]),
+        )
+        for value, expected_color in cases:
+            with self.subTest(value=value):
+                fake = FakeCmd()
+                fake.atoms[0]["b"] = value
+                fake.atoms[1]["b"] = 100.0 if value == 0.0 else value
+                fake.selections["focus"] = {("obj_a", 1), ("obj_a", 2)}
+                original_atoms = [dict(atom) for atom in fake.atoms]
+                original_reps = tuple(atom["reps"] for atom in fake.atoms)
+                original_outside_color = 37
+                fake.add_object(
+                    "outside",
+                    [
+                        {
+                            "model": "outside",
+                            "index": 1,
+                            "color": original_outside_color,
+                            "reps": REP_BITS["cartoon"],
+                            "b": 95.0,
+                        }
+                    ],
+                )
+                registry = self.registry_module.StyleRegistry(fake)
+
+                snapshot_id = registry.apply("alphafold_plddt", selection="focus")
+
+                self.assertEqual(
+                    fake.atoms[0]["color"], fake.color_indices[expected_color]
+                )
+                self.assertEqual(fake.atoms[-1]["color"], original_outside_color)
+                self.assertEqual(
+                    tuple(atom["reps"] for atom in fake.atoms[:2]), original_reps
+                )
+                self.assertEqual(registry.last_application["global_effects"]["settings"], [])
+                self.assertEqual(
+                    registry.last_application["target_effects"]["atom_colors"],
+                    ["b_range"],
+                )
+                self.assertEqual(registry.revert(snapshot_id), snapshot_id)
+                self.assertEqual(fake.atoms[:2], original_atoms)
+
+    def test_alphafold_plddt_rejects_invalid_b_before_mutation(self):
+        invalid_values = (-0.001, 100.001, float("nan"), float("inf"))
+        for invalid in invalid_values:
+            with self.subTest(value=invalid):
+                fake = FakeCmd()
+                fake.atoms[0]["b"] = invalid
+                fake.atoms[1]["b"] = 50.0
+                fake.selections["focus"] = {("obj_a", 1), ("obj_a", 2)}
+                originals = [dict(atom) for atom in fake.atoms]
+                registry = self.registry_module.StyleRegistry(fake)
+
+                with self.assertRaisesRegex(ValueError, "finite and in 0..100"):
+                    registry.apply("alphafold_plddt", selection="focus")
+
+                self.assertEqual(fake.atoms, originals)
+                self.assertEqual(fake.set_calls, [])
+                self.assertFalse(
+                    any(name.startswith("pp_alphafold_plddt_") for name in fake.named_colors)
+                )
+
+    def test_alphafold_plddt_accepts_zero_confidence_and_restores_colors(self):
+        fake = FakeCmd()
+        fake.atoms[0]["b"] = 0.0
+        fake.atoms[1]["b"] = 0.0
+        fake.selections["focus"] = {("obj_a", 1), ("obj_a", 2)}
+        registry = self.registry_module.StyleRegistry(fake)
+        before = [dict(atom) for atom in fake.atoms]
+        snapshot = registry.apply("alphafold_plddt", selection="focus")
+        orange = fake.get_color_index("pp_alphafold_plddt_orange")
+        self.assertEqual([atom["color"] for atom in fake.atoms[:2]], [orange, orange])
+        registry.revert(snapshot)
+        self.assertEqual(fake.atoms, before)
+
+    def test_surface_background_is_reversible_and_does_not_compose_visibility(self):
+        registry = self.registry_module.StyleRegistry(self.fake)
+        original_reps = tuple(atom["reps"] for atom in self.fake.atoms)
+        original_colors = tuple(atom["color"] for atom in self.fake.atoms)
+
+        snapshot_id = registry.apply("surface_background", selection="obj_a")
+
+        for name, value in registry.resolve("surface_background")[0].global_settings.items():
+            self.assertEqual(self.fake.settings[name], value)
+        self.assertEqual(self.fake.settings["grid_mode"], 3)
+        self.assertEqual(self.fake.settings["orthoscopic"], 1)
+        self.assertEqual(self.fake.settings["ray_trace_fog"], 0)
+        self.assertEqual(self.fake.settings["transparency"], 0.6)
+        self.assertEqual(self.fake.settings["cartoon_highlight_color"], "gray95")
+        self.assertEqual(tuple(atom["reps"] for atom in self.fake.atoms), original_reps)
+        self.assertEqual(tuple(atom["color"] for atom in self.fake.atoms), original_colors)
+        self.assertEqual(registry.revert(snapshot_id), snapshot_id)
+
+    def test_appearance_choices_resolve_to_available_styles(self):
+        from pymolplugins.styles.presets import COLOR_CHOICES, LIGHTING_CHOICES
+
+        registry = self.registry_module.StyleRegistry(self.fake)
+        self.assertIn("alphafold_plddt", {name for _, name in COLOR_CHOICES})
+        self.assertIn("surface_background", {name for _, name in LIGHTING_CHOICES})
+        for label, name in COLOR_CHOICES + LIGHTING_CHOICES:
+            with self.subTest(label=label):
+                self.assertTrue(registry.resolve(name))
 
     def test_apply_result_and_console_separate_global_and_target_effects(self):
         old_registry = self.registry_module._REGISTRY

@@ -2,10 +2,10 @@
 
 import ast
 from dataclasses import dataclass, field
-from io import StringIO
-import tokenize
-
-from .filtering import _column_name, _quoted_columns, column_expression, filter_parentheses, remove_unmatched_parentheses
+from .filtering import (
+    _and_terms, _column_name, _condition_ast, _condition_text, _is_group_ranking, _quoted_columns,
+    column_expression, filter_parentheses, remove_unmatched_parentheses,
+)
 
 
 @dataclass(frozen=True)
@@ -130,14 +130,23 @@ def _manual_query(nodes, aliases):
             text = node.args[0].value
             if isinstance(text, str) and not text.startswith("where:"):
                 return text
-    expression = ast.unparse(nodes[0] if len(nodes) == 1 else ast.BoolOp(op=ast.And(), values=nodes))
-    if aliases:
-        tokens = tokenize.generate_tokens(StringIO(expression).readline)
-        expression = tokenize.untokenize(
-            token._replace(string=column_expression(aliases[token.string]))
-            if token.type == tokenize.NAME and token.string in aliases else token for token in tokens
-        )
-    return "where:" + expression
+    node = nodes[0] if len(nodes) == 1 else ast.BoolOp(op=ast.And(), values=nodes)
+    return "where:" + _condition_text(node, aliases)
+
+
+def with_group_ranking(query, clause):
+    """Replace the ranking clause while retaining manual and header conditions."""
+    filters = read_header_filters(query)
+    base = filters.base
+    if base.startswith("where:"):
+        node, aliases = _condition_ast(base[6:])
+        base = _manual_query([term for term in _and_terms(node) if not _is_group_ranking(term)], aliases)
+    if clause:
+        if base:
+            condition = base[6:] if base.startswith("where:") else f"text_search({base!r})"
+            clause = f"({condition}) and {clause}"
+        base = "where:" + clause
+    return HeaderFilters(base, filters.selections).query()
 
 
 def _add_choices(groups, column, choices):

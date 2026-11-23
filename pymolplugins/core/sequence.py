@@ -42,6 +42,16 @@ AMINO_ACID_CODES = {
     "SEC": "U",
     "PYL": "O",
     "UNK": "X",
+}
+
+EXTENDED_RESIDUE_CODES = {
+    **AMINO_ACID_CODES,
+    "XLE": "J",
+    "A": "A", "C": "C", "G": "G", "I": "I", "T": "T", "U": "U",
+    "DA": "A", "DC": "C", "DG": "G", "DI": "I", "DT": "T", "DU": "U",
+}
+
+AMINO_ACID_CODES.update({
     # Common protein modifications. Unknown protein-like residues are retained
     # as X rather than omitted, so downstream residue positions cannot shift.
     "MSE": "M",
@@ -68,7 +78,7 @@ AMINO_ACID_CODES = {
     "CYM": "C",
     "CYX": "C",
     "LYN": "K",
-}
+})
 
 _NON_PROTEIN_RESIDUES = frozenset(
     (
@@ -147,6 +157,10 @@ class SequenceTrack:
     @property
     def sequence(self) -> str:
         return "".join(residue.one_letter for residue in self.residues)
+
+    @property
+    def tokens(self) -> Tuple[str, ...]:
+        return tuple(residue_token(residue) for residue in self.residues)
 
 
 @dataclass(frozen=True)
@@ -314,7 +328,7 @@ def build_residue_records(
     """
 
     parsed_state = as_int(state, minimum=0, name="state")
-    builders: "OrderedDict[Tuple[str, str, str], _ResidueBuilder]" = OrderedDict()
+    builders: "OrderedDict[Tuple[str, str, str, str], _ResidueBuilder]" = OrderedDict()
 
     for atom in atoms:
         index = as_int(_atom_value(atom, "index", None), minimum=1, name="atom index")
@@ -326,7 +340,7 @@ def build_residue_records(
         resv, insertion = parse_residue_identifier(
             resi, _atom_value(atom, "resv", None)
         )
-        key = (segi, chain, resi)
+        key = (segi, chain, resi, resn)
         builder = builders.get(key)
         if builder is None:
             builder = _ResidueBuilder(
@@ -426,9 +440,65 @@ def index_atom_streams(
     return build_sequence_index(records)
 
 
-def normalize_query(query: object) -> str:
+def residue_token(residue: ResidueRecord) -> str:
+    """Encode a residue without losing the identity of modified components."""
+    return EXTENDED_RESIDUE_CODES.get(residue.resn, "({})".format(residue.resn))
+
+
+def parse_residue_tokens(query: object) -> Tuple[str, ...]:
+    """Parse letters and literal component names; no regular expressions."""
+    if query is None:
+        raise ValueError("sequence query is empty")
+    text = str(query).upper()
+    tokens = []
+    position = 0
+    while position < len(text):
+        character = text[position]
+        if character.isspace() or character == "-":
+            position += 1
+            continue
+        if character == "(":
+            end = text.find(")", position + 1)
+            if end < 0:
+                raise ValueError("residue token has an unclosed '('")
+            name = text[position + 1:end]
+            if not name or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.+-" for c in name):
+                raise ValueError("residue tokens require a nonempty component name, e.g. (MSE) or (9UY)")
+            tokens.append("({})".format(name))
+            position = end + 1
+        elif "A" <= character <= "Z":
+            tokens.append(character)
+            position += 1
+        else:
+            raise ValueError("invalid residue-token query character: {!r}".format(character))
+    if not tokens:
+        raise ValueError("sequence query is empty")
+    return tuple(tokens)
+
+
+def format_extended_fasta(index: SequenceIndex, width: int = 80) -> str:
+    """Format each track separately, keeping every residue token intact."""
+    width = as_int(width, minimum=1, name="width")
+    lines = []
+    for track in index.tracks:
+        lines.append(">{}|state={}|segi={}|chain={}".format(
+            track.object, track.state, track.segi, track.chain))
+        line = ""
+        for token in track.tokens:
+            if line and len(line) + len(token) > width:
+                lines.append(line)
+                line = ""
+            line += token
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def normalize_query(query: object, *, residue_tokens: bool = False) -> str:
     """Uppercase a query and remove explicit whitespace and ``-`` gaps."""
 
+    if residue_tokens:
+        return "".join(parse_residue_tokens(query))
     if query is None:
         raise ValueError("sequence query is empty")
     normalized = re.sub(r"[\s-]+", "", str(query)).upper()
@@ -439,7 +509,7 @@ def normalize_query(query: object) -> str:
     return normalized
 
 
-def split_queries(queries: object, separator: str = "|") -> Tuple[str, ...]:
+def split_queries(queries: object, separator: str = "|", *, residue_tokens: bool = False) -> Tuple[str, ...]:
     """Split and normalize query text using an explicit separator."""
 
     if queries is None:
@@ -457,7 +527,7 @@ def split_queries(queries: object, separator: str = "|") -> Tuple[str, ...]:
     else:
         parts = (queries,)
     normalized = tuple(
-        normalize_query(part)
+        normalize_query(part, residue_tokens=residue_tokens)
         for part in parts
         if part is not None and str(part).strip()
     )
@@ -466,11 +536,15 @@ def split_queries(queries: object, separator: str = "|") -> Tuple[str, ...]:
     return normalized
 
 
-def _letter_matches(sequence_letter: str, query_letter: str) -> bool:
+def _letter_matches(sequence_letter: object, query_letter: str) -> bool:
+    if isinstance(sequence_letter, ResidueRecord):
+        if query_letter.startswith("("):
+            return sequence_letter.resn == query_letter[1:-1]
+        sequence_letter = residue_token(sequence_letter)
     return query_letter == "X" or sequence_letter.upper() == query_letter
 
 
-def _exact_positions(sequence: str, query: str) -> Iterator[Tuple[int, ...]]:
+def _exact_positions(sequence: Sequence, query: Sequence[str]) -> Iterator[Tuple[int, ...]]:
     if len(query) > len(sequence):
         return
     for start in range(len(sequence) - len(query) + 1):
@@ -527,6 +601,7 @@ def find_sequence_matches(
     occurrence: str = "all",
     chain: Optional[str] = None,
     max_matches: int = 10000,
+    residue_tokens: bool = False,
 ) -> Tuple[SequenceMatch, ...]:
     """Find deterministic exact or bounded-gap matches across all tracks.
 
@@ -541,12 +616,13 @@ def find_sequence_matches(
     before an unbounded result can be accumulated.
     """
 
+    token_mode = as_bool(residue_tokens)
     if queries is None:
         raise ValueError("no sequence queries were provided")
     if isinstance(queries, str):
-        normalized_queries = (normalize_query(queries),)
+        normalized_queries = (normalize_query(queries, residue_tokens=token_mode),)
     else:
-        normalized_queries = tuple(normalize_query(query) for query in queries)
+        normalized_queries = tuple(normalize_query(query, residue_tokens=token_mode) for query in queries)
     if not normalized_queries:
         raise ValueError("no sequence queries were provided")
     mode = str(gap_mode).strip().lower()
@@ -555,6 +631,8 @@ def find_sequence_matches(
     if mode not in ("exact", "bounded"):
         raise ValueError("gap_mode must be 'exact' or 'bounded'")
     parsed_gap = as_int(max_gap, minimum=0, name="max_gap")
+    if token_mode and (mode != "exact" or parsed_gap):
+        raise ValueError("residue_tokens=1 requires gap_mode='exact' and max_gap=0")
     policy = str(occurrence).strip().lower()
     if policy not in ("all", "first", "unique"):
         raise ValueError("occurrence must be 'all', 'first', or 'unique'")
@@ -564,13 +642,14 @@ def find_sequence_matches(
 
     all_matches: List[SequenceMatch] = []
     for query_index, query in enumerate(normalized_queries):
+        query_symbols = parse_residue_tokens(query) if token_mode else query
         query_matches: List[SequenceMatch] = []
         first_found = False
         for track in index.tracks:
             if chain is not None and track.chain != chain:
                 continue
             if mode == "exact":
-                position_sets = _exact_positions(track.sequence, query)
+                position_sets = _exact_positions(track.residues if token_mode else track.sequence, query_symbols)
             else:
                 position_sets = _bounded_positions(track.sequence, query, parsed_gap)
             for positions in position_sets:

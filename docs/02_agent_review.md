@@ -79,12 +79,10 @@
 - 最终只保留必要的 structures/、可选 references/、sum_scores.csv、review.json、简洁 README.md 和必要溯源/验收证据。README 写清来源、候选粒度与数量、指标方向、参考/链对应、命令是否移动候选、分组依据与数量、异常和实际验收范围，以及可复制的打开方式。返回 bundle 路径与尚未解决的缺口。
 ````
 
-## 在插件中打开
-
 ## 导入并标注
 
 1. 将 `sum_scores.csv` 和生成的 `review.json` 放在同一目录，保留表中相对路径所指向的结构文件。
-2. 打开 **Plugin → PymolPlugins → Structure Annotator**，在 **Open data** 粘贴文件夹、`sum_scores.csv` 或相邻的 `review.json` 路径，按 Enter 或点 **Open**。也接受 `file:///` 链接。文件夹和 `review.json` 会优先打开 Bundle 声明的 `scores_file`。
+2. 打开 **Plugin → PymolPlugins → Review structures…**，在 **Open data** 粘贴文件夹、`sum_scores.csv` 或相邻的 `review.json` 路径，按 Enter 或点 **Open**。也接受 `file:///` 链接。文件夹和 `review.json` 会优先打开 Bundle 声明的 `scores_file`。
 3. 在 **Review** 查看结构、选定的评分列和代表性 `label`。选择人工标签，点击 **Save and next**；稍后可用 **Data → Continue last review** 继续。
 4. 如需交接，使用 **Data → Export review handoff…** 导出进度与标签摘要；它不包含结构文件。导出带标注的表格时选择新的输出路径。
 
@@ -106,7 +104,6 @@
 | --- | --- | --- |
 | Review · keep camera | 同坐标系连续查看蛋白候选 | 都保持 |
 | Interface · contacts and voids | 蛋白界面或配体口袋。可选 4 或 6 Å 邻域，以及显示全部邻域侧链或仅显示参与已检出相互作用的侧链。Review 分别显示青点凹槽和紫点封闭空腔的体积，两类散点默认勾选，可单独开关 | 缩放到界面，散点开关只调整对应图层 |
-| PPI · interface surface | 显示蛋白链间 5 Å 邻域的表面和侧链 | 缩放到界面，坐标保持 |
 | Membrane · hydrophobic surface and planes | 叠加半透明疏水性表面。用脂质头基或本地 TmDet 估算膜边界，并显示边界附近的 Tyr、Trp、Arg、Lys 侧链 | 都保持 |
 | MASS paper · residue-number gradient | 只选 Binder chain 就为 binder 上色。也选 Target chain 时，两条链分别按自己的残基编号范围使用同一色板 | 都保持 |
 | Reference · overlay, keep coordinates | 青色候选与灰色半透明固定参考叠合 | 都保持 |
@@ -114,6 +111,10 @@
 
 两个 Reference 预设需在 **Fixed reference** 选择已加载的固定 Review steps 对象。复合物可能需要将草稿改为特定链；全蛋白 Cα 预设不推断链对应。原生 `align` 会创建或更新 `_align1`、`_align2` 选择，草稿提示中也会说明。预设根据当前结构生成，异构候选应检查链选择是否适用。
 
-Interface 中，青绿色细虚线表示极性接触，粉色粗虚线表示盐桥，紫色珠线表示 π–π 堆叠，蓝色散点表示局部空隙估计。配体相互作用取决于载入结构里的原子类型、电荷和键级。
+Interface 中，青绿色细虚线表示极性接触，粉色粗虚线表示盐桥，紫色珠线表示 π–π 堆叠；青点与紫点分别表示前述凹槽和封闭空腔。相互作用涉及蛋白主链时，对应残基的主链也显示为 sticks。配体相互作用取决于载入结构里的原子类型、电荷和键级。
+
+橙色球标出界面新埋藏的未满足极性原子，相应残基也显示为 sticks。用 1.4 Å 水探针估算原子溶剂可及面积，形成界面后面积 ≤ 0.5 Å²，去掉所选界面伙伴后面积 ≥ 1.0 Å²，且整个已载入结构未检出几何相容的供体–受体接触或近距离金属配位时才标记。检查包含同链、其他链、配体和已建模的水。标记受结构构象、原子类型和水模型完整性影响。
+
+Review、Change scene view、`pp_view interface`、Click to focus、Bundle 的蛋白界面和配体口袋，以及配体交互结果的界面层共享这些规则。Click to focus 的显示范围是点击位置周围 5 Å，按 Interface 的 Auto 分组逻辑判断界面埋藏。在 Contacts 中选 Off 可隐藏橙球和接触线。
 
 Membrane 优先使用结构中两层可识别的磷脂头基。其余结构由本地 TmDet 4.1.9 推断。TmDet 不可用或运行失败时，改用疏水 α 螺旋几何估算。PyMOL 控制台会报告本次使用的方法。Windows 本机预览使用 Debian WSL 中用户级安装的 TmDet 和 wwPDB CCD。膜定位在本机执行。

@@ -570,7 +570,7 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
     def test_annotation_interaction_preferences_defaults_and_validation(self):
         legacy = self.module._validate_persisted_config({"auto_advance": True})
         self.module._apply_persisted_config(legacy)
-        defaults = {"save_on_label_click": False, "show_source_row": True, "show_file_status": False}
+        defaults = {"save_on_label_click": True, "show_source_row": True, "show_file_status": False}
         for name, default in defaults.items():
             self.assertIs(getattr(self.module.AnnotatorState(), name), default)
             self.assertIs(getattr(self.module.STATE, name), default)
@@ -926,8 +926,11 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
 
             self.assertEqual(
                 plan.annotated_entry_ids,
-                (plan.selected_entry.id,),
+                (),
             )
+            self.assertEqual(plan.row_annotation_store.get(
+                plan.selected_entry.id, "quality", source_version=None), "Keep")
+            self.assertIsNone(plan.row_annotation_store.get(plan.selected_entry.id, "quality"))
 
     def test_annotation_generation_is_monotonic_for_set_and_undo(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1566,6 +1569,7 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
             self.assertEqual(loaded["status"], "loaded")
             store = self.module.STATE.row_annotation_store
             store.set(self.module.STATE.entries[0].id, "quality", "Keep")
+            self.module.sa_goto(3)
             store.set(self.module.STATE.entries[2].id, "quality", "Reject")
 
             with mock.patch.object(
@@ -1881,16 +1885,23 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
             entry_id = self.module.STATE.current_entry_id()
             store = self.module.STATE.row_annotation_store
             self.assertEqual(
-                store.get(entry_id, "quality"), "Needs Review = 需要复核"
+                store.get(entry_id, "quality", source_version=None), "Needs Review = 需要复核"
             )
-            self.assertEqual(self.module.STATE.annotated_indices, {0})
+            self.assertIsNone(store.get(entry_id, "quality"))
+            self.assertEqual(self.module.STATE.annotated_indices, set())
 
             self.module.sa_annotate("Reject")
             self.assertEqual(store.get(entry_id, "quality"), "Reject")
             self.module.sa_undo()
+            self.assertIsNone(store.get(entry_id, "quality"))
             self.assertEqual(
-                store.get(entry_id, "quality"), "Needs Review = 需要复核"
+                store.get(entry_id, "quality", source_version=None), "Needs Review = 需要复核"
             )
+            store.remove(entry_id, "quality", source_version=None)
+            self.assertIsNone(store.get(entry_id, "quality", source_version=None))
+            store.undo(entry_id, "quality", source_version=None)
+            self.assertEqual(store.get(entry_id, "quality", source_version=None), "Needs Review = 需要复核")
+            self.module.sa_annotate("Confirmed now")
 
             exported = self.module.sa_export_csv(
                 os.path.join(root, "reviewed-again.csv")
@@ -1898,7 +1909,7 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
             with open(exported, "r", encoding="utf-8-sig", newline="") as handle:
                 row = next(csv.DictReader(handle))
             self.assertEqual(
-                row["pymol_annotation_quality"], "Needs Review = 需要复核"
+                row["pymol_annotation_quality"], "Confirmed now"
             )
 
             reloaded = self.module.sa_load_csv(
@@ -1908,15 +1919,18 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
             imported_id = self.module.STATE.current_entry_id()
             imported_store = self.module.STATE.row_annotation_store
             self.assertEqual(
-                imported_store.get(imported_id, "quality"),
-                "Needs Review = 需要复核",
+                imported_store.get(imported_id, "quality", source_version=None),
+                "Confirmed now",
             )
-            imported_store.remove(imported_id, "quality")
+            self.assertIsNone(imported_store.get(imported_id, "quality"))
+            self.assertEqual(self.module.STATE.annotated_indices, set())
+            imported_store.remove(imported_id, "quality", source_version=None)
             self.assertIsNone(imported_store.get(imported_id, "quality"))
             restored = imported_store.undo(
-                entry_id=imported_id, label="quality"
+                entry_id=imported_id, label="quality", source_version=None
             )
-            self.assertEqual(restored["current"], "Needs Review = 需要复核")
+            self.assertEqual(restored["current"], "Confirmed now")
+            self.assertIsNone(imported_store.get(imported_id, "quality"))
 
     def test_case_distinct_csv_controller_sessions_never_share_mutable_state(self):
         with tempfile.TemporaryDirectory() as root:
@@ -2050,10 +2064,14 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
                     self.assertEqual(handle.read(), original)
 
             self.module.sa_load_dir(root)
+            # Reloading has only observed the resumed row. Observe each source
+            # before restoring its bound labels into the effective projection.
+            self.module.sa_goto(1)
             self.assertEqual(
                 self.module.STATE.row_annotation_store.get(entry_ids[0], "quality"),
                 value,
             )
+            self.module.sa_goto(2)
             self.assertEqual(
                 self.module.STATE.row_annotation_store.get(entry_ids[1], "quality"),
                 value,
@@ -2147,17 +2165,19 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
                 for entry in self.module.STATE.dataset.entries
             }
             self.assertEqual(
-                store.get(entries["legacy.pdb"].id, "quality"),
+                store.get(entries["legacy.pdb"].id, "quality", source_version=None),
                 "Legacy=Keep",
             )
             self.assertEqual(
-                store.get(entries["legacy_cif.cif"].id, "quality"),
+                store.get(entries["legacy_cif.cif"].id, "quality", source_version=None),
                 "Legacy=CIF = 值",
             )
             self.assertEqual(
-                store.get(entries["legacy_gzip.cif.gz"].id, "quality"),
+                store.get(entries["legacy_gzip.cif.gz"].id, "quality", source_version=None),
                 "Legacy=GZIP = 值",
             )
+            self.assertEqual(store.snapshot_for_label("quality"), {})
+            self.assertEqual(self.module.STATE.annotated_indices, set())
             pdb_position = next(
                 index
                 for index, entry in enumerate(self.module.STATE.entries, 1)
@@ -2168,7 +2188,12 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
             self.module.sa_annotate("新的 值=ok")
             self.assertEqual(store.get(entry_id, "quality"), "新的 值=ok")
             self.module.sa_undo()
-            self.assertEqual(store.get(entry_id, "quality"), "Legacy=Keep")
+            self.assertIsNone(store.get(entry_id, "quality"))
+            self.assertEqual(store.get(entry_id, "quality", source_version=None), "Legacy=Keep")
+            store.remove(entry_id, "quality", source_version=None)
+            store.undo(entry_id, "quality", source_version=None)
+            self.assertEqual(store.get(entry_id, "quality", source_version=None), "Legacy=Keep")
+            self.assertIsNone(store.get(entry_id, "quality"))
             for path, original in originals.items():
                 with open(path, "rb") as handle:
                     self.assertEqual(handle.read(), original)
@@ -2253,10 +2278,12 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
 
             self.assertEqual(
                 [os.path.basename(path) for path in self.module.STATE.files],
-                ["b.pdb"],
+                ["a.pdb", "b.pdb"],
             )
-            self.assertEqual(len(self.module.STATE.all_entries), 1)
+            self.assertEqual(len(self.module.STATE.all_entries), 2)
             self.assertEqual(self.module.STATE.dataset.count, 2)
+            self.assertEqual(self.module.STATE.annotated_indices, {0})
+            self.module.sa_goto(2)
             self.module.sa_annotate("Reject")
             exported = self.module.sa_export_csv(
                 os.path.join(root, "complete annotations.csv")

@@ -10,6 +10,7 @@ from weakref import WeakKeyDictionary
 
 from pymolplugins.core.parameters import as_bool, as_float
 
+from ._bundle_skill.acceptance_interface import draw_atom_markers, draw_buried_unsatisfied, show_interface_sticks
 from .command_templates import LIPID_SELECTION, _chain_selection
 from .review_membrane import MembraneNotice, draw_membrane, estimate_membrane
 
@@ -24,7 +25,6 @@ _OVERVIEW_ALIASES = {
     "cartoon": (False, 0.5, False), "surface": (True, 0.25, False),
     "nucleic": (False, 0.5, True), "oligomer": (True, 0.65, False),
 }
-_BACKBONE = "name N+C+O+OXT"
 _OVERLAYS = WeakKeyDictionary()
 
 
@@ -122,6 +122,24 @@ def _source_object(api, source):
     return source
 
 
+def interface_partners(api, source, mode="auto", target=None, binder=None):
+    """Resolve protein chains or the organic ligand forming the displayed interface."""
+    protein = f"%{source} and polymer.protein"
+    ligand = f"%{source} and organic and not ({LIPID_SELECTION})"
+    if mode == "ligand" or (mode == "auto" and binder is None and api.count_atoms(ligand)):
+        pairs = [(target or protein, ligand)] if api.count_atoms(ligand) and api.count_atoms(protein) else []
+        return pairs, ligand
+    chains = api.get_chains(protein)
+    if len(chains) < 2 or (target is not None and target == binder):
+        return [], None
+    if target is not None and binder is not None:
+        return [(target, binder)], None
+    if target or binder:
+        chain = target or binder
+        return [(chain, f"({protein}) and not ({chain})")], None
+    return list(combinations((_chain_arg(source, "chain:" + value, api) for value in chains), 2)), None
+
+
 def parse_review_command(line, api):
     """Resolve and validate a local recipe against the active candidate."""
     name, raw = line.split(None, 1)
@@ -163,24 +181,9 @@ def parse_review_command(line, api):
             raise ValueError("Choose protein or ligand, 4 or 6 Å, and nearby or interacting sidechains")
         target = _chain_arg(source, target_id, api)
         binder = _chain_arg(source, binder_id, api)
-        ligand = f"%{source} and organic and not ({LIPID_SELECTION})"
-        has_ligand = api.count_atoms(ligand)
-        if mode == "ligand" or (mode == "auto" and has_ligand and binder is None):
-            if not has_ligand:
-                raise ValueError("No organic ligand found in this structure")
-            partners = [(target or protein, ligand)]
-        else:
-            chains = api.get_chains(protein)
-            if len(chains) < 2 or (target is not None and target == binder):
-                raise ValueError("Choose two different protein chains")
-            if target is not None and binder is not None:
-                partners = [(target, binder)]
-            elif target or binder:
-                chain = target or binder
-                partners = [(chain, f"({protein}) and not ({chain})")]
-            else:
-                partners = list(combinations((_chain_arg(source, "chain:" + value, api) for value in chains), 2))
-            ligand = None
+        partners, ligand = interface_partners(api, source, mode, target, binder)
+        if not partners:
+            raise ValueError("No organic ligand found in this structure" if ligand else "Choose two different protein chains")
         return _draw_interface, source, (protein, partners, ligand, float(radius), scope, surface, transparency)
     raise ValueError(f"Invalid arguments for {view} preset.")
 
@@ -206,8 +209,9 @@ def prepare_review_command(line, api):
     """Capture PyMOL data on the UI thread and return separate compute and draw calls."""
     action, source, args = parse_review_command(line, api)
     if action is _draw_interface:
-        snapshots, scene = _capture_interface(api, source, *args)
-        return source, action, partial(_compute_interface, snapshots), partial(_draw_interface, api, source, *scene)
+        snapshots, polar_snapshot, scene = _capture_interface(api, source, *args)
+        compute = partial(_compute_interface_view, snapshots, polar_snapshot)
+        return source, action, compute, partial(_draw_interface, api, source, *scene)
     if action is draw_membrane:
         state, calpha, markers, phosphorus, pdb, chains = _capture_membrane(api, source, *args)
         compute = partial(estimate_membrane, calpha, phosphorus, pdb, chains)
@@ -277,33 +281,29 @@ def _cylinders(api, source, kind, pairs, color, radius, dash, *, zoom=-1):
         return name
 
 
-def _dots(api, source, kind, points, color, radius, *, opacity=0.78):
-    from pymol.cgo import ALPHA, COLOR, SPHERE
-
-    body = [ALPHA, opacity, COLOR, *color]
-    for xyz in points:
-        body.extend((SPHERE, *map(float, xyz), radius))
-    if len(body) > 6:
-        name = api.get_unused_name(f"{source}_{kind}")
-        api.load_cgo(body, name, zoom=0)
-        return name
-
-
 def draw_interface_contacts(api, source, coords, polar, salt, pi_pairs, names):
-    """Draw the contact layers shared by Interface and Interactive focus."""
+    polar_segments = ((coords[a], coords[b]) for a, b in sorted(polar))
+    salt_segments = ((coords[a], coords[b]) for a, b in sorted(salt))
+    return draw_interface_segments(api, source, polar_segments, salt_segments, pi_pairs, names)
+
+
+def draw_interface_segments(api, source, polar, salt, pi_pairs, names):
+    """Draw the same typed contact styles from endpoints in scene coordinates."""
+    import numpy as np
+
     layers = {}
     for kind, pairs, color, radius, dash in (
         ("polar_contacts", polar, (0.12, 0.76, 0.69), 0.06, 0.45),
         ("salt_bridges", salt, (0.91, 0.26, 0.62), 0.13, 1.1),
     ):
-        name = _cylinders(api, source, kind, ((coords[a], coords[b]) for a, b in sorted(pairs)),
-                          color, radius, dash, zoom=0)
+        name = _cylinders(api, source, kind, pairs, color, radius, dash, zoom=0)
         if name is not None:
             names.append(name)
             layers[kind] = name
-    name = _dots(api, source, "pi_stacks",
-                 (a + (b - a) * t for a, b in pi_pairs for t in (0, .25, .5, .75, 1)),
-                 (0.46, 0.51, 1.0), 0.19)
+    stacks = ((np.asarray(a), np.asarray(b)) for a, b in pi_pairs)
+    name = draw_atom_markers(api, source, "pi_stacks",
+                            (a + (b - a) * t for a, b in stacks for t in (0, .25, .5, .75, 1)),
+                            (0.46, 0.51, 1.0), 0.19)
     if name is not None:
         names.append(name)
         layers["pi_stacks"] = name
@@ -311,7 +311,9 @@ def draw_interface_contacts(api, source, coords, polar, salt, pi_pairs, names):
 
 
 def _capture_interface(api, source, protein, partners, ligand, radius, scope, surface, transparency):
-    state = api.get_object_state(source)
+    from .interface_polar import capture_interface_polar
+
+    state = api.get_object_state(source) or min(api.get_state(), api.count_states(f"%{source}"))
     proximity, snapshots = [], []
     for first, second in partners:
         left = f"(({first}) and not elem H) within {radius:g} of (({second}) and not elem H)"
@@ -325,7 +327,8 @@ def _capture_interface(api, source, protein, partners, ligand, radius, scope, su
         raise ValueError(f"No interface atoms found within {radius:g} Å")
     focus = "byres (" + " or ".join(f"({part})" for pair in proximity for part in pair) + ")"
     pocket = ligand is not None and partners[0][0] == protein
-    return snapshots, (protein, ligand, scope, state, focus, proximity, pocket, surface, transparency)
+    polar_snapshot = capture_interface_polar(api, source, state, focus, partners)
+    return snapshots, polar_snapshot, (protein, ligand, scope, state, focus, proximity, pocket, surface, transparency)
 
 
 def _compute_interface(snapshots):
@@ -345,28 +348,37 @@ def _compute_interface(snapshots):
     return coords, contacts, polar, salt, pi_pairs
 
 
+def _compute_interface_view(snapshots, polar_snapshot):
+    from .interface_polar import find_buried_unsatisfied
+
+    return _compute_interface(snapshots), find_buried_unsatisfied(polar_snapshot)
+
+
 def _draw_interface(api, source, protein, ligand, scope, state, focus, proximity, pocket, surface, transparency, data):
     from pymol import util
     from .bundle_view import CandidateCavity
 
-    coords, contacts, polar, salt, pi_pairs = data
+    (coords, contacts, polar, salt, pi_pairs), buried = data
     residues = focus if scope == "nearby" else ("byres (" + _indices(source, contacts) + ")" if contacts else "none")
-    sidechains = f"(({residues}) and polymer.protein) and not ({_BACKBONE})"
+    endpoints = _indices(source, contacts) if contacts else "none"
+    buried_atoms = _indices(source, buried) if buried else "none"
     api.show("cartoon", protein)
     if ligand is None:
         util.cbc(protein, _self=api)
     api.hide("sticks", protein)
-    api.show("sticks", sidechains)
-    util.cnc(sidechains, _self=api)
+    sticks = show_interface_sticks(api, f"({residues}) and polymer.protein", endpoints, buried_atoms)
+    util.cnc(sticks, _self=api)
     if ligand:
         api.show("sticks", ligand)
         api.color("yellow", f"({ligand}) and elem C")
         util.cnc(ligand, _self=api)
     draw_interface_contacts(api, source, coords, polar, salt, pi_pairs, [])
+    draw_buried_unsatisfied(api, source, buried.values())
     if surface:
         _surface_overlay(api, source, f"({focus}) and polymer.protein", state, transparency, "interface")
     api.zoom(focus, 5, state=state)
     print(f"Interface: {len(polar)} polar contacts, {len(salt)} salt bridges, {len(pi_pairs)} π stacks")
+    print(f"Interface: {len(buried)} buried unsatisfied polar atoms (orange spheres)")
 
     def capture(renderer):
         if pocket:

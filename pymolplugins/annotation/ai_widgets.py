@@ -230,17 +230,45 @@ def current_context(panel):
             "review_objects": objects}
 
 
+def _trigger_label(key):
+    return "On open" if key == "on_open" else "After saving label: " + key[12:]
+
+
+def _draft_disclosure(layout, key, text):
+    section = QtWidgets.QFrame()
+    section_layout = QtWidgets.QVBoxLayout(section)
+    section_layout.setContentsMargins(0, 0, 0, 0)
+    section_layout.setSpacing(4)
+    toggle = QtWidgets.QToolButton()
+    toggle.setText(_trigger_label(key))
+    toggle.setCheckable(True)
+    toggle.setChecked(True)
+    toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+    toggle.setArrowType(QtCore.Qt.DownArrow)
+    edit = QtWidgets.QPlainTextEdit(text)
+    edit.setObjectName("commandEditor")
+    toggle.toggled.connect(edit.setVisible)
+    toggle.toggled.connect(lambda visible: toggle.setArrowType(
+        QtCore.Qt.DownArrow if visible else QtCore.Qt.RightArrow))
+    section_layout.addWidget(toggle)
+    section_layout.addWidget(edit)
+    layout.addWidget(section)
+    return {"frame": section, "toggle": toggle, "editor": edit}
+
+
 class AICommandDialog(QtWidgets.QDialog):
-    def __init__(self, panel):
+    def __init__(self, panel, preset=False):
         super().__init__(panel)
         self.panel = panel
         self.process = None
         self.response = None
         self.request_steps = {}
         self.preview_editors = {}
+        self.preview_sections = {}
         self.draft_context = None
         self.draft_steps = {}
         self.setWindowTitle("Command drafts")
+        self.preset_only = preset
         self.setStyleSheet(workspace_style())
         self.resize(720, 700)
         self.setMinimumSize(520, 480)
@@ -327,6 +355,15 @@ class AICommandDialog(QtWidgets.QDialog):
             item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
             item.setCheckState(QtCore.Qt.Checked if key == "on_open" else QtCore.Qt.Unchecked)
         layout.addWidget(self.triggers)
+        self.generation_toggle = QtWidgets.QPushButton("Show AI generation options")
+        self.generation_toggle.setCheckable(True)
+        self.generation_toggle.setAutoDefault(False)
+        self.generation_toggle.setVisible(self.preset_only)
+        self.generation_toggle.toggled.connect(self._toggle_generation)
+        layout.addWidget(self.generation_toggle)
+        self.generation_controls = QtWidgets.QWidget()
+        generation_layout = QtWidgets.QVBoxLayout(self.generation_controls)
+        generation_layout.setContentsMargins(0, 0, 0, 0)
         connection_row = QtWidgets.QHBoxLayout()
         self.connection_label = QtWidgets.QLabel()
         self.connection_label.setTextFormat(QtCore.Qt.PlainText)
@@ -335,12 +372,12 @@ class AICommandDialog(QtWidgets.QDialog):
         self.connection_button.clicked.connect(self.configure_connection)
         connection_row.addWidget(self.connection_label, 1)
         connection_row.addWidget(self.connection_button)
-        layout.addLayout(connection_row)
+        generation_layout.addLayout(connection_row)
         self.refresh_connection()
         self.request_edit = QtWidgets.QPlainTextEdit()
         self.request_edit.setPlaceholderText("Example: On open show cartoon, color chains, and zoom. After Keep, color the candidate cyan.")
         self.request_edit.setMaximumHeight(100)
-        layout.addWidget(self.request_edit)
+        generation_layout.addWidget(self.request_edit)
         buttons = QtWidgets.QHBoxLayout()
         self.generate_button = QtWidgets.QPushButton("Generate draft")
         self.generate_button.setProperty("role", "primary")
@@ -351,12 +388,21 @@ class AICommandDialog(QtWidgets.QDialog):
         buttons.addWidget(self.generate_button)
         buttons.addWidget(self.cancel_button)
         buttons.addStretch()
-        layout.addLayout(buttons)
+        generation_layout.addLayout(buttons)
+        layout.addWidget(self.generation_controls)
+        self.generation_controls.setVisible(not self.preset_only)
         self.status = QtWidgets.QLabel()
         self.status.setTextFormat(QtCore.Qt.PlainText)
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
-        self.previews = QtWidgets.QTabWidget()
+        self.previews = QtWidgets.QScrollArea()
+        self.previews.setWidgetResizable(True)
+        self.previews.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.preview_content = QtWidgets.QWidget()
+        self.preview_layout = QtWidgets.QVBoxLayout(self.preview_content)
+        self.preview_layout.setContentsMargins(0, 0, 0, 0)
+        self.preview_layout.setSpacing(6)
+        self.previews.setWidget(self.preview_content)
         layout.addWidget(self.previews, 1)
         footer = QtWidgets.QHBoxLayout()
         self.insert_button = QtWidgets.QPushButton("Insert draft…")
@@ -375,6 +421,11 @@ class AICommandDialog(QtWidgets.QDialog):
         footer.addWidget(self.save_preset_button)
         footer.addWidget(close)
         layout.addLayout(footer)
+
+    def _toggle_generation(self, visible):
+        self.generation_controls.setVisible(visible)
+        self.generation_toggle.setText("Hide AI generation options" if visible
+                                       else "Show AI generation options")
 
     def refresh_connection(self):
         connection = connection_settings()
@@ -417,18 +468,21 @@ class AICommandDialog(QtWidgets.QDialog):
                 if self.triggers.item(i).checkState() == QtCore.Qt.Checked}
 
     def show_drafts(self, drafts, *, local_presets=False):
-        self.previews.clear()
-        for edit in self.preview_editors.values():
-            edit.deleteLater()
+        while self.preview_layout.count():
+            item = self.preview_layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
         self.preview_editors = {}
+        self.preview_sections = {}
         self.draft_context = dict(self.context)
         self.draft_steps = dict(self.request_steps)
         self.draft_local_presets = local_presets
-        for key, text in drafts.items():
-            edit = QtWidgets.QPlainTextEdit(text)
-            edit.setObjectName("commandEditor")
-            self.preview_editors[key] = edit
-            self.previews.addTab(edit, "On open" if key == "on_open" else key[12:])
+        for index, (key, text) in enumerate(drafts.items()):
+            section = _draft_disclosure(self.preview_layout, key, text)
+            section["toggle"].setChecked(index == 0)
+            self.preview_sections[key] = section
+            self.preview_editors[key] = section["editor"]
+        self.preview_layout.addStretch()
         self.insert_button.setEnabled(True)
         self.apply_view_button.setEnabled(True)
 
@@ -644,7 +698,7 @@ class AICommandDialog(QtWidgets.QDialog):
 
 
 def show_ai_commands(panel, preset=False):
-    panel.ai_dialog = AICommandDialog(panel)
+    panel.ai_dialog = AICommandDialog(panel, preset=preset)
     if preset:
         panel.ai_dialog.preset_combo.setCurrentIndex(1)
         panel.ai_dialog.preset_combo.setFocus()

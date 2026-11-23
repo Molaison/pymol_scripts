@@ -1,11 +1,15 @@
 """Column expressions for CSV views, interpreted without executing Python."""
 
 import ast
+from dataclasses import dataclass
+from io import StringIO
 from itertools import chain
 import keyword
 import math
 import operator
 import re
+import tokenize
+from typing import Callable
 
 
 COMPARISON_OPERATORS = ("==", "!=", "<", "<=", ">", ">=")
@@ -164,10 +168,20 @@ def _text_search(text):
 
 
 def compile_view_filter(query, columns):
-    """Compile a saved view's search or condition against an annotation entry."""
+    """Compile only the row conditions of a saved view."""
+    return compile_view(query, columns)[0]
+
+
+def compile_view(query, columns):
+    """Compile row conditions and optional ranking to apply to the matched rows."""
     text = str(query or "")
-    predicate = compile_filter(text[6:], columns) if text.startswith("where:") else _text_search(text)
-    return lambda entry: bool(predicate(entry.metadata, (entry.display_name, entry.source_path, entry.resolved_path)))
+    predicate, ranking = (_compile_condition(text[6:], columns) if text.startswith("where:")
+                          else (_text_search(text), None))
+
+    def matches(entry):
+        return bool(predicate(entry.metadata, (entry.display_name, entry.source_path, entry.resolved_path)))
+
+    return matches, ranking
 
 
 def compile_filter(expression, columns):
@@ -177,16 +191,85 @@ def compile_filter(expression, columns):
     ``is None``. Backticks quote names containing spaces or punctuation.
     The predicate accepts optional extra searchable text for ``text_search``.
     """
+    return _compile_condition(expression, columns)[0]
+
+
+def _condition_ast(expression):
     text = str(expression).strip()
-    if not text:
-        return lambda row, extra=(): True
     text, aliases = _quoted_columns(text)
     try:
         tree = ast.parse(text, mode="eval")
     except SyntaxError as exc:
         raise FilterSyntaxError(f"Invalid filter near column {exc.offset}: {exc.msg}") from exc
+    return tree.body, aliases
+
+
+def _condition_text(node, aliases):
+    expression = ast.unparse(node)
+    if not aliases:
+        return expression
+    return tokenize.untokenize(
+        token._replace(string=column_expression(aliases[token.string]))
+        if token.type == tokenize.NAME and token.string in aliases else token
+        for token in tokenize.generate_tokens(StringIO(expression).readline)
+    )
+
+
+def _and_terms(node):
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
+        for value in node.values:
+            yield from _and_terms(value)
+    else:
+        yield node
+
+
+def _is_group_ranking(node):
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "top_per_group"
+
+
+def _compile_condition(expression, columns):
+    if not str(expression).strip():
+        return (lambda row, extra=(): True), None
+    node, aliases = _condition_ast(expression)
     known = set(columns)
-    return _compile_node(tree.body, known, aliases)
+    terms = list(_and_terms(node))
+    rules = [term for term in terms if _is_group_ranking(term)]
+    if not rules:
+        return _compile_node(node, known, aliases), None
+    if len(rules) != 1 or len(rules[0].args) != 2 or rules[0].keywords:
+        raise FilterSyntaxError("Use one top_per_group(group_column, score_expression) rule")
+    from .cluster_review import compile_cluster_score
+
+    group, score = rules[0].args
+    name = _column_name(group)
+    name = aliases.get(name, name)
+    if name not in known:
+        raise FilterSyntaxError(f"Unknown grouping column {name!r}")
+    score_text = _condition_text(score, aliases)
+    ranking = GroupRanking(name, score_text, compile_cluster_score(score_text, known))
+    conditions = [_compile_node(term, known, aliases) for term in terms if term is not rules[0]]
+    return (lambda row, extra=(): all(condition(row, extra) for condition in conditions)), ranking
+
+
+@dataclass(frozen=True)
+class GroupRanking:
+    column: str
+    score_text: str
+    score: Callable
+
+    def select(self, entries):
+        best = {}
+        for entry in entries:
+            group = entry.metadata.get(self.column)
+            if _empty(group):
+                continue
+            score = self.score(entry.metadata)
+            if score is None:
+                continue
+            previous = best.get(group)
+            if previous is None or (score, -entry.ordinal) > (previous[0], -previous[1].ordinal):
+                best[group] = score, entry
+        return [entry for _, entry in best.values()]
 
 
 def _compile_node(node, columns, aliases):

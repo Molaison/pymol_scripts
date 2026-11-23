@@ -1,6 +1,6 @@
 # Group、interaction 与绘图命令
 
-本页介绍 0.17.0 候选版如何整组浏览、标注、查看相互作用和应用样式；该版本尚未正式发布。安装后在 PyMOL 运行 `pp_load`；`pp_help` 查常用任务，`pp_help grouping` 查分组命令，`help 命令名` 查完整参数。
+本页介绍如何整组浏览、标注、查看相互作用和应用样式。安装后在 PyMOL 运行 `pp_load`；`pp_help` 查常用任务，`pp_help grouping` 查分组命令，`help 命令名` 查完整参数。
 
 ## 整组查看与标注
 
@@ -73,7 +73,7 @@ pp_interact_clear my_contacts
 
 ## 绘图与撤销
 
-新增 6 个样式，来自用户维护的 PyMOL preset，纳入原有统一 registry：
+常用样式由同一个 registry 管理：
 
 | 名称 | 用途 |
 | --- | --- |
@@ -83,6 +83,10 @@ pp_interact_clear my_contacts
 | `monochrome_bw` | 黑白线稿渲染 |
 | `goodsell_flat` | 平面色块与轮廓 |
 | `ligand_outline` | 配体 sticks、接触线和标签尺寸 |
+| `surface_background` | 半透明表面与明亮背景的场景灯光设置 |
+| `alphafold_plddt` | 按 B 字段中的 pLDDT 为所选原子着色 |
+
+在 **Change scene view…** 中用 **Color** 和 **Lighting** 分别选择对象配色与场景灯光。pLDDT 样式要求所选原子的 B 值均为有限的 0–100，包括 0；使用前确认该字段确实记录 pLDDT。每页的 **Undo last style** 只撤销该页拥有的最新样式；其他操作占据撤销栈顶时，需要先撤销该操作。
 
 ```pymol
 pp_style_list
@@ -99,7 +103,7 @@ pp_style_render 1600, 1200, D:/reviews/figure.png
 
 ## Tab 补全
 
-统一补全从实际函数签名获取参数名；命令的对象、selection、group、样式、interaction preset、布尔值、枚举和路径使用对应候选。新建或删除场景对象后，下次 Tab 自动更新。本轮候选版验收覆盖 75 个 canonical、8 个兼容命令和 24 个 Annotator 命令；具体范围见 [验收记录](validation/02_toolkit_unification_2026-11-06.md)。
+统一补全从实际函数签名获取参数名；命令的对象、selection、group、样式、interaction preset、布尔值、枚举和路径使用对应候选。新建或删除场景对象后，下次 Tab 自动更新。`pp_help` 列出当前命令清单；实际整合与验收范围见 [审查记录](validation/04_reviewed_integration_2026-11-23.md)。
 
 ```text
 pp_style_apply clean_<Tab>

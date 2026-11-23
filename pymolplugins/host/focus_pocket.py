@@ -9,17 +9,21 @@ from pymolplugins.annotation.bundle_view import CandidateCavity, prepare_candida
 from pymolplugins.annotation.panel_style import apply_style
 from pymolplugins.annotation.view_controls import CavityControls
 from pymolplugins.annotation.view_jobs import CavityJobs
+from pymolplugins.annotation.compare_scene import molecule_signature
+
+from .workspace import _check_settings, window_settings
 
 
 _DEFAULTS = {"radius": 5.0, "transparency": 0.7, "facing": True}
 _LAYERS = {"surface": "Pocket surface", "ligand": "Ligand surface", "voids": "Void points"}
+_SHOW_ALL_SETTING = "interactive_focus/show_all_pockets"
 _POCKETS = WeakKeyDictionary()
 
 
 def pocket_for(wizard):
     pocket = _POCKETS.get(wizard)
     if pocket is None:
-        pocket = _POCKETS[wizard] = FocusPocket(wizard.cmd, wizard.session)
+        pocket = _POCKETS[wizard] = FocusPocket(wizard)
     return pocket
 
 
@@ -39,6 +43,10 @@ class PocketLayers(QtWidgets.QWidget):
         self.pocket = pocket
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(6, 3, 6, 3)
+        self.show_all = QtWidgets.QCheckBox("Show all focused pockets")
+        self.show_all.setToolTip("Show the selected pocket layers for every focus in Per object mode.")
+        self.show_all.toggled.connect(pocket.set_show_all)
+        layout.addWidget(self.show_all)
         self.checks = {}
         for kind, label in _LAYERS.items():
             check = QtWidgets.QCheckBox(label)
@@ -54,6 +62,9 @@ class PocketLayers(QtWidgets.QWidget):
 
     def refresh(self):
         pocket = self.pocket
+        with QtCore.QSignalBlocker(self.show_all):
+            self.show_all.setEnabled(pocket.can_show_all)
+            self.show_all.setChecked(pocket.can_show_all and pocket.show_all)
         for kind, check in self.checks.items():
             with QtCore.QSignalBlocker(check):
                 check.setChecked(pocket.visible[kind])
@@ -66,32 +77,56 @@ class PocketLayers(QtWidgets.QWidget):
         if visible and result is not None:
             self.cavities.show_result(result)
         notes = list(pocket.notes)
-        if (visible or pocket.visible["ligand"]) and (not pocket.layer or not pocket.layer.ligand_selection):
+        if (visible or pocket.visible["ligand"]) and not any(
+            layer.ligand_selection for layer in pocket.displayed.values()
+        ):
             notes.append("Click a ligand to show its surface or nearby void points.")
-        if visible and result is None and pocket.cavity_note:
-            notes.append(pocket.cavity_note)
+        if visible:
+            notes.extend(pocket.void_errors.values())
+            if pocket.request is not None and pocket.void_status:
+                notes.append(pocket.void_status)
         self.status.setText("\n".join(notes))
         self.status.setVisible(bool(notes))
         self.updateGeometry()
 
 
 class FocusPocket:
-    def __init__(self, api, session):
-        self.api = api
-        self.session = session
-        saved = session.get("pocket_options", {})
+    def __init__(self, wizard):
+        self.api = wizard.cmd
+        self.session = wizard.session
+        self.wizard_ref = ref(wizard)
+        saved = self.session.get("pocket_options", {})
         self.options = {key: saved.get(key, value) for key, value in _DEFAULTS.items()}
+        self.show_all = window_settings().value(_SHOW_ALL_SETTING, False, type=bool)
         self.visible = dict.fromkeys(_LAYERS, False)
         self.void_layers = {"recesses": True, "enclosed": True}
         self.panel = None
         self.host_wizard = None
         self.fallback_dock = None
-        self.wizard_ref = None
-        self.layer = None
+        self.displayed = {}
         self.jobs = None
         self.request = None
         self.notes = []
-        self.cavity_note = ""
+        self.void_errors = {}
+        self.void_status = ""
+
+    @property
+    def layer(self):
+        wizard = self.wizard_ref()
+        return wizard.layer if wizard else None
+
+    @property
+    def can_show_all(self):
+        wizard = self.wizard_ref()
+        return wizard is not None and wizard.scope == "object"
+
+    @property
+    def cavity_note(self):
+        if self.void_status:
+            return self.void_status
+        if self.visible["voids"] and self.layer and self.layer.void_result is not None:
+            return self._void_status(self.layer.void_result)
+        return ""
 
     def menu(self):
         options = self.options
@@ -111,7 +146,6 @@ class FocusPocket:
         window = get_qtwindow()
         if not isinstance(window, QtWidgets.QMainWindow):
             return
-        self.wizard_ref = ref(wizard)
         contents = getattr(window, "contentsPanelFrame", None)
         self.host_wizard = getattr(contents, "wizard_dialog", None)
         if self.host_wizard is not None:
@@ -156,25 +190,60 @@ class FocusPocket:
         if kind == "voids" and enabled and not self.visible[kind]:
             self.void_layers.update(recesses=True, enclosed=True)
         self.visible[kind] = enabled
-        self.update(self.layer)
+        self.update()
+        self.api.refresh_wizard()
+
+    def set_show_all(self, enabled):
+        settings = window_settings()
+        settings.setValue(_SHOW_ALL_SETTING, enabled)
+        settings.sync()
+        _check_settings(settings)
+        self.show_all = enabled
+        self.update()
         self.api.refresh_wizard()
 
     def set_void_layer(self, kind, enabled):
         self.void_layers[kind] = enabled
-        self._show_void_layers()
+        for layer in self.displayed.values():
+            self._show_void_layers(layer)
 
     def set_option(self, key, value):
         self.options[key] = value
         self.session["pocket_options"] = dict(self.options)
 
-    def update(self, layer):
-        if layer is not self.layer:
+    def update(self):
+        active = self.layer
+        if self.show_all and self.can_show_all:
+            layers = dict(self.wizard_ref().layers)
+        else:
+            layers = {active.source: active} if active else {}
+        self._hide_unselected(layers)
+        self.displayed = layers
+        if self.request is not None and not self._is_current(self.request):
             self._cancel_voids()
-            self.layer = layer
+        if not self.visible["voids"]:
+            self.void_errors.clear()
         self.notes = []
-        if layer is None:
-            self._refresh_layers()
-            return
+        for layer in layers.values():
+            self._draw_surfaces(layer)
+            self._show_void_layers(layer)
+        self._next_void()
+        self._refresh_layers()
+
+    def _hide_unselected(self, layers):
+        names = set()
+        for source, layer in self.displayed.items():
+            if layers.get(source) is layer:
+                continue
+            self.void_errors.pop(source, None)
+            names.update((layer.surface, layer.ligand_surface))
+            if layer.void_result is not None:
+                names.update(layer.void_result.objects.values())
+        if names:
+            for name in names.intersection(self.api.get_names("objects", enabled_only=1)):
+                self.api.disable(name)
+
+    def _draw_surfaces(self, layer):
         options = self.options
         for title, draw, arguments in (
             ("Pocket surface", layer.show_surface,
@@ -184,12 +253,7 @@ class FocusPocket:
             try:
                 draw(self.api, *arguments)
             except Exception as error:
-                self.notes.append(f"{title}: {error}")
-        try:
-            self._sync_voids(self.visible["voids"] and bool(layer.ligand_selection))
-        except Exception as error:
-            self.notes.append(f"Void points: {error}")
-        self._refresh_layers()
+                self.notes.append(f"{layer.source} · {title}: {error}")
 
     def _refresh_layers(self):
         if self.panel is not None:
@@ -199,54 +263,54 @@ class FocusPocket:
         if self.jobs:
             self.jobs.cancel_cavity()
         self.request = None
-        self.cavity_note = ""
+        self.void_status = ""
 
-    def _sync_voids(self, visible):
-        layer = self.layer
-        if not visible:
-            self._cancel_voids()
-        if layer.void_result is not None:
-            self._show_void_layers()
-            if visible:
-                self.cavity_note = self._void_status(layer.void_result)
-        elif visible and self.request is not layer:
-            self._start_voids(layer)
+    def _next_void(self):
+        if not self.visible["voids"] or self.request is not None:
+            return
+        for layer in reversed(self.displayed.values()):
+            if (layer.ligand_selection and layer.void_result is None
+                    and layer.source not in self.void_errors and self._is_current(layer)):
+                try:
+                    self._start_voids(layer)
+                except Exception as error:
+                    self.void_errors[layer.source] = f"{layer.source} · Void points: {error}"
+                else:
+                    return
 
     def _start_voids(self, layer):
-        self.request = layer
         if QtCore.QCoreApplication.instance() is None:
-            self._status("Void points require the Qt viewport.")
-            return
+            raise RuntimeError("Void points require the Qt viewport.")
+        title = f"{layer.source} · Void points" if self.show_all and self.can_show_all else "Void points"
         view = CandidateCavity(
-            "Void points", layer.copies[0],
+            title, layer.copies[0],
             lambda renderer: renderer.capture_cavity(
                 self.api, f"%{layer.source} and polymer", layer.ligand_selection, layer.state
             ),
         )
-        try:
-            compute, draw = prepare_candidate_cavity(self.api, view)
-        except Exception as error:
-            self._status(f"Void points: {error}")
-            return
+        compute, draw = prepare_candidate_cavity(self.api, view)
 
         def show(result):
             rendered = draw(result)
             layer.void_result = rendered
             layer.names.extend(rendered.objects.values())
-            self._show_void_layers()
-            return self._void_status(rendered), rendered.tooltip
+            self._show_void_layers(layer)
+            return "", ""
 
         if self.jobs is None:
-            self.jobs = CavityJobs(None, self._is_current, self._status)
+            self.jobs = CavityJobs(None, self._is_current, self._record_status, on_finished=self._finish_void)
         self.jobs.identity = layer
         self.jobs.start_cavity(view.title, compute, show)
+        self.request = layer
 
     def _is_current(self, layer):
-        return self.layer is layer and layer.source in self.api.get_names("objects", enabled_only=1)
+        return (self.visible["voids"] and self.displayed.get(layer.source) is layer
+                and layer.source in self.api.get_names("objects", enabled_only=1)
+                and molecule_signature(self.api, layer.source) == layer.source_signature)
 
-    def _show_void_layers(self):
-        if self.layer and self.layer.void_result is not None:
-            for kind, name in self.layer.void_result.objects.items():
+    def _show_void_layers(self, layer):
+        if layer.void_result is not None:
+            for kind, name in layer.void_result.objects.items():
                 visible = self.visible["voids"] and self.void_layers[kind]
                 (self.api.enable if visible else self.api.disable)(name)
 
@@ -255,7 +319,14 @@ class FocusPocket:
         recess, enclosed = rendered.volumes["recesses"], rendered.volumes["enclosed"]
         return f"Voids A^3  |  Cyan recess {recess:.1f}  |  Violet enclosed {enclosed:.1f}"
 
-    def _status(self, message, _tooltip=""):
-        self.cavity_note = message
+    def _record_status(self, message, _tooltip=""):
+        self.void_status = message
+
+    def _finish_void(self):
+        layer, self.request = self.request, None
+        if self._is_current(layer) and layer.void_result is None:
+            self.void_errors[layer.source] = self.void_status
+        self.void_status = ""
+        self._next_void()
         self._refresh_layers()
         self.api.refresh_wizard()

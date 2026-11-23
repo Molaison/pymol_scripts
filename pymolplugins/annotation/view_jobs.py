@@ -6,8 +6,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pymol.Qt import QtCore
 
 class CavityJobs:
-    def __init__(self, parent, is_current, status):
+    def __init__(self, parent, is_current, status, *, on_finished=None):
         self.is_current, self._cavity_status = is_current, status
+        self.on_finished = on_finished
         self.cavity_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pymol-cavity")
         self.cavity_timer = QtCore.QTimer(parent)
         self.cavity_timer.setInterval(75)
@@ -36,6 +37,8 @@ class CavityJobs:
         future, draw, title = self.cavity_job
         if not self.is_current(self.identity):
             self.cancel_cavity()
+            if self.on_finished is not None:
+                self.on_finished()
             return
         if not future.done():
             return
@@ -46,6 +49,8 @@ class CavityJobs:
         except Exception as exc:
             detail = str(exc).strip() or type(exc).__name__
             self._cavity_status(f"{title} skipped · {detail.splitlines()[0]}")
+        if self.on_finished is not None:
+            self.on_finished()
 
 
 class ViewJobs(CavityJobs):
@@ -79,6 +84,17 @@ class ViewJobs(CavityJobs):
         if self.job is not None:
             self.job[0].cancel()
             self.job = None
+
+    def append(self, identity, recipe, *, title):
+        if getattr(self, "identity", None) != identity:
+            self.start(identity, [recipe], title=title)
+            return
+        if recipe not in self.queue:
+            self.queue.append(recipe)
+        if not self.timer.isActive():
+            self.title = title
+            self._status(f"{title} · preparing…")
+            self.timer.start()
 
     def close(self):
         self.cancel()

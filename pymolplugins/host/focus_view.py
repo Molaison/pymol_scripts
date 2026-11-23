@@ -8,8 +8,11 @@ from uuid import uuid4
 
 from pymol import util
 
+from pymolplugins.annotation._bundle_skill.acceptance_interface import draw_buried_unsatisfied, interface_atom_sticks
+from pymolplugins.annotation.interface_polar import capture_interface_polar, find_buried_unsatisfied
+from pymolplugins.annotation.compare_scene import molecule_signature
 from pymolplugins.annotation.review_view_presets import (
-    _capture_interactions, _compute_interface, _indices, draw_interface_contacts,
+    _capture_interactions, _compute_interface, _indices, draw_interface_contacts, interface_partners,
 )
 from pymolplugins.annotation.review_view_geometry import residue_key
 
@@ -18,7 +21,6 @@ if TYPE_CHECKING:
 
 
 RADIUS = 5.0
-_BACKBONE_ENDS = "polymer.protein and name N+C+O+OXT"
 
 
 @dataclass
@@ -34,6 +36,8 @@ class FocusLayer:
     focus_selection: str
     frame_selection: str
     ligand_selection: str
+    source_signature: tuple
+    buried_count: int = 0
     surface: str = ""
     surface_shape: tuple = ()
     ligand_surface: str = ""
@@ -125,17 +129,19 @@ def _create_surface(api, name, selection, state, color, transparency, carve=None
         raise
 
 
-def picked_source(api, picked, current):
+def picked_source(api, picked, layers):
     """Map a picked local copy back to the source molecule."""
     atoms = api.index(picked)
     if len(atoms) != 1:
         return None
     source, index = atoms[0]
-    if current is not None and source in current.copy_indices:
-        original = current.copy_indices[source].get(index)
-        if original is not None and current.source in api.get_names("objects"):
-            return current.source, original
-        return None
+    for layer in layers:
+        if source in layer.copy_indices:
+            original = layer.copy_indices[source].get(index)
+            if (original is not None and layer.source in api.get_names("objects", enabled_only=1)
+                    and molecule_signature(api, layer.source) == layer.source_signature):
+                return layer.source, original
+            return None
     if source.startswith("_pp_focus_"):
         return None
     return source, index
@@ -201,12 +207,12 @@ def draw_focus(api, prefix, source, index, state, residue):
     if not api.count_atoms(ligand, state=state):
         ligand = ""
     coords, endpoints, polar, salt, pi = _local_contacts(api, focus, surrounding, state)
-    target = f"({focus}) and (not ({_BACKBONE_ENDS}) or resn GLY)"
-    sidechains = f"({surrounding}) and not ({_BACKBONE_ENDS})"
-    if endpoints:
-        selected_endpoints = _indices(source, endpoints)
-        target += f" or (({focus}) and ({selected_endpoints}))"
-        sidechains += f" or (({surrounding}) and ({selected_endpoints}))"
+    partners, _ = interface_partners(api, source)
+    buried = find_buried_unsatisfied(capture_interface_polar(api, source, state, neighborhood, partners))
+    sticks = interface_atom_sticks(neighborhood, _indices(source, endpoints) if endpoints else "none",
+                                   _indices(source, buried) if buried else "none")
+    target = f"({focus}) and (({sticks}) or resn GLY)"
+    sidechains = f"({surrounding}) and ({sticks})"
     names, copy_indices = [], {}
     prefix = f"{prefix}_{uuid4().hex[:8]}"
     try:
@@ -224,6 +230,10 @@ def draw_focus(api, prefix, source, index, state, residue):
         api.color("yellow", f"{scope} and organic and elem C")
         util.cnc(scope, _self=api)
         layers = draw_interface_contacts(api, prefix, coords, polar, salt, pi, names)
+        buried_layer = draw_buried_unsatisfied(api, prefix, buried.values())
+        if buried_layer:
+            names.append(buried_layer)
+            layers["buried_unsatisfied_polar"] = buried_layer
     except Exception:
         for name in names:
             api.delete(name)
@@ -233,5 +243,5 @@ def draw_focus(api, prefix, source, index, state, residue):
     return FocusLayer(
         source, state, residue, label, names, copy_indices, (len(polar), len(salt), len(pi)),
         layers, focus, f"({focus}) or ({surrounding})",
-        ligand,
+        ligand, molecule_signature(api, source), buried_count=len(buried),
     )

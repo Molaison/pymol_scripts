@@ -31,7 +31,15 @@ INSTALL_TEXT = """# 安装 PymolPlugins（{version}）
    选择包含 PDB/CIF 文件路径的列，不是分数或名称列。
 7. 在 **Review** 查看结构和分数，选择标签，再点 **Save and next**。
 
-保存后进入下一条。普通点选只修改草稿，不会立即保存。可用 Alt+数字或 Ctrl+点击加快审阅，macOS 对应 Option+数字和 Command+点击。相对结构路径默认相对于表格目录；CSV 和结构源文件不会被标注流程改写。
+默认单候选的单选标签在必填项完整时点击即保存，并前进到下一条。按住 Shift 点选可暂留草稿。在 **More** 中可分别调整点击保存和保存后前进，选项会自动保存。可用 Alt+数字或 Ctrl+点击加快审阅，macOS 对应 Option+数字和 Command+点击。相对结构路径默认相对于表格目录；CSV 和结构源文件不会被标注流程改写。
+
+**More > Highlight antibody CDRs (IMGT)** 在审阅抗体 binder 时自动编号并给 CDR1–3 的 cartoon 上色。**More > IMGT numbering…** 查看原始残基号和 IMGT 编号。这个选项使用本机独立的 ANARCII 环境。可在 Python 3.11 或更新版本的虚拟环境中安装 `anarcii==2.0.8`，并安装适用平台的 CPU PyTorch。默认环境路径为 `~/.pymolplugins/antibody-numbering`；自定义环境可在启动 PyMOL 前用 `PYMOLPLUGINS_ANTIBODY_PYTHON` 指定其 Python 可执行文件。
+
+## 比较和展示结构集合
+
+**Plugin > PymolPlugins > Compare or process structures…** 打开同一 Annotator 的 **Batch** 页。选择 **Review in PyMOL**，设置候选和参考，先预览配对，再生成比较目录并打开 Review。选择 **Process and save structures** 则运行处理命令并输出结构；输入文件保留。
+
+**Plugin > PymolPlugins > Structure Collections…** 打开并排的采样控件与样本预览。按打分分层和结构差异选样，保存统一朝向，再导出独立的 PNG 与展示页。`pp_collections` 可直接打开面板或已有 `01_collection.json`。源结构保持不变；关闭预览恢复原场景。细节见包内 `docs/01_structure_collections.md` 和 `docs/03_comparison_review.md`。
 
 直接打开含 `sum_scores.csv` 的文件夹时，插件会使用该表及同目录的 `review.json`。没有这个文件时，插件会打开唯一带结构路径列的表，或按目录导入结构文件。`display_columns` 必须使用表中实际存在的字段，`label` 是描述性名称，人工标签另存。修改配置写入 `review.override.json`。
 
@@ -45,6 +53,8 @@ INSTALL_TEXT = """# 安装 PymolPlugins（{version}）
 SSH profile 是 `~/.ssh/config` 中保存的服务器 `Host` 名字，不是密码。PyMOL 在 Windows 运行时，默认读取该电脑的 `%USERPROFILE%/.ssh/config`，不会默认读取 WSL 的 SSH 配置。
 
 **Connections…** 可以选择已有的 SSH config 或登录 program；通常不需要修改。请先在同一台 Windows 电脑上完成首次主机信任和私钥或密码等已有 SSH 设置，并确认 `ssh my-lab` 能连接。插件不创建服务器账号、不管理密码，也不会修改全局 SSH 配置。
+
+在 **Connections… > Shown in Open from** 可取消勾选要隐藏的 SSH 别名。隐藏的别名仍可手输，**Continue last review** 也能连接到该别名并恢复保存的候选位置。
 
 ### 使用内置 Automatic OTP
 

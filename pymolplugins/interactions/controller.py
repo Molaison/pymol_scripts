@@ -1119,11 +1119,30 @@ def _render_interface(
     }:
         return
     parameters = result.run.parameters
+    interface = str(parameters["interface_selection"])
+    state = result.run.source.state
+    receptor, ligand = parameters.get("receptor_selection"), parameters.get("ligand_selection")
+    if receptor and ligand and hasattr(cmd_api, "load_cgo"):
+        from pymolplugins.annotation._bundle_skill.acceptance_interface import (
+            assembly_details, atom_selection, draw_buried_unsatisfied, interface_atom_sticks,
+        )
+
+        buried = assembly_details(cmd_api, receptor, ligand, f"({interface}) or ({ligand})", state)
+        endpoints = _indices_selection(result.run.source.object, {
+            (part.atom.object, part.atom.source_index)
+            for interaction in result.interactions for part in interaction.participants
+        })
+        details = interface_atom_sticks("none", endpoints, atom_selection(buried))
+        interface = f"({interface}) or (({receptor}) and ({details}))"
+        marker = draw_buried_unsatisfied(cmd_api, root_group, buried.values())
+        if marker:
+            recorder.record(marker, "object", "buried_unsatisfied_polar")
+            recorder.group(partners_group, marker, "partners_group")
     name = _child_name(root_group, "interface")
     recorder.create(
         name,
-        str(parameters["interface_selection"]),
-        result.run.source.state,
+        interface,
+        state,
         "interface_copy",
     )
     cmd_api.show("sticks", name)

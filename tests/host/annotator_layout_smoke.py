@@ -238,8 +238,6 @@ def annotation_idle(panel, app):
 def check_click_save_modes(panel, annotation, app, output):
     from PyQt5.QtTest import QTest
     store = annotation.STATE.row_annotation_store
-    assert not panel.save_on_label_click_cb.isChecked()
-    menu_action(panel.more_button, panel.save_on_label_click_action)
     assert panel.save_on_label_click_cb.isChecked() and panel.auto_advance_cb.isChecked()
     select_candidate(panel, app, 10)
     before, entry_id = store.snapshot(), annotation.STATE.current_entry_id()

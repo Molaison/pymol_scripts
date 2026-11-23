@@ -6,6 +6,7 @@ CI before a script is loaded by the Windows PyMOL process.
 """
 
 from dataclasses import dataclass, field
+import math
 import re
 
 
@@ -54,6 +55,7 @@ KNOWN_SETTINGS = frozenset(
         "ambient_occlusion_mode",
         "ambient_occlusion_smooth",
         "ambient_occlusion_scale",
+        "cache_display",
         "cartoon_rect_length",
         "cartoon_oval_length",
         "solvent_radius",
@@ -66,6 +68,10 @@ KNOWN_SETTINGS = frozenset(
         "label_color",
         "label_font_id",
         "label_outline_color",
+        "grid_mode",
+        "retain_order",
+        "scene_buttons",
+        "surface_proximity",
     )
 )
 
@@ -194,6 +200,7 @@ MACARON_COOL = {
 MACARON_VARIANTS = {"default": MACARON_DEFAULT, "warm": MACARON_WARM, "cool": MACARON_COOL}
 
 COLOR_CHOICES = (
+    ("AlphaFold pLDDT", "alphafold_plddt"),
     ("MASS · Paper by residue number", "mass"),
     ("Macaron", "macaron_palette"),
     ("RFdiffusion · Sam", "rfd2_sam_palette"),
@@ -201,6 +208,7 @@ COLOR_CHOICES = (
 )
 
 LIGHTING_CHOICES = (
+    ("Surface background", "surface_background"),
     ("Publication", "publication_light"),
     ("Clean outline", "clean_outline"),
     ("Depth shading", "ao_cartoon"),
@@ -241,6 +249,14 @@ RFD2_PAPER_COLORS = {
 RFD2_PAPER_SPECTRUM = tuple("pp_rfd2_paper_" + shade for shade in (
     "navajo", "melon", "pink", "purple", "lightblue", "blue", "darkblue",
 ))
+
+
+ALPHAFOLD_PLDDT_COLORS = {
+    "pp_alphafold_plddt_orange": (1.0, 0.502, 0.0),
+    "pp_alphafold_plddt_yellow": (1.0, 0.859, 0.0),
+    "pp_alphafold_plddt_cyan": (0.0, 0.808, 0.820),
+    "pp_alphafold_plddt_blue": (0.0, 0.325, 1.0),
+}
 
 
 SOFT_MACARON_SETTINGS = {
@@ -523,6 +539,76 @@ PRESETS = (
             "label_font_id": 7, "label_outline_color": "white", "stick_radius": 0.16,
         },
     ),
+    StylePreset(
+        name="surface_background",
+        description="Opaque white orthoscopic surface presentation without depth fog.",
+        category="scene",
+        global_settings={
+            "retain_order": 1,
+            "cartoon_fancy_helices": 1,
+            "ray_opaque_background": 0,
+            "opaque_background": 1,
+            "orthoscopic": 1,
+            "grid_mode": 3,
+            "scene_buttons": 0,
+            "surface_proximity": 0,
+            "cache_display": 0,
+            "depth_cue": 0,
+            "ray_trace_fog": 0,
+            "bg_rgb": (1.0, 1.0, 1.0),
+            "specular": 0,
+            "ray_shadow": 0,
+            "valence": 0,
+            "antialias": 2,
+            "ray_trace_mode": 0,
+            "ray_trace_disco_factor": 1,
+            "ray_trace_gain": 0,
+            "power": 0.2,
+            "ambient": 1,
+            "ray_trace_color": "gray30",
+            "transparency": 0.6,
+            "cartoon_highlight_color": "gray95",
+        },
+    ),
+    StylePreset(
+        name="alphafold_plddt",
+        aliases=("plddt",),
+        description=(
+            "Color selected atoms from numeric pLDDT values stored in the B field; "
+            "pLDDT provenance cannot be inferred."
+        ),
+        category="palette",
+        colors=ALPHAFOLD_PLDDT_COLORS,
+        color_operations=(
+            {
+                "action": "b_range",
+                "selection": "{selection}",
+                "ranges": (
+                    {
+                        "lower": 0.0,
+                        "upper": 50.0,
+                        "color": "pp_alphafold_plddt_orange",
+                    },
+                    {
+                        "lower": 50.0,
+                        "upper": 70.0,
+                        "color": "pp_alphafold_plddt_yellow",
+                    },
+                    {
+                        "lower": 70.0,
+                        "upper": 90.0,
+                        "color": "pp_alphafold_plddt_cyan",
+                    },
+                    {
+                        "lower": 90.0,
+                        "upper": 100.0,
+                        "upper_inclusive": True,
+                        "color": "pp_alphafold_plddt_blue",
+                    },
+                ),
+            },
+        ),
+    ),
 )
 
 
@@ -558,7 +644,7 @@ def _validate_settings(preset, known_settings):
 def _validate_color_operations(preset):
     for operation in preset.color_operations:
         action = operation.get("action")
-        if action not in ("color", "spectrum"):
+        if action not in ("color", "spectrum", "b_range"):
             raise ValueError("%s has invalid color action %r" % (preset.name, action))
         if "selection" not in operation:
             raise ValueError("%s color operation lacks selection" % preset.name)
@@ -568,6 +654,48 @@ def _validate_color_operations(preset):
             palette = operation.get("palette", ())
             if not palette or any(name not in preset.colors for name in palette):
                 raise ValueError("%s spectrum references an undeclared color" % preset.name)
+        if action == "b_range":
+            _validate_b_range_operation(preset, operation)
+
+
+def _validate_b_range_operation(preset, operation):
+    ranges = operation.get("ranges")
+    if not isinstance(ranges, (tuple, list)) or not ranges:
+        raise ValueError(
+            "%s B-range operation must declare at least one range" % preset.name
+        )
+    expected_lower = 0.0
+    for index, item in enumerate(ranges):
+        if not isinstance(item, dict):
+            raise ValueError("%s B-range entries must be dictionaries" % preset.name)
+        lower = item.get("lower")
+        upper = item.get("upper")
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in (lower, upper)
+        ):
+            raise ValueError("%s B-range bounds must be finite numbers" % preset.name)
+        lower = float(lower)
+        upper = float(upper)
+        if lower != expected_lower or upper <= lower or upper > 100.0:
+            raise ValueError(
+                "%s B ranges must be ordered, contiguous, and cover 0..100"
+                % preset.name
+            )
+        if item.get("color") not in preset.colors:
+            raise ValueError("%s B range references an undeclared color" % preset.name)
+        upper_inclusive = item.get("upper_inclusive", False)
+        if not isinstance(upper_inclusive, bool):
+            raise ValueError(
+                "%s B-range upper_inclusive must be boolean" % preset.name
+            )
+        if upper_inclusive and index != len(ranges) - 1:
+            raise ValueError("%s B range can be closed only at 100" % preset.name)
+        expected_lower = upper
+    if expected_lower != 100.0 or not ranges[-1].get("upper_inclusive", False):
+        raise ValueError("%s B ranges must end at inclusive 100" % preset.name)
 
 
 def _validate_representation_operations(preset):

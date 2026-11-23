@@ -9,6 +9,7 @@ exists.
 
 CANONICAL_MODULES = (
     "pymolplugins.targets.commands",
+    "pymolplugins.collections.commands",
     "pymolplugins.navigation.commands",
     "pymolplugins.follow.commands",
     "pymolplugins.grouping.commands",
@@ -27,7 +28,8 @@ CANONICAL_COMMANDS = {
         "pp_show", "pp_nav", "pp_align", "pp_orient",
         "pp_contacts", "pp_metrics", "pp_jobs", "pp_undo",
     ),
-    "targets": ("pp_target_resolve", "pp_foreach", "pp_batch"),
+    "targets": ("pp_target_resolve", "pp_foreach", "pp_batch", "pp_compare"),
+    "collections": ("pp_collections",),
     "grouping": ("pp_group", "pp_group_by_name"),
     "navigation": (
         "pp_nav_start", "pp_nav_next", "pp_nav_prev", "pp_nav_next_batch",
@@ -41,7 +43,7 @@ CANONICAL_COMMANDS = {
         "pp_follow_undo", "pp_follow_status", "pp_follow_stop",
     ),
     "sequence_alignment": (
-        "pp_select_sequence", "pp_align_anchor", "pp_align_motif",
+        "pp_select_sequence", "pp_fasta", "pp_align_anchor", "pp_align_motif",
         "pp_align_ligand", "pp_align_commit", "pp_align_undo",
         "pp_align_export", "pp_align_list",
     ),
@@ -90,6 +92,7 @@ _CANONICAL_CATEGORY_MODULES = {
     "toolkit": "pymolplugins.host.plugin",
     "tasks": "pymolplugins.tasks.commands",
     "targets": "pymolplugins.targets.commands",
+    "collections": "pymolplugins.collections.commands",
     "grouping": "pymolplugins.grouping.commands",
     "navigation": "pymolplugins.navigation.commands",
     "follow": "pymolplugins.follow.commands",
@@ -107,7 +110,7 @@ def _canonical_targets():
             for name in names:
                 module = (
                     "pymolplugins.alignment.sequence"
-                    if name == "pp_select_sequence"
+                    if name in {"pp_select_sequence", "pp_fasta"}
                     else "pymolplugins.alignment.rigid"
                 )
                 result[name] = (module, name)
