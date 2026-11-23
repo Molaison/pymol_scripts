@@ -49,6 +49,10 @@ except Exception as e:
 - Keep related visualization scripts in `visualization/`
 - Command-line tools as standalone scripts in root
 
+## Feature commits
+
+Create a Git commit for each completed feature promptly after verifying it. Include only changes related to that feature.
+
 ## Windows Host Validation Notes
 - Maximized-window checks must compare primary actions with the actual Windows
   taskbar rectangle. With auto-hide enabled, both native `rcWork` and Qt
