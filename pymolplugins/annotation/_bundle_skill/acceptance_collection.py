@@ -239,7 +239,8 @@ def acc_collection_open(
     return _load_index(int(initial) - 1)
 
 
-def _ligand_view(config, root, path_column, *, store_scene=True, step_scene="", calculate_cavity=True):
+def _ligand_view(config, root, path_column, *, store_scene=True, step_scene="", calculate_cavity=True,
+                 membrane_renderer=None):
     from acceptance_bundle import asset_name
     from acceptance_recipes import ligand_pocket_review
 
@@ -296,15 +297,15 @@ def _ligand_view(config, root, path_column, *, store_scene=True, step_scene="", 
             cavity_centers = annotation.get("cavity_centers")
         if cavity_centers is None and not calculate_cavity:
             cavity_centers = []
-        ligand_pocket_review(
+        result = ligand_pocket_review(
             identity=identity, protein_selection=protein, ligand_selection=ligand,
             anchor_residues=config.get("anchor_residues", ""), covalent_link=link,
             membrane=membrane_options, show_cavity=config.get("show_cavity", True),
             cavity_centers=cavity_centers, overview_scene="",
             focus_scene=(step_scene or asset_name(identity, "live_focus")) if store_scene else "",
-            bind_keys=False,
+            bind_keys=False, membrane_renderer=membrane_renderer,
         )
-        return True
+        return result if membrane_renderer is not None else True
 
     return draw
 

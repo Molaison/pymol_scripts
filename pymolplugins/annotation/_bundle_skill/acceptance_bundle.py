@@ -304,17 +304,24 @@ def acc_sidechain_sticks(selection: str, carbon_color: str = "keep", stick_radiu
 
     sel = str(selection).strip() or "enabled"
     residue_sticks = f"((byres (({sel}) and polymer.protein)) and not elem H)"
-    _assert_atoms(residue_sticks, "sidechain residue selection")
-    _set("cartoon_side_chain_helper", 1)
-    cmd.show("sticks", residue_sticks)
-    _set("stick_radius", float(stick_radius), residue_sticks)
-    _color_sidechain_atoms(residue_sticks, carbon_color)
+    atoms = cmd.get_unused_name("_acc_stick_atoms")
+    try:
+        cmd.select(atoms, residue_sticks)
+        _assert_atoms(atoms, "sidechain residue selection")
+        _set("cartoon_side_chain_helper", 1)
+        cmd.show("sticks", atoms)
+        _set("stick_radius", float(stick_radius), atoms)
+        _color_sidechain_atoms(atoms, carbon_color)
+    finally:
+        cmd.delete(atoms)
     return residue_sticks
 
 
 def _color_sidechain_atoms(selection: str, carbon_color: str = "keep") -> None:
     if carbon_color and str(carbon_color).lower() not in {"keep", "none"}:
         cmd.color(carbon_color, f"({selection}) and elem C")
+    present = set()
+    cmd.iterate(selection, "present.add(elem)", space={"present": present})
     for elem, color in {
         "O": "oxygen",
         "N": "nitrogen",
@@ -322,7 +329,7 @@ def _color_sidechain_atoms(selection: str, carbon_color: str = "keep") -> None:
         "P": "phosphorus",
         "H": "hydrogen",
     }.items():
-        if _count_atoms(f"({selection}) and elem {elem}"):
+        if elem in present:
             cmd.color(color, f"({selection}) and elem {elem}")
 
 

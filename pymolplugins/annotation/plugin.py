@@ -8014,7 +8014,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         if line is self._reference_track:
             return self._prepare_reference_track(owner)
         from .antibody_cdrs import AntibodyRequest, capture_chains, number_chains
-        from .bundle_view import BundleViewRequest, prepare_bundle_view
+        from .bundle_view import BundleMembraneLayer, BundleViewRequest, _draw_bundle_membrane, prepare_bundle_view
         from .review_view_presets import REVIEW_VIEW_COMMANDS, prepare_review_command
 
         if isinstance(line, AntibodyRequest):
@@ -8028,6 +8028,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             return owner, None, (lambda: number_chains(chains)) if chains else None, draw
         if isinstance(line, BundleViewRequest):
             return prepare_bundle_view(cmd, owner, line)
+        if isinstance(line, BundleMembraneLayer):
+            return owner, _draw_bundle_membrane, None, lambda _: line.draw()
         if owner in STATE.managed_objects:
             _candidate_bundles.check_command_references(owner, [(1, line)])
         if line.split(None, 1)[0] in REVIEW_VIEW_COMMANDS:
@@ -8035,7 +8037,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         return owner, None, None, lambda _: _execute_checked(cmd, line)
 
     def _draw_candidate_view(self, owner, source, action, draw, data, exclusive):
-        from .bundle_view import CandidateCavity, _draw_bundle, draw_candidate_cavity, prepare_candidate_cavity
+        from .bundle_view import (BundleMembraneLayer, CandidateCavity, _draw_bundle, _draw_bundle_membrane,
+                                  draw_candidate_cavity, prepare_candidate_cavity)
         from .review_membrane import MembraneNotice
         from .review_view_presets import draw_review_view
         from pymolplugins.core.pymol_display import display_updates
@@ -8048,12 +8051,15 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             with _capture_command_products(owner):
                 draw(data)
             return
-        if action is _draw_bundle:
+        if action in (_draw_bundle, _draw_bundle_membrane):
             with display_updates(cmd), _capture_command_products(owner):
-                followup = draw_review_view(cmd, source, action, draw, data, exclusive=True)
+                followup = draw_review_view(cmd, source, action, draw, data, exclusive=action is _draw_bundle)
         else:
             with _capture_command_products(owner):
                 followup = draw_review_view(cmd, source, action, draw, data, exclusive=exclusive)
+        if isinstance(followup, BundleMembraneLayer):
+            self._view_jobs.queue.appendleft((owner, followup))
+            return
         if isinstance(followup, MembraneNotice):
             return followup
         if not isinstance(followup, CandidateCavity):

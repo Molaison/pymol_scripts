@@ -7,6 +7,8 @@ task has bound the scientific roles to verified PyMOL selections.
 from __future__ import annotations
 
 import inspect
+from collections import defaultdict
+import re
 from pathlib import Path
 import sys
 from typing import Dict
@@ -127,6 +129,63 @@ def style_residue_labels(api, labels, *, atom_size=False):
     api.set("label_position", (0.0, 0.5, 1.1), all_labels)
 
 
+_EXACT_RESIDUE = re.compile(r"resi (0|[1-9][0-9]*)")
+
+
+def residue_atom_keys(api, selection, names):
+    atoms = defaultdict(list)
+    api.iterate(f"({selection}) and name {'+'.join(sorted(names))}",
+                "atoms[resi, resn, name].append((model, index))", space={"atoms": atoms})
+    return atoms
+
+
+def residue_number(selection):
+    match = _EXACT_RESIDUE.fullmatch(selection)
+    return match[1] if match else None
+
+
+def apply_residue_labels(api, labels, *, atom_size=False):
+    """Batch labels by text suffix and color after resolving their atom identities."""
+    by_style = defaultdict(list)
+    for key, style in labels.items():
+        by_style[style].append(key)
+    styled = []
+    for (suffix, color), keys in by_style.items():
+        selected = atom_selection(keys)
+        api.label(selected, "resn + resi + " + repr(suffix))
+        styled.append((selected, color))
+    style_residue_labels(api, styled, atom_size=atom_size)
+
+
+def _membrane_bias_labels(protein, surface_ca, entries, charges):
+    entries = [entry for entry in entries if entry["weight"]]
+    if not entries:
+        return (), {}, []
+    anchors = {"CA", "CB", *(anchor for anchor, _, _ in charges.values())}
+    atoms = residue_atom_keys(cmd, protein, anchors)
+    surface = residue_atom_keys(cmd, surface_ca, {"CA"})
+    named_residues, other_residues, labels, selections = defaultdict(list), [], {}, []
+    for entry in entries:
+        position, resn = entry["selection"], entry["resn"]
+        resi = residue_number(position)
+        anchor, charge, color = charges.get(resn, ("CB", "0", "gray35"))
+        residue = f"({protein}) and ({position}) and resn {resn}"
+        if resi is not None:
+            if len(surface.get((resi, resn, "CA"), ())) != 1:
+                continue
+            named_residues[resn].append(resi)
+            keys = atoms.get((resi, resn, anchor)) or atoms[resi, resn, "CA"]
+        else:
+            if _count(f"({surface_ca}) and ({residue})") != 1:
+                continue
+            other_residues.append(residue)
+            keys = cmd.index(f"({residue}) and name {anchor}") or cmd.index(f"({residue}) and name CA")
+        selections.append(atom_selection(keys))
+        labels.update((key, (f" {charge}", color)) for key in keys)
+    residues = [f"({protein}) and resn {resn} and resi {'+'.join(ids)}" for resn, ids in named_residues.items()]
+    return (*residues, *other_residues), labels, selections
+
+
 def membrane_surface_review(
     identity, protein, surface_residues, *, bounds=None, biased_residues=(),
     side_labels=(), core_bounds=(),
@@ -149,7 +208,6 @@ def membrane_surface_review(
             cmd.set("sphere_color", color, markers)
             cmd.set("cartoon_color", color, f"byres ({markers})")
 
-    labels, residues = [], []
     # The represented charge belongs to the side chain at near-neutral pH.
     charges = {
         "ARG": ("CZ", "+1", "marine"), "LYS": ("NZ", "+1", "marine"),
@@ -157,25 +215,11 @@ def membrane_surface_review(
         "HIS": ("NE2", "pH", "purple"), "TRP": ("NE1", "0", "gray35"),
         "TYR": ("OH", "0", "gray35"),
     }
-    for entry in biased_residues:
-        residue = f"({protein}) and ({entry['selection']}) and resn {entry['resn']}"
-        if not entry["weight"] or _count(f"({surface_ca}) and ({residue})") != 1:
-            continue
-        residues.append(residue)
-        if entry["resn"] in charges:
-            anchor, charge, color = charges[entry["resn"]]
-        else:
-            anchor, charge, color = "CB", "0", "gray35"
-        selected = f"({residue}) and name {anchor}"
-        if not _count(selected):
-            selected = f"({residue}) and name CA"
-        cmd.label(selected, 'resn + resi + ' + repr(f" {charge}"))
-        labels.append((selected, color))
-
+    residues, labels, selections = _membrane_bias_labels(protein, surface_ca, biased_residues, charges)
     if residues:
         acc_sidechain_sticks(" or ".join(f"({residue})" for residue in residues),
                              carbon_color="gray65", stick_radius=0.17)
-    style_residue_labels(cmd, labels, atom_size=True)
+    apply_residue_labels(cmd, labels, atom_size=True)
 
     planes, markers = [], []
     if bounds is not None:
@@ -224,7 +268,7 @@ def membrane_surface_review(
             marker = asset_name(identity, "membrane_core")
             cmd.load_cgo(rims, marker, zoom=0)
             markers.append(marker)
-    return {"planes": planes, "markers": markers, "bias_labels": [selected for selected, _ in labels]}
+    return {"planes": planes, "markers": markers, "bias_labels": selections}
 
 
 def ligand_pocket_review(
@@ -254,6 +298,7 @@ def ligand_pocket_review(
     anchor_residues="",
     bind_keys=True,
     cavity_centers=None,
+    membrane_renderer=None,
 ) -> Dict[str, object]:
     """Create stable overview and pocket scenes from verified semantic roles.
 
@@ -337,7 +382,8 @@ def ligand_pocket_review(
     # Keep the cartoon at contact residues: the side-chain helper needs it to
     # preserve the CA-to-side-chain connection without duplicate backbone sticks.
     cmd.hide("surface", protein)
-    cmd.show("surface", pocket_surface_name)
+    if membrane is None:
+        cmd.show("surface", pocket_surface_name)
     _set("transparency", float(focus_surface_transparency), pocket_surface_name)
     cmd.show("cartoon", protein)
     if anchor_residues:
@@ -367,8 +413,7 @@ def ligand_pocket_review(
             message.append(legend)
     overlay = {"planes": [], "bias_labels": []}
     if membrane is not None:
-        cmd.hide("surface", protein)
-        overlay = membrane_surface_review(identity, protein, **membrane)
+        overlay = (membrane_renderer or membrane_surface_review)(identity, protein, **membrane)
         message.append("Ochre / green: hydrophobic / hydrophilic surface")
         if membrane.get("bounds"):
             # PyMOL's scene-message wizard expects ASCII text.
@@ -416,6 +461,7 @@ def ligand_pocket_review(
         "scenes": scenes,
         "initial_scene": chosen,
         "contact_residue_atoms": _count(pocket_name),
+        "focus_message": "\n".join(message),
     }
 
 

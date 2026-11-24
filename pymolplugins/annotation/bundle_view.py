@@ -44,6 +44,11 @@ class CandidateCavity:
 
 
 @dataclass(frozen=True)
+class BundleMembraneLayer:
+    draw: Callable
+
+
+@dataclass(frozen=True)
 class CavityRender:
     status: str
     tooltip: str
@@ -153,7 +158,7 @@ def _prepare_bundle_assets(request):
     return request, _read_membrane_assets(request)
 
 
-def _ligand_renderer(modules, request, root, assets, focus):
+def _ligand_renderer(modules, request, root, assets, focus, membrane_renderer=None):
     config = dict(request.config)
     column = config.get("path_column", "structure_path")
     if assets is not None:
@@ -173,7 +178,8 @@ def _ligand_renderer(modules, request, root, assets, focus):
     with _skill_imports():
         sys.modules.update(modules)
         renderer = modules["acceptance_collection"]._ligand_view(
-            config, root, column, store_scene=bool(focus), step_scene=focus, calculate_cavity=False
+            config, root, column, store_scene=bool(focus), step_scene=focus, calculate_cavity=False,
+            membrane_renderer=membrane_renderer
         )
     return renderer, {column: request.row_path}
 
@@ -195,14 +201,61 @@ def _draw_interface_labels(api, modules, owner, annotation):
         "TYR": ("OH", "0", "gray35"), "TRP": ("NE1", "0", "gray35"),
     }
     api.set("label_size", 13, owner)
-    labels = []
+    recipes = modules["acceptance_recipes"]
+    atoms = recipes.residue_atom_keys(api, protein, {atom for atom, _, _ in charge.values()})
+    labels = {}
     for position, residue in displayed.items():
         atom, sign, color = charge[residue]
-        selection = f"({protein}) and ({position}) and resn {residue} and name {atom}"
+        resi = recipes.residue_number(position)
+        if resi is None:
+            keys = api.index(f"({protein}) and ({position}) and resn {residue} and name {atom}")
+        else:
+            keys = atoms.get((resi, residue, atom), ())
         suffix = f" {sign}" + (" *" if position in biased else "")
-        api.label(selection, "resn + resi + " + repr(suffix))
-        labels.append((selection, color))
-    modules["acceptance_recipes"].style_residue_labels(api, labels)
+        labels.update((key, (suffix, color)) for key in keys)
+    recipes.apply_residue_labels(api, labels)
+
+
+def _show_bundle_legend(api, request, focus, lines):
+    title = next(iter(request.label.splitlines()), "")
+    # PyMOL's scene-message wizard requires ASCII.
+    if not title or not title.isascii():
+        title = Path(request.row_path).stem.encode("ascii", "replace").decode("ascii")
+    message = "\n".join([title, *lines])
+    if focus in api.get_scene_list():
+        api.set_scene_message(focus, message)
+    else:
+        api.scene(focus, "store", message=message)
+    try:
+        api.scene(focus, "recall", animate=0)
+        _BUNDLE_LEGENDS[api] = api.get_wizard()
+    finally:
+        api.scene(focus, "delete")
+
+
+def _bundle_cavity(request, modules, owner, identity, assets, *, api):
+    enabled = modules["acceptance_recipes"]._truthy(request.config.get("show_cavity", True), True)
+    cached = request.config.get("legacy_interface_step") and assets[2].get("cavity_centers") is not None
+    if request.config.get("view") == "ligand_pocket" and enabled and not cached:
+        protein = f"%{owner} and ({request.config['protein_selection']})"
+        ligand = f"%{owner} and ({request.config['ligand_selection']})"
+        return CandidateCavity("Pocket cavity", identity, lambda renderer: renderer.capture_cavity(api, protein, ligand))
+
+
+def _draw_bundle_membrane(api, owner, request, assets, identity, focus, render, result):
+    view = api.get_view()
+    try:
+        overlay = render()
+    finally:
+        api.set_view(view)
+    if request.config.get("legacy_interface_step"):
+        _draw_interface_labels(api, _load_skill(), owner, assets[2])
+    else:
+        legend = result["focus_message"].splitlines()[1:]
+        if overlay["bias_labels"]:
+            legend.append("Labeled sticks: bias-matched side chains")
+        _show_bundle_legend(api, request, focus, legend)
+    return _bundle_cavity(request, _load_skill(), owner, identity, assets, api=api)
 
 
 def _draw_bundle(api, owner, prepared):
@@ -220,26 +273,25 @@ def _draw_bundle(api, owner, prepared):
     coordinates = [api.get_coordset(owner, state) for state in range(1, api.count_states(owner) + 1)]
     transform = api.get_object_ttt(owner)
     api.scene(backup, "store")
+    deferred = []
+
+    def defer_membrane(*args, **kwargs):
+        deferred.append(partial(modules["acceptance_recipes"].membrane_surface_review, *args, **kwargs))
+        return {"planes": [], "bias_labels": []}
+
     try:
         with TemporaryDirectory(prefix="pymol-bundle-view-") as directory:
             if view == "ligand_pocket":
-                render, row = _ligand_renderer(modules, request, Path(directory), assets, focus)
+                render, row = _ligand_renderer(modules, request, Path(directory), assets,
+                                               "" if assets else focus, defer_membrane if assets else None)
             else:
                 render, row = modules["acceptance_collection"]._cartoon_view, {}
-            render(identity, {"model": owner}, row)
-            if interface_labels:
-                _draw_interface_labels(api, modules, owner, assets[2])
-            elif view == "ligand_pocket":
-                legend = api.get_scene_message(focus).splitlines()[1:]
-                title = next(iter(request.label.splitlines()), "")
-                # PyMOL's native scene message wizard requires ASCII. Unicode
-                # labels remain available in the Annotator score table.
-                if not title or not title.isascii():
-                    title = Path(request.row_path).stem.encode("ascii", "replace").decode("ascii")
-                message = "\n".join([title, *legend])
-                api.set_scene_message(focus, message)
-                api.scene(focus, "recall", animate=0)
-                _BUNDLE_LEGENDS[api] = api.get_wizard()
+            result = render(identity, {"model": owner}, row)
+            if deferred:
+                return BundleMembraneLayer(partial(_draw_bundle_membrane, api, owner, request, assets,
+                                                    identity, focus, deferred[0], result))
+            if view == "ligand_pocket" and focus:
+                _show_bundle_legend(api, request, focus, api.get_scene_message(focus).splitlines()[1:])
     except Exception:
         for state, coords in enumerate(coordinates, 1):
             api.load_coordset(coords, owner, state)
@@ -253,12 +305,7 @@ def _draw_bundle(api, owner, prepared):
         for name in (focus, backup):
             if name in api.get_scene_list():
                 api.scene(name, "delete")
-    enabled = modules["acceptance_recipes"]._truthy(request.config.get("show_cavity", True), True)
-    precomputed_centers = interface_labels and assets[2].get("cavity_centers") is not None
-    if view == "ligand_pocket" and enabled and not precomputed_centers:
-        protein = f"%{owner} and ({request.config['protein_selection']})"
-        ligand = f"%{owner} and ({request.config['ligand_selection']})"
-        return CandidateCavity("Pocket cavity", identity, lambda renderer: renderer.capture_cavity(api, protein, ligand))
+    return _bundle_cavity(request, modules, owner, identity, assets, api=api)
 
 
 def prepare_bundle_view(api, owner, request):
