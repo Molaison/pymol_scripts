@@ -198,10 +198,16 @@ def _local_contacts(api, focus, surrounding, state):
 
 def draw_focus(api, prefix, source, index, state, residue):
     """Create replacement layers and report the local typed contact counts."""
-    focus = f"(byres ({_indices(source, [index])})) and not elem H"
+    residue_selection = f"(byres ({_indices(source, [index])})) and not elem H"
+    focus_atoms = api.index(residue_selection)
+    if not focus_atoms:
+        raise ValueError("The picked residue has no heavy atoms.")
+    focus = _indices(source, (atom for _, atom in focus_atoms))
     if not api.count_atoms(focus, state=state):
         raise ValueError("The picked residue has no heavy atoms.")
-    neighborhood = f"(byres ((%{source} and not elem H) within {RADIUS:g} of ({focus})))"
+    nearby = f"byres ((%{source} and not elem H) within {RADIUS:g} of ({focus}))"
+    # Resolve the geometric selection once for the contact, polar and stick queries.
+    neighborhood = _indices(source, (atom for _, atom in api.index(nearby)))
     surrounding = f"({neighborhood}) and not (({focus}) or elem H)"
     ligand = f"({focus}) and organic"
     if not api.count_atoms(ligand, state=state):
