@@ -118,6 +118,7 @@ class PocketReferenceReview:
         self.reference = None
         self.dataset = None
         self.job = None
+        self.resolve = None
         self.snapshot = None
         self.identity = None
         self.view = None
@@ -154,6 +155,7 @@ class PocketReferenceReview:
             raise ValueError("Configure Reference… and open a ligand-bearing CSV row.")
         self.label, resolve = self.panel._reference_source(config)
         self.config = config
+        self.resolve = resolve
         self.radius = float(self.panel._interface_radius)
         self.dataset = self.dataset_key()
         self.panel._view_jobs.cancel()
@@ -188,6 +190,9 @@ class PocketReferenceReview:
                 self._hide_scene()
                 if self.view is not None:
                     cmd.set_view(self.view)
+        if self.job is None and self.reference is None and self.resolve is not None:
+            self.job = self.pocket.owner._get_bg_executor().submit(self.resolve)
+            self._status(f"Retrying reference {self.label}…")
         if self.job is not None or self.reference is not None:
             self.timer.start()
 
@@ -209,7 +214,8 @@ class PocketReferenceReview:
         except Exception as error:
             with display_updates(cmd):
                 self._clear_overlay()
-            self._status(f"Reference pocket · {error}")
+            hint = " · Switch rows to retry." if self.reference is None else ""
+            self._status(f"Reference pocket · {error}{hint}")
             self._fill_details()
 
     def _load(self, path):
@@ -488,6 +494,7 @@ class PocketReferenceReview:
                 cmd.enable(name)
         self.reference = self.snapshot = None
         self.reference_protein = self.baseline_signature = None
+        self.resolve = None
         self.analysis_cache.clear()
         self.hidden.clear()
         self.hidden_identities.clear()
