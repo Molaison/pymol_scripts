@@ -1,9 +1,9 @@
 """Local IMGT numbering and cartoon-only annotations for the current binder."""
 
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from contextlib import redirect_stdout
 from dataclasses import dataclass
-from functools import lru_cache
+from threading import Lock
 import json
 import os
 from pathlib import Path
@@ -76,8 +76,12 @@ def _numbering_python():
     return Path(override).expanduser() if override else default
 
 
-@lru_cache(maxsize=256)
-def _cached_numbering(python, sequences):
+_NUMBERING_CACHE_SIZE = 256
+_numbering_cache = OrderedDict()
+_numbering_lock = Lock()
+
+
+def _run_numbering(python, sequences):
     if not python.is_file():
         raise RuntimeError("IMGT numbering needs the local ANARCII environment. See the plugin installation guide.")
     options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
@@ -94,7 +98,20 @@ def number_chains(chains):
     if not chains:
         return {}
     sequences = tuple(dict.fromkeys(chain.sequence for chain in chains))
-    return _cached_numbering(_numbering_python(), sequences)
+    python = _numbering_python()
+    with _numbering_lock:
+        missing = tuple(seq for seq in sequences if (python, seq) not in _numbering_cache)
+        new_results = _run_numbering(python, missing) if missing else {}
+        numbered = {}
+        for sequence in sequences:
+            key = python, sequence
+            domains = new_results[sequence] if sequence in new_results else _numbering_cache[key]
+            numbered[sequence] = domains
+            _numbering_cache[key] = domains
+            _numbering_cache.move_to_end(key)
+        while len(_numbering_cache) > _NUMBERING_CACHE_SIZE:
+            _numbering_cache.popitem(last=False)
+        return numbered
 
 
 def _annotate_domains(engine, sequence):
