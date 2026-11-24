@@ -1,8 +1,8 @@
 """Temporary atom and contact layers for interactive residue focus."""
 
 from collections import defaultdict, deque
-from dataclasses import dataclass
-from math import dist
+from dataclasses import dataclass, field
+from math import dist, isclose
 from typing import TYPE_CHECKING, Optional
 from uuid import uuid4
 
@@ -42,6 +42,7 @@ class FocusLayer:
     surface_shape: tuple = ()
     ligand_surface: str = ""
     void_result: Optional["CavityRender"] = None
+    _surface_cache: dict = field(default_factory=dict)
 
     @property
     def copies(self):
@@ -85,23 +86,33 @@ class FocusLayer:
             if self.surface:
                 api.disable(self.surface)
             return
-        selection = self.pocket_selection(radius)
-        if not api.count_atoms(selection, state=self.state):
-            raise ValueError("No nearby polymer residues")
         anchor = self.copies[0] if facing and self.ligand_selection else ""
         shape = (radius, bool(anchor))
-        if self.surface and self.surface_shape == shape:
-            api.set("transparency", transparency, self.surface)
-            api.enable(self.surface)
-            return
-        carve = (anchor, radius) if anchor else None
-        name = api.get_unused_name(f"{self.copies[0]}_pocket_surface_{uuid4().hex[:8]}")
-        _create_surface(api, name, selection, self.state, "gray80", transparency, carve)
-        if self.surface:
-            api.delete(self.surface)
-            self.names.remove(self.surface)
+        name = self._surface_cache.get(shape)
+        if name and name not in api.get_names("objects"):
+            self._surface_cache.pop(shape)
+            self.names.remove(name)
+            name = None
+        if name is None:
+            selection = self.pocket_selection(radius)
+            if not api.count_atoms(selection, state=self.state):
+                raise ValueError("No nearby polymer residues")
+            carve = (anchor, radius) if anchor else None
+            name = api.get_unused_name(f"{self.copies[0]}_pocket_surface_{uuid4().hex[:8]}")
+            _create_surface(api, name, selection, self.state, "gray80", transparency, carve)
+            self.names.append(name)
+        elif not isclose(api.get_setting_float("transparency", name), transparency, abs_tol=1e-6):
+            api.set("transparency", transparency, name)
+        if self.surface and self.surface != name and self.surface in self.names:
+            api.disable(self.surface)
+        api.enable(name)
         self.surface, self.surface_shape = name, shape
-        self.names.append(name)
+        self._surface_cache.pop(shape, None)
+        self._surface_cache[shape] = name
+        if len(self._surface_cache) > 2:
+            oldest = self._surface_cache.pop(next(iter(self._surface_cache)))
+            api.delete(oldest)
+            self.names.remove(oldest)
 
 
 def _create_surface(api, name, selection, state, color, transparency, carve=None):
