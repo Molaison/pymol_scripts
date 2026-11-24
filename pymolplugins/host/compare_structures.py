@@ -1,6 +1,7 @@
 """Modeless overlays and alignment of objects already loaded in PyMOL."""
 
 import re
+from time import perf_counter
 from uuid import uuid4
 
 from pymol import cmd
@@ -17,6 +18,8 @@ from pymolplugins.core.pymol_display import display_updates
 
 
 _dialog = None
+_COMPARISON_SLICE_SECONDS = 0.095
+_COMPARISON_YIELD_MS = 1
 ATOM_SETS = (
     ("Protein Cα", "polymer.protein and name CA"),
     ("Ligand heavy atoms", "organic and not elem H"),
@@ -226,7 +229,7 @@ class CompareStructuresDialog(QtWidgets.QDialog):
             sources, self._comparison_reference, self.method.currentData(), mobile, target, align)
         self._comparison_controls(False)
         self.status.setText(f"Preparing comparison · 0/{len(sources)}")
-        self._comparison_timer.start(8)
+        self._comparison_timer.start(_COMPARISON_YIELD_MS)
 
     def _comparison_controls(self, enabled):
         for control in (self.objects, self.reference, self.method, self.mobile_range,
@@ -251,6 +254,18 @@ class CompareStructuresDialog(QtWidgets.QDialog):
             self.scene.stop()
         self._comparison_controls(True)
 
+    def _stage_comparison_slice(self, total):
+        deadline = perf_counter() + _COMPARISON_SLICE_SECONDS
+        while self._comparison_progress < total:
+            started = perf_counter()
+            next(self._pending_comparison)
+            self._comparison_progress += 1
+            now = perf_counter()
+            # Another native alignment cannot be interrupted. Allow room for
+            # a similar step before beginning another object in this turn.
+            if now + (now - started) >= deadline:
+                break
+
     def _advance_comparison(self):
         if self._pending_comparison is None:
             return
@@ -262,7 +277,12 @@ class CompareStructuresDialog(QtWidgets.QDialog):
                     raise ValueError(f"{name} changed during preparation. Apply the comparison again.")
             with display_updates(cmd):
                 try:
-                    next(self._pending_comparison)
+                    total = len(self._comparison_identities)
+                    if self._comparison_progress < total:
+                        self._stage_comparison_slice(total)
+                    else:
+                        # Publish the finished overlays after yielding once more.
+                        next(self._pending_comparison)
                 except StopIteration as finished:
                     staged, alignment, notes = finished.value
                     self._pending_comparison = None
@@ -284,10 +304,9 @@ class CompareStructuresDialog(QtWidgets.QDialog):
             self.status.setText(f"Comparison skipped · {error}")
             return
         if self._pending_comparison is not None:
-            self._comparison_progress += 1
             self.status.setText(
                 f"Preparing comparison · {self._comparison_progress}/{len(self._comparison_identities)}")
-            self._comparison_timer.start(8)
+            self._comparison_timer.start(_COMPARISON_YIELD_MS)
             return
         self.scene.timer.start()
         self._comparison_controls(True)
