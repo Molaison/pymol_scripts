@@ -6123,6 +6123,10 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._source_columns_explicit = False
         self._source_review_config = {}
         self._pending_navigation = None
+        self._queued_header_sort = None
+        self._header_sort_timer = QtCore.QTimer(self)
+        self._header_sort_timer.setSingleShot(True)
+        self._header_sort_timer.timeout.connect(self._apply_queued_header_sort)
         self._later_count_cache = None
         self._filter_empty = False
         self._qt_shortcuts = None
@@ -6435,10 +6439,27 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._apply_header_filters(read_header_filters(STATE.filter_text).set_choices(column, choices))
 
     def _sort_csv_header(self, column):
-        if (self._table_mode != "active" or self._csv_task_id or self._pending_navigation is not None
-                or STATE.source_mode != "csv" or STATE.dataset is None or column not in STATE.dataset.columns):
+        if (self._table_mode != "active" or STATE.source_mode != "csv"
+                or STATE.dataset is None or column not in STATE.dataset.columns):
             return
-        descending = column == STATE.sort_column and not STATE.sort_descending
+        if self._csv_task_id and self._csv_task_kind != "steps":
+            return
+        current, descending = STATE.sort_column, STATE.sort_descending
+        if self._queued_header_sort and self._queued_header_sort[0] == STATE.dataset_generation:
+            _, current, descending = self._queued_header_sort
+        self._queued_header_sort = (STATE.dataset_generation, column, column == current and not descending)
+        if self._pending_navigation is not None or self._csv_task_id:
+            self.status_label.setText(f"Sort by {column} queued · Preparing structure…")
+            return
+        self._apply_queued_header_sort()
+
+    def _apply_queued_header_sort(self):
+        if self._closed or self._pending_navigation is not None or self._csv_task_id:
+            return
+        pending, self._queued_header_sort = self._queued_header_sort, None
+        if pending is None or pending[0] != STATE.dataset_generation or self._table_mode != "active":
+            return
+        _, column, descending = pending
         STATE.sort_column, STATE.sort_descending = column, descending
         if STATE.entries:
             self._reorder_csv_rows(column, descending)
@@ -7455,6 +7476,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         csv_mode = self._source_mode() == "csv"
         busy = bool(self._csv_task_id) or self._batch_is_busy()
         navigating = self._pending_navigation is not None
+        if not busy and not navigating and self._queued_header_sort is not None:
+            self._header_sort_timer.start(0)
         self.overview_button.setEnabled(bool(STATE.all_entries) and not busy)
         self.cluster_button.setEnabled(bool(STATE.all_entries) and STATE.source_mode != "groups"
                                        and self._table_mode != "preview" and not busy)
