@@ -1,11 +1,14 @@
 """Atom-level interface details shared by interactive and portable review views."""
 
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 from functools import lru_cache
 
 _PROBE_RADIUS = 1.4  # Å
 _BURIED_AREA = 0.5  # Å²
 _EXPOSED_AREA = 1.0  # Å²
+
+_AtomSnapshot = namedtuple(
+    "_AtomSnapshot", "model index segi chain resi alt q vdw coord")
 
 
 def _primary_conformer(atoms):
@@ -21,6 +24,25 @@ def _primary_conformer(atoms):
 
 def _pairs(api, first, second, state, cutoff, mode):
     return api.find_pairs(first, second, state1=state, state2=state, cutoff=cutoff, mode=mode, angle=45)
+
+
+def _state_atoms(api, objects, state):
+    atoms = []
+    for name in objects:
+        selection = f"%{name} and not hydro"
+        metadata = []
+        api.iterate_state(
+            state, selection, "record((index, segi, chain, resi, alt, q, vdw))",
+            space={"record": metadata.append},
+        )
+        coords = api.get_coords(selection, state)
+        if coords is None and not metadata:
+            continue
+        if coords is None or len(metadata) != len(coords):
+            raise RuntimeError(f"Atom metadata and coordinate counts differ for {name}")
+        atoms.extend(_AtomSnapshot(name, *values, tuple(map(float, coord)))
+                     for values, coord in zip(metadata, coords))
+    return atoms
 
 
 def polar_pairs(api, first, second, state, cutoff):
@@ -55,8 +77,8 @@ def capture_assembly_polar(api, objects, state, focus, partners):
     if not candidates:
         return (), {}
 
-    atoms = _primary_conformer([((name, atom.index), atom) for name in objects
-                                for atom in api.get_model(f"%{name} and not hydro", state).atom])
+    atoms = _primary_conformer([((atom.model, atom.index), atom)
+                                for atom in _state_atoms(api, objects, state)])
     satisfied = _satisfied_atoms(api, polar, selection, state, {key for key, _ in atoms})
     solvent = set(api.index(f"({selection}) and solvent"))
     rows = [(key, tuple(atom.coord), atom.vdw) for key, atom in atoms if key not in solvent]
