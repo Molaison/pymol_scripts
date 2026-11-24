@@ -46,6 +46,10 @@ class SshRemoteError(SshError):
     """A complete remote error response; the authenticated session is reusable."""
 
 
+class _SshSessionClosed(SshError):
+    """A queued request reached a channel closed by its previous caller."""
+
+
 _sessions = {}
 _sessions_lock = threading.Lock()
 _progress_context = threading.local()
@@ -313,10 +317,12 @@ class _SshSession:
         while not self.lock.acquire(timeout=0.1):
             self._report(progress, started, queued=True)
             self._check_wait(cancel_event, deadline)
+        active = False
         try:
             self._check_wait(cancel_event, deadline)
             if self.closed:
-                raise SshError("SSH connection closed; retry the requested operation.")
+                raise _SshSessionClosed("SSH connection closed before the request started.")
+            active = True
             starting = self.process is None
             self.phase = "Connecting / authenticating" if starting else "Reading remote metadata"
             self.transferred = self.total = self.wire_bytes = 0
@@ -340,7 +346,8 @@ class _SshSession:
         except SshRemoteError:
             raise
         except BaseException:
-            self.close()
+            if active:
+                self.close()
             raise
         finally:
             self.lock.release()
@@ -436,26 +443,35 @@ class SshClient:
             process.communicate(timeout=5)
 
     @contextmanager
-    def _response(self, request, cancel_event=None, *, output=None):
+    def _response(self, request_data, cancel_event=None, *, output=None):
         if cancel_event is not None and cancel_event.is_set():
             raise SshCancelled("SSH operation cancelled.")
         command = tuple(self.command())
         key = (self.location.profile, self.location.config, command, self.otp_identity)
-        with _sessions_lock:
-            session = _sessions.get(key)
-            if session is None or session.closed:
-                session = _SshSession(self, command)
-                _sessions[key] = session
         progress = getattr(_progress_context, "callback", None)
+
+        def request(destination):
+            while True:
+                with _sessions_lock:
+                    session = _sessions.get(key)
+                    if session is None or session.closed:
+                        session = _SshSession(self, command)
+                        _sessions[key] = session
+                try:
+                    return session.request(request_data, destination, cancel_event, self.timeout, progress)
+                except _SshSessionClosed:
+                    # Cancellation of a preload can retire the channel while a
+                    # manual request waits for its lock. Nothing was sent yet.
+                    continue
+
         if output is not None:
-            value = session.request(request, output, cancel_event, self.timeout, progress)
-            yield value, output
+            yield request(output), output
         else:
             with tempfile.TemporaryFile() as temporary:
-                value = session.request(request, temporary, cancel_event, self.timeout, progress)
-                yield value, temporary
+                yield request(temporary), temporary
 
     def stat_many(self, paths, *, cancel_event=None):
+        """Read full source versions in order, retaining per-path failure results."""
         with self._response({"operation": "stat", "paths": list(paths)}, cancel_event) as (values, _):
             return values
 

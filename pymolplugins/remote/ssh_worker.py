@@ -30,7 +30,7 @@ def inspect_path(path):
         return dict(value, status="available")
     except FileNotFoundError as exc:
         return {"path": path, "status": "missing", "error": str(exc)}
-    except PermissionError as exc:
+    except OSError as exc:
         return {"path": path, "status": "unreadable", "error": str(exc)}
 
 

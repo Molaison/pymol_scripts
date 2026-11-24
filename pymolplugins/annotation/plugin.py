@@ -46,7 +46,7 @@ from pymolplugins.annotation.path_formats import rewrite_path
 from pymolplugins.targets.commands import _execute_checked
 from pymolplugins.core.source_paths import clean_pasted_path, file_url_path, is_file_url
 from pymolplugins.remote.ssh import (
-    SshCancelled, SshClient, SshLocation, is_ssh_path, normalize_source_path,
+    SshCancelled, SshClient, SshError, SshLocation, is_ssh_path, normalize_source_path,
     parse_ssh_path, ssh_progress,
 )
 
@@ -1671,6 +1671,7 @@ _bg_decompressed_paths = globals().get("_bg_decompressed_paths", {})
 _materialization_futures = globals().get("_materialization_futures", {})
 _materialization_cancel_events = globals().get("_materialization_cancel_events", {})
 _materialization_generation = globals().get("_materialization_generation", 0)
+_ssh_preload_versions = globals().get("_ssh_preload_versions", {})
 _structure_cache = globals().get("_structure_cache", None)
 _copy_materializer = globals().get("_copy_materializer", None)
 _direct_materializer = globals().get("_direct_materializer", None)
@@ -1839,10 +1840,13 @@ def _cache_canonical_source(path: str) -> str:
     return os.path.normcase(os.path.realpath(os.path.abspath(value)))
 
 
-def _materialize_ssh_entry(entry, *, cancel_event=None):
+def _materialize_ssh_entry(entry, *, cancel_event=None, observed=None):
     remote = parse_ssh_path(entry.resolved_path)
     client = SshClient(remote)
-    observed = client.stat(cancel_event=cancel_event)
+    if observed is None:
+        observed = client.stat(cancel_event=cancel_event)
+    if observed["status"] != "available":
+        raise SshError(observed["error"])
 
     def identity(value):
         return SourceIdentity(provider="ssh", canonical_source=remote.at(value["path"]).uri,
@@ -1889,11 +1893,14 @@ def _materialize_entry(
     context: _MaterializationContext,
     *,
     staged_source_identity: Optional[object] = None,
+    ssh_source_identity: Optional[object] = None,
     cancel_event: Optional[object] = None,
 ) -> MaterializedStructure:
     provider = _entry_provider(entry)
     if provider == "ssh":
-        return _materialize_ssh_entry(entry, cancel_event=cancel_event)
+        return _materialize_ssh_entry(
+            entry, cancel_event=cancel_event, observed=ssh_source_identity
+        )
     if provider.startswith("wsl-stage:"):
         return _materialize_wsl_entry(
             entry, context, observed=staged_source_identity
@@ -1935,14 +1942,16 @@ def _materialize_entry(
     )
 
 
-def _materialize_entry_in_background(entry, context, cancel_event, bridge):
+def _materialize_entry_in_background(entry, context, cancel_event, bridge, observed=None):
     callback = None
     if bridge is not None:
         callback = lambda message: bridge.materialization_progress.emit(
             context.generation, entry.id, message
         )
     with ssh_progress(callback):
-        return _materialize_entry(entry, context, cancel_event=cancel_event)
+        return _materialize_entry(
+            entry, context, cancel_event=cancel_event, ssh_source_identity=observed
+        )
 
 
 def _cancel_materialization_key(key):
@@ -1961,7 +1970,7 @@ def _cancel_materialization_record(record):
 
 
 def _materialize_index(
-    index: int, *, allow_background: bool, trust_cached: bool = False
+    index: int, *, allow_background: bool, trust_cached: bool = False, revalidate: bool = False
 ) -> Optional[MaterializedStructure]:
     global _materialization_futures
     if not STATE.entries:
@@ -1971,7 +1980,8 @@ def _materialize_index(
     context = _materialization_context()
     future_key = (context.generation, entry.id)
     cached = STATE.materialized_paths.get(entry.id)
-    if cached and (trust_cached or os.path.isfile(_long_path(cached.path))):
+    if (cached and not revalidate and future_key not in _materialization_futures
+            and (trust_cached or os.path.isfile(_long_path(cached.path)))):
         return cached
     future = _materialization_futures.get(future_key)
     if future is not None:
@@ -1995,10 +2005,25 @@ def _materialize_index(
             context.generation == _materialization_generation
             and index < len(STATE.entries) and STATE.entries[index].id == entry.id
         ):
+            if cached is not None and cached.identity != result.identity and _entry_provider(entry) == "ssh":
+                obj = _object_name_for_index(STATE.files[index], index)
+                if obj in STATE.managed_objects:
+                    _candidate_bundles.remove(cmd, [obj])
+                    cmd.delete(obj)
+                    forget_loaded_source(STATE.loaded_source_versions, obj, STATE.materialized_paths)
+                    STATE.managed_objects.remove(obj)
             STATE.materialized_paths[entry.id] = result
             STATE.materialization_errors.pop(entry.id, None)
         return result
     if allow_background:
+        observed = None
+        batch = _ssh_preload_versions.get(future_key)
+        if batch is not None:
+            versions, _cancel, position = batch
+            if not versions.done():
+                return None
+            _ssh_preload_versions.pop(future_key)
+            observed = versions.result()[position]
         cancel_event = threading.Event()
         bridge = _CSV_ASYNC_BRIDGE
         app = QtCore.QCoreApplication.instance() if _HAS_QT_ASYNC else None
@@ -2006,7 +2031,7 @@ def _materialize_index(
                 and QtCore.QThread.currentThread() == app.thread()):
             bridge = _csv_async_bridge()
         future = _get_bg_executor().submit(
-            _materialize_entry_in_background, entry, context, cancel_event, bridge
+            _materialize_entry_in_background, entry, context, cancel_event, bridge, observed
         )
         _materialization_cancel_events[future_key] = cancel_event
         _materialization_futures[future_key] = future
@@ -2056,6 +2081,7 @@ def _reset_bg_cache() -> None:
     _preload_generation = int(globals().get("_preload_generation", 0)) + 1
     _materialization_generation = int(_materialization_generation) + 1
     _preload_queue = []
+    _cancel_ssh_preload_versions()
     _bg_decompress_futures = {}
     _bg_decompressed_paths = {}
     for event in list(_materialization_cancel_events.values()):
@@ -2627,6 +2653,52 @@ def _schedule_preload_tick() -> None:
     _preload_panel_timer.start(max(1, int(STATE.preload_interval_ms)))
 
 
+def _cancel_ssh_preload_versions(keep=()):
+    keep = set(keep)
+    removed = []
+    for key in list(_ssh_preload_versions):
+        if key not in keep:
+            removed.append(_ssh_preload_versions.pop(key))
+    retained = {batch[0] for batch in _ssh_preload_versions.values()}
+    for future, cancel, _position in removed:
+        if future not in retained:
+            cancel.set()
+            future.cancel()
+
+
+def _read_ssh_preload_versions(remote, paths, cancel_event):
+    return SshClient(remote).stat_many(paths, cancel_event=cancel_event)
+
+
+def _schedule_preload(records):
+    navigation = _panel._pending_navigation if _panel is not None else None
+    groups = {}
+    for generation, entry_id, idx in records:
+        key = (generation, entry_id)
+        entry = STATE.entries[idx]
+        if (_entry_provider(entry) != "ssh" or navigation is not None
+                or entry_id in STATE.materialized_paths
+                or key in _materialization_futures or key in _ssh_preload_versions):
+            continue
+        remote = parse_ssh_path(entry.resolved_path)
+        groups.setdefault((remote.profile, remote.config, remote.program), []).append((key, remote))
+    for entries in groups.values():
+        cancel = threading.Event()
+        future = _get_bg_executor().submit(
+            _read_ssh_preload_versions, entries[0][1],
+            [remote.path for _key, remote in entries], cancel,
+        )
+        for position, (key, _remote) in enumerate(entries):
+            _ssh_preload_versions[key] = (future, cancel, position)
+    for _generation, _entry_id, idx in records:
+        if _entry_provider(STATE.entries[idx]) == "ssh":
+            continue
+        try:
+            _materialize_index(idx, allow_background=True)
+        except Exception:
+            pass
+
+
 def _kick_preload() -> None:
     global _preload_generation, _preload_queue
     if _batch_owns_scene():
@@ -2651,6 +2723,7 @@ def _kick_preload() -> None:
         pending.append(navigation)
         desired_entry_ids.add(navigation[1])
         desired = [idx for idx in desired if idx != navigation[2]]
+    _cancel_ssh_preload_versions((generation, entry_id) for entry_id in desired_entry_ids)
     for key in list(_materialization_futures):
         if key[0] == generation and key[1] not in desired_entry_ids:
             _cancel_materialization_key(key)
@@ -2663,11 +2736,7 @@ def _kick_preload() -> None:
     _preload_generation += 1
     _preload_queue = pending
     if STATE.entries:
-        for _generation, _entry_id, idx in list(_preload_queue):
-            try:
-                _materialize_index(idx, allow_background=True)
-            except Exception:
-                pass
+        _schedule_preload(list(_preload_queue))
     if STATE.background_decompress_gz and not STATE.entries:
         for _generation, _entry_id, idx in list(_preload_queue):
             try:
@@ -2704,6 +2773,11 @@ def _process_preload_tick() -> None:
     _collect_ready_decompressed([idx])
 
     try:
+        navigation = _panel._pending_navigation if _panel is not None else None
+        if navigation == (generation, entry_id, idx) and _entry_provider(STATE.entries[idx]) == "ssh":
+            if _materialize_index(idx, allow_background=True) is None:
+                _schedule_preload_tick()
+                return
         loaded = _ensure_loaded(idx, focus=False, allow_gz_fallback=False)
         if loaded is None:
             _schedule_preload_tick()
@@ -2715,12 +2789,12 @@ def _process_preload_tick() -> None:
     except Exception as e:
         print(f"Structure Annotator preload error: {e}")
         traceback.print_exc()
-        _preload_queue = []
-        if _panel is not None:
+        _preload_queue = [record for record in _preload_queue
+                          if record != (generation, entry_id, idx)]
+        if _panel is not None and _panel._pending_navigation == (generation, entry_id, idx):
             _panel._pending_navigation = None
             _panel._refresh_status()
             _panel._show_error(f"Could not prepare structure: {e}")
-        return
     if _preload_queue:
         _schedule_preload_tick()
 
@@ -7190,13 +7264,26 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                     "mapping": _step_mapping(), "context": _materialization_context(),
                     "cache": dict(STATE.step_materialized), "candidate": STATE.materialized_paths.get(entry.id)})
             return
-        if STATE.source_mode == "groups" or _object_exists(_object_name_for_index(STATE.files[index], index)):
+        remote_navigation = _entry_provider(entry) == "ssh"
+        if remote_navigation:
+            _cancel_ssh_preload_versions()
+            _cancel_materialization_key(record[:2])
+            for queued in _preload_queue:
+                queued_generation, queued_id, queued_index = queued
+                if (queued_generation == record[0] and queued_index < len(STATE.entries)
+                        and STATE.entries[queued_index].id == queued_id
+                        and _entry_provider(STATE.entries[queued_index]) == "ssh"):
+                    _cancel_materialization_key(queued[:2])
+            STATE.materialization_errors.pop(entry.id, None)
+        if STATE.source_mode == "groups" or (not remote_navigation and _object_exists(_object_name_for_index(STATE.files[index], index))):
             _navigate_annotation("goto", index, refresh=refresh)
             self._refresh_status()
             return
         self._pending_navigation = record
         _preload_queue = [record] + [value for value in _preload_queue if value != record]
-        cached = _materialize_index(index, allow_background=True, trust_cached=True)
+        cached = _materialize_index(
+            index, allow_background=True, trust_cached=True, revalidate=remote_navigation
+        )
         self._source_mode_changed()
         self.status_label.setText(f"Preparing structure {index + 1}: {entry.display_name}…")
         self.review.refresh()
