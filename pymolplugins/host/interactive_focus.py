@@ -7,6 +7,7 @@ from pymol import cmd
 from pymol.Qt import QtCore
 from pymol.wizard import Wizard
 from pymolplugins.annotation.compare_scene import molecule_signature
+from pymolplugins.core.pymol_display import display_updates
 
 from .focus_pocket import close_pocket, pocket_for
 from .focus_view import RADIUS, draw_focus, focus_identity, picked_source
@@ -162,8 +163,9 @@ class InteractiveFocus(Wizard):
             return
         self.handling_pick = True
         try:
-            self._focus_pick(f"%{name}")
-            self.cmd.select(self.capture, "none", enable=1, quiet=1)
+            with display_updates(self.cmd):
+                self._focus_pick(f"%{name}")
+                self.cmd.select(self.capture, "none", enable=1, quiet=1)
         finally:
             self.handling_pick = False
 
@@ -172,8 +174,9 @@ class InteractiveFocus(Wizard):
             return
         self.handling_pick = True
         try:
-            self._focus_pick("?pk1")
-            self.cmd.unpick()
+            with display_updates(self.cmd):
+                self._focus_pick("?pk1")
+                self.cmd.unpick()
         finally:
             self.handling_pick = False
 
@@ -262,9 +265,10 @@ class InteractiveFocus(Wizard):
         removed = [self.layers.pop(source) for source in sources]
         if not self.layers and self._source_check_timer is not None:
             self._source_check_timer.stop()
-        for layer in removed:
-            layer.delete(self.cmd)
-        pocket_for(self).update()
+        with display_updates(self.cmd):
+            for layer in removed:
+                layer.delete(self.cmd)
+            pocket_for(self).update()
 
     def clear_active(self):
         if self.layer:
