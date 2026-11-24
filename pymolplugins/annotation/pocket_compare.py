@@ -33,6 +33,12 @@ ISOLATED_CONTEXT = (("cartoon_transparency", ISOLATED_CARTOON_TRANSPARENCY), ("s
 PREVIEW_CONTEXT = (("cartoon_transparency", 0.84), ("stick_transparency", 0.46))
 
 
+def _set_if_changed(api, setting, value, selection):
+    current = api.get_setting_float(setting, selection)
+    if current is None or abs(current - float(value)) > 1e-6:
+        api.set(setting, value, selection)
+
+
 @dataclass
 class PocketCandidate:
     id: str
@@ -359,7 +365,7 @@ class PocketComparison:
                 util.cnc(name, _self=cmd)
                 cmd.set("stick_radius", STICK_RADIUS, name)
                 cmd.group(prefix, name)
-            cmd.set("stick_transparency", 1 - variant.opacity, name)
+            _set_if_changed(cmd, "stick_transparency", 1 - variant.opacity, name)
 
     def _draw_ligands(self):
         poses = self.request.ligands.poses
@@ -497,7 +503,8 @@ class PocketComparison:
             if not previewing:
                 self._apply_variant_style(site, isolated)
             for name, original in self.reference_transparency.items():
-                cmd.set(name, max(original, context.get(name, original)), self.reference_object)
+                _set_if_changed(cmd, name, max(original, context.get(name, original)),
+                                self.reference_object)
             # The reference cartoon also carries a transparency override on its protein atoms.
             protein = f"%{self.reference_object} and ({self.request.protein})"
             cartoon = context.get("cartoon_transparency", REFERENCE_CARTOON_TRANSPARENCY)
@@ -520,7 +527,7 @@ class PocketComparison:
             else:
                 setting = "stick_transparency" if pose.model.bond else "sphere_transparency"
             level = fade if previewing else max(fade, 1 - poses.opacity(pose))
-            cmd.set(setting, level, name)
+            _set_if_changed(cmd, setting, level, name)
 
     def _apply_variant_style(self, site, isolated):
         visible = set(cmd.get_names("objects", enabled_only=1))
@@ -536,8 +543,9 @@ class PocketComparison:
             if name not in visible:
                 cmd.enable(name)
             multiplier = BACKGROUND_OPACITY if site is not None and not focused else 1
-            cmd.set("stick_transparency", 1 - variant.opacity * multiplier, name)
-            cmd.set("stick_radius", FOCUSED_STICK_RADIUS if focused else STICK_RADIUS, name)
+            _set_if_changed(cmd, "stick_transparency", 1 - variant.opacity * multiplier, name)
+            _set_if_changed(cmd, "stick_radius", FOCUSED_STICK_RADIUS if focused else STICK_RADIUS,
+                            name)
 
     def _set_rmsd_limits(self, ligand, backbone):
         changed = ligand != self.ligand_limit

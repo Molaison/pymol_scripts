@@ -1,6 +1,8 @@
 """Follow a CSV row in the fixed frame of a tracked ligand pocket."""
 
+from collections import OrderedDict
 from dataclasses import dataclass
+from hashlib import blake2b
 from typing import Optional
 
 from pymol import cmd, util
@@ -8,10 +10,12 @@ from pymol.Qt import QtCore, QtWidgets
 
 from pymolplugins.core.math3d import fit_rigid_transform
 from pymolplugins.core.pymol_display import display_updates
+from .compare_scene import _geometry_signature
 from .pocket_analysis import ContactChange, _aligned_pose, _distance_sq, capture_snapshot
 from .pocket_candidate_overlay import draw_pocket_interactions, load_fragment
 from .pocket_details import _contact_tip, _endpoint, _table
 from .pocket_variants import LIGAND, PROTEIN, aligned_fragment, bonds_by_site, residues
+from .provenance import source_version_token
 from .reference_track import ligand_anchor_pairs, ligand_atom_coordinates, molecule_identity
 
 
@@ -23,6 +27,32 @@ class LigandInteraction:
     @property
     def shown(self):
         return self.current or self.reference
+
+
+@dataclass(frozen=True)
+class _PocketAnalysisResult:
+    rmsd: float
+    matched: int
+    pose: object
+    contacts: tuple
+
+
+def _world_signature(api, selection):
+    geometry, bonds = _geometry_signature(api, selection, 1)
+    digest = blake2b(digest_size=16)
+    digest.update(repr(geometry).encode())
+    digest.update(repr(bonds).encode())
+    return digest.hexdigest()
+
+
+def _selection_signature(api, selection, object_positions):
+    atoms = []
+
+    def record(model, index):
+        atoms.append((object_positions[model], index))
+
+    api.iterate_state(1, selection, "record(model, index)", space={"record": record})
+    return tuple(atoms)
 
 
 def _contacts_by_ligand_atom(snapshot):
@@ -91,7 +121,14 @@ class PocketReferenceReview:
         self.snapshot = None
         self.identity = None
         self.view = None
+        self.reference_protein = None
+        self.baseline_signature = None
         self.objects, self.contacts, self.focus = [], [], []
+        self.focus_detail = []
+        self.focused_contact = None
+        self.showing_all = False
+        self.analysis_cache = OrderedDict()
+        self.analysis_cache_limit = 8
         self.hidden, self.managed = set(), set()
         self.hidden_identities = {}
         self.source_objects = set()
@@ -193,18 +230,59 @@ class PocketReferenceReview:
             cmd.color("slate", self.reference_ligand)
             util.cnc(self.reference_ligand, _self=cmd)
             cmd.set("stick_radius", .19, self.reference_ligand)
+            self.reference_protein = f"%{name} and ({PROTEIN})"
             self.reference, self.snapshot = name, snapshot
+            self.baseline_signature = _world_signature(cmd, f"%{name}")
+            self.analysis_cache.clear()
         except Exception:
             cmd.delete(name)
             raise
         finally:
             cmd.delete(source)
 
+    def _source_version(self):
+        state = self.state
+        entry_id = state.current_entry_id()
+        loaded = state.loaded_source_versions.get(state.current_object)
+        if loaded is not None and loaded.entry_id == entry_id:
+            return loaded.token
+        materialized = state.materialized_paths.get(entry_id)
+        if materialized is not None:
+            entry = state.current_entry()
+            return source_version_token(entry.source_path or entry.id, materialized.identity)
+        return None
+
+    def _analysis_key(self, scope, selections, members, reference_signature):
+        return (self.dataset, self.state.source_mode, self.state.current_entry_id(),
+                self._source_version(), repr(sorted(self.config.items())), self.radius,
+                selections, members, reference_signature, _world_signature(cmd, scope))
+
+    def _refresh_reference_snapshot(self, signature):
+        snapshot = capture_snapshot(cmd, self.reference_protein, self.reference_ligand,
+                                    self.radius, ligand_sites=True)
+        ligand_atom_coordinates((atom, atom.coord) for atom in snapshot.ligand.atom)
+        self.snapshot = snapshot
+        self.baseline_signature = signature
+        self.analysis_cache.clear()
+
+    def _cached_analysis(self, key):
+        result = self.analysis_cache.pop(key, None)
+        if result is not None:
+            self.analysis_cache[key] = result
+        return result
+
+    def _remember_analysis(self, key, result):
+        self.analysis_cache[key] = result
+        self.analysis_cache.move_to_end(key)
+        while len(self.analysis_cache) > self.analysis_cache_limit:
+            self.analysis_cache.popitem(last=False)
+
     def _draw(self, owner):
         if not owner or self.reference is None:
             return
         scope = self.pocket.scope(owner)
-        self.source_objects = set(cmd.get_object_list(scope))
+        source_objects = cmd.get_object_list(scope)
+        self.source_objects = set(source_objects)
         bundle = self.pocket.owner._bundle_view_for_index(self.state.index) or {}
         protein = f"({scope}) and ({bundle.get('protein_selection') or PROTEIN})"
         ligand = bundle.get("ligand_selection") or LIGAND
@@ -217,8 +295,23 @@ class PocketReferenceReview:
             else:
                 ligand = anchor
         ligand = f"({scope}) and ({ligand}) and ({LIGAND})"
-        current = capture_snapshot(cmd, protein, ligand, self.radius, ligand_sites=True)
-        rmsd, matched, pose, contacts = compare_ligand_pockets(self.snapshot, current)
+        reference_signature = _world_signature(cmd, self.reference)
+        if reference_signature != self.baseline_signature:
+            self._refresh_reference_snapshot(reference_signature)
+        selections = (bundle.get("protein_selection") or PROTEIN,
+                      bundle.get("ligand_selection") or LIGAND)
+        positions = {name: i for i, name in enumerate(source_objects)}
+        members = tuple(_selection_signature(cmd, selection, positions)
+                        for selection in (protein, ligand))
+        key = self._analysis_key(scope, selections, members, reference_signature)
+        result = self._cached_analysis(key)
+        if result is None:
+            current = capture_snapshot(cmd, protein, ligand, self.radius, ligand_sites=True)
+            rmsd, matched, pose, contacts = compare_ligand_pockets(self.snapshot, current)
+            result = _PocketAnalysisResult(rmsd, matched, pose, tuple(contacts))
+            self._remember_analysis(key, result)
+        rmsd, matched, pose = result.rmsd, result.matched, result.pose
+        contacts = result.contacts
         cmd.enable(self.reference)
         self._hide_scene()
         pose_name = cmd.get_unused_name("sa_pocket_track_current")
@@ -237,7 +330,7 @@ class PocketReferenceReview:
         self._fill_details()
 
     def _hide_scene(self):
-        owned = {self.reference, *self.objects, *self.focus}
+        owned = {self.reference, *self.objects, *self.focus, *self.focus_detail}
         visible = set(cmd.get_names("objects", enabled_only=1)) - owned
         self.managed.update(self.state.managed_objects)
         self.managed.add(self.panel._reference_track.name)
@@ -294,19 +387,69 @@ class PocketReferenceReview:
     def _focus_contact(self, row, column):
         item = self.contacts[row]
         contact = (item.reference if column == 3 else item.current if column == 4 else None) or item.shown
+        if (contact is self.focused_contact and not self.showing_all
+                and self._objects_exist(self.focus) and self._objects_exist(self.focus_detail)):
+            self._set_objects_enabled(self.focus, False)
+            self._set_objects_enabled(self.focus_detail, True)
+            return
         with display_updates(cmd):
-            self._clear_contacts()
-            draw_pocket_interactions(cmd, self.reference, (contact,), self.focus, selected=contact)
+            self._ensure_full_contacts()
+            self._clear_contact_focus()
+            self._set_objects_enabled(self.focus, False)
+            try:
+                draw_pocket_interactions(cmd, self.reference, (contact,), self.focus_detail,
+                                         selected=contact)
+            except Exception:
+                self._clear_contact_focus()
+                self._set_objects_enabled(self.focus, True)
+                self.showing_all = True
+                raise
+            self.focused_contact = contact
+            self.showing_all = False
 
     def _redraw_contacts(self):
+        if self.showing_all and self._objects_exist(self.focus):
+            self._set_objects_enabled(self.focus, True)
+            self._set_objects_enabled(self.focus_detail, False)
+            return
         with display_updates(cmd):
-            self._clear_contacts()
-            draw_pocket_interactions(cmd, self.reference, [item.shown for item in self.contacts], self.focus)
+            self._clear_contact_focus()
+            self._ensure_full_contacts()
+            self._set_objects_enabled(self.focus, True)
+            self.showing_all = True
 
-    def _clear_contacts(self):
+    def _objects_exist(self, names):
+        existing = set(cmd.get_names("objects"))
+        return all(name in existing for name in names)
+
+    def _set_objects_enabled(self, names, enabled):
+        visible = set(cmd.get_names("objects", enabled_only=1))
+        action = cmd.enable if enabled else cmd.disable
+        for name in names:
+            if (name in visible) != enabled:
+                action(name)
+
+    def _ensure_full_contacts(self):
+        if self._objects_exist(self.focus) and self.focus:
+            return
+        self._clear_full_contacts()
+        draw_pocket_interactions(cmd, self.reference, [item.shown for item in self.contacts], self.focus)
+
+    def _clear_contact_focus(self):
+        for name in self.focus_detail:
+            cmd.delete(name)
+        self.focus_detail.clear()
+        self.focused_contact = None
+
+    def _clear_full_contacts(self):
         for name in self.focus:
             cmd.delete(name)
         self.focus.clear()
+
+    def _clear_contacts(self):
+        self._clear_contact_focus()
+        self._clear_full_contacts()
+        self.showing_all = False
 
     def _clear_overlay(self):
         self._clear_contacts()
@@ -344,6 +487,8 @@ class PocketReferenceReview:
             for name in restore & visible:
                 cmd.enable(name)
         self.reference = self.snapshot = None
+        self.reference_protein = self.baseline_signature = None
+        self.analysis_cache.clear()
         self.hidden.clear()
         self.hidden_identities.clear()
         self.source_objects.clear()
