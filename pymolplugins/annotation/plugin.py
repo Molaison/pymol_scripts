@@ -5755,6 +5755,18 @@ class _DatasetTableModel(QtCore.QAbstractTableModel):
         source = tuple(STATE.all_entries) if filters.selections and self._display_columns else ()
         return self._rows, self._display_columns, self._column_kinds, preview, filters, source
 
+    def reorder_active(self, rows):
+        self.layoutAboutToBeChanged.emit()
+        previous = self.persistentIndexList()
+        locations = [(self.entry_id_at(index.row()), index.column()) for index in previous]
+        self._rows = rows
+        self._entry_id_to_row = {entry.id: row for row, entry in enumerate(rows)}
+        if previous:
+            self.changePersistentIndexList(
+                previous, [self.index(self.row_for_entry(entry_id), column) for entry_id, column in locations]
+            )
+        self.layoutChanged.emit()
+
     def sortable_column(self, section):
         offset = section - (len(self._headers) - len(self._display_columns))
         if self._mode == "active" and self._source_mode == "csv" and 0 <= offset < len(self._display_columns):
@@ -6349,18 +6361,45 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                 or STATE.source_mode != "csv" or STATE.dataset is None or column not in STATE.dataset.columns):
             return
         descending = column == STATE.sort_column and not STATE.sort_descending
-        if STATE.entries:
-            members = {entry.id: entry for entry in STATE.entries}
-            order = STATE.cluster_scope.get("ids") or (entry.id for entry in STATE.all_entries)
-            entries = _sort_entries([members[key] for key in order if key in members],
-                                    column=column, descending=descending)
-            _install_entries(STATE.all_entries, resume_entry_id=STATE.current_entry_id(), active_entries=entries)
-            _rescan_annotated_indices(refresh=False)
         STATE.sort_column, STATE.sort_descending = column, descending
+        if STATE.entries:
+            self._reorder_csv_rows(column, descending)
         self.sort_column_combo.setCurrentText(column)
         self.sort_desc_cb.setChecked(descending)
         self._refresh_status()
         _save_current_dataset_state(background=True)
+
+    def _reorder_csv_rows(self, column, descending):
+        old_positions = self._entry_id_to_active_index
+        order = STATE.cluster_scope.get("ids") or (entry.id for entry in STATE.all_entries)
+        visible = [self._entries_by_id[key] for key in order if key in self._entries_by_id]
+        if len(visible) == len(STATE.entries):
+            active = rows = _sort_entries(visible, column=column, descending=descending)
+        else:
+            # Diagnostic rows can change the column's numeric/text ordering independently.
+            active = _sort_entries([entry for entry in visible if entry.id in old_positions],
+                                   column=column, descending=descending)
+            rows = _sort_entries(visible, column=column, descending=descending)
+        current = STATE.current_entry_id()
+        session = _ensure_navigation_session()
+        positions = [old_positions[entry.id] for entry in active]
+        session.entries = [session.entries[index] for index in positions]
+        STATE.files = [STATE.files[index] for index in positions]
+        STATE.entries = active
+        previous = STATE.dataset_generation
+        STATE.dataset_generation += 1
+        STATE.navigation_generation = STATE.dataset_generation
+        self._entry_id_to_active_index = {entry.id: index for index, entry in enumerate(active)}
+        STATE.index = session.goto(self._entry_id_to_active_index[current])
+        _rescan_annotated_indices(refresh=False)
+        self._table_source_token, self._dataset_table_signature = self._current_table_identity()
+        self.review.scores.retain_on_reorder(previous, STATE.dataset_generation)
+        selection = self.review.selection
+        selection.updating = True
+        try:
+            self._dataset_model.reorder_active(rows)
+        finally:
+            selection.updating = False
 
     def _apply_header_filters(self, filters):
         if self._table_mode != "active" or self._csv_task_id or STATE.dataset is None:

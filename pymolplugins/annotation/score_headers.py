@@ -39,6 +39,7 @@ class ScoreProfileHeader(QtWidgets.QHeaderView):
         self.setSectionsClickable(True)
         self.sectionClicked.connect(self._sort_section)
         model.modelReset.connect(self._refresh)
+        model.layoutChanged.connect(self._refresh_sort_indicator)
 
     def mouseReleaseEvent(self, event):
         self._title_click = (event.button() == QtCore.Qt.LeftButton

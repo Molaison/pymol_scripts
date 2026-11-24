@@ -113,6 +113,10 @@ class ScoreController:
         self.panel.score_footer.show_scores(entry.display_name if entry else "No candidate", cards,
                                            state.filtered_count, selected_count, self.future is not None)
 
+    def retain_on_reorder(self, previous_generation, generation):
+        if self.signature is not None and self.signature[0] == previous_generation:
+            self.signature = (generation, *self.signature[1:])
+
     def _ready(self):
         if self.future is None or not self.future.done():
             return
