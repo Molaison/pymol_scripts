@@ -77,6 +77,14 @@ class CompareStructuresDialog(QtWidgets.QDialog):
         self.alignment = None
         self.rmsds = {}
         self.failures = {}
+        self._pending_comparison = None
+        self._comparison_identities = {}
+        self._comparison_reference = ""
+        self._comparison_was_active = False
+        self._comparison_progress = 0
+        self._comparison_timer = QtCore.QTimer(self)
+        self._comparison_timer.setSingleShot(True)
+        self._comparison_timer.timeout.connect(self._advance_comparison)
         self.scene = CompareScene(self, self._scene_changed, self.clear)
         self._build()
         self.finished.connect(lambda _result: self.clear())
@@ -89,6 +97,7 @@ class CompareStructuresDialog(QtWidgets.QDialog):
         row.addStretch(1)
         refresh = QtWidgets.QPushButton("Refresh")
         refresh.clicked.connect(self.refresh_objects)
+        self.refresh_button = refresh
         row.addWidget(refresh)
         layout.addLayout(row)
         self.objects = QtWidgets.QListWidget()
@@ -166,8 +175,9 @@ class CompareStructuresDialog(QtWidgets.QDialog):
         self.reference.setCurrentIndex(max(0, self.reference.findText(previous)))
         self.reference.blockSignals(False)
         self._update_ranges()
-        self.overlay_button.setEnabled(len(names) >= 2)
-        self.align_button.setEnabled(len(names) >= 2)
+        ready = len(names) >= 2 and self._pending_comparison is None
+        self.overlay_button.setEnabled(ready)
+        self.align_button.setEnabled(ready)
         self.clear_button.setEnabled(self.scene.active)
 
     def _update_ranges(self):
@@ -192,27 +202,95 @@ class CompareStructuresDialog(QtWidgets.QDialog):
         self.objects.blockSignals(False)
 
     def apply(self, align):
+        self._cancel_comparison()
         sources = self.selected()
         if len(sources) < 2:
             return
-        was_active = self.scene.active
+        try:
+            mobile = self.mobile_range.selection() if align else ""
+            target = self.reference_range.selection() if align else ""
+            identities = {name: (molecule_identity(cmd, name), cmd.get_object_state(name)) for name in sources}
+        except Exception as error:
+            self.status.setText(f"Comparison skipped · {error}")
+            return
+        self._comparison_was_active = self.scene.active
         self.scene.start()
-        reference = self.reference.currentText()
+        # The bulk transaction owns these objects until it commits. The watcher
+        # resumes from its old snapshot so new loads are handled exactly once.
+        self.scene.timer.stop()
+        self.scene._scan = None
+        self._comparison_identities = identities
+        self._comparison_reference = self.reference.currentText()
+        self._comparison_progress = 0
+        self._pending_comparison = _stage_comparison_steps(
+            sources, self._comparison_reference, self.method.currentData(), mobile, target, align)
+        self._comparison_controls(False)
+        self.status.setText(f"Preparing comparison · 0/{len(sources)}")
+        self._comparison_timer.start(8)
+
+    def _comparison_controls(self, enabled):
+        for control in (self.objects, self.reference, self.method, self.mobile_range,
+                        self.reference_range, self.refresh_button):
+            control.setEnabled(enabled)
+        ready = enabled and len(self.selected()) >= 2
+        self.overlay_button.setEnabled(ready)
+        self.align_button.setEnabled(ready)
+        self.clear_button.setEnabled(self.scene.active)
+
+    def _cancel_comparison(self):
+        if self._pending_comparison is None:
+            return
+        self._comparison_timer.stop()
         with display_updates(cmd):
-            try:
-                mobile = self.mobile_range.selection() if align else ""
-                target = self.reference_range.selection() if align else ""
-                method = self.method.currentData()
-                staged, alignment, notes = _stage_comparison(sources, reference, method, mobile, target, align)
-            except Exception as error:
-                if not was_active:
-                    self.scene.stop()
-                self.status.setText(f"Comparison skipped · {error}")
-                return
-            self._clear_overlays()
-            self.reference_source, self.alignment, self.rmsds = reference, alignment, notes
-            self._show_overlays(staged)
-            cmd.zoom(" or ".join(f"%{overlay.name}" for overlay in staged.values()), 4, animate=0)
+            self._pending_comparison.close()
+        self._pending_comparison = None
+        self._comparison_identities.clear()
+        if self._comparison_was_active:
+            self.scene.timer.start()
+        else:
+            self.scene.stop()
+        self._comparison_controls(True)
+
+    def _advance_comparison(self):
+        if self._pending_comparison is None:
+            return
+        staged = None
+        try:
+            current = set(cmd.get_names("objects"))
+            for name, identity in self._comparison_identities.items():
+                if name not in current or (molecule_identity(cmd, name), cmd.get_object_state(name)) != identity:
+                    raise ValueError(f"{name} changed during preparation. Apply the comparison again.")
+            with display_updates(cmd):
+                try:
+                    next(self._pending_comparison)
+                except StopIteration as finished:
+                    staged, alignment, notes = finished.value
+                    self._pending_comparison = None
+                    self._comparison_identities.clear()
+                    self._clear_overlays()
+                    self.reference_source = self._comparison_reference
+                    self.alignment, self.rmsds = alignment, notes
+                    self._show_overlays(staged)
+                    cmd.zoom(" or ".join(f"%{overlay.name}" for overlay in staged.values()), 4, animate=0)
+        except Exception as error:
+            if staged is None:
+                self._cancel_comparison()
+            else:
+                with display_updates(cmd):
+                    for overlay in staged.values():
+                        cmd.delete(overlay.name)
+                self.clear()
+                self._comparison_controls(True)
+            self.status.setText(f"Comparison skipped · {error}")
+            return
+        if self._pending_comparison is not None:
+            self._comparison_progress += 1
+            self.status.setText(
+                f"Preparing comparison · {self._comparison_progress}/{len(self._comparison_identities)}")
+            self._comparison_timer.start(8)
+            return
+        self.scene.timer.start()
+        self._comparison_controls(True)
         self.setWindowTitle("PymolPlugins · Compare mode")
         self._update_status()
 
@@ -227,6 +305,7 @@ class CompareStructuresDialog(QtWidgets.QDialog):
             cmd.enable(overlay.name)
 
     def _scene_changed(self, added, removed):
+        self._cancel_comparison()
         lost = [source for source, overlay in self.overlays.items()
                 if source in removed or overlay.name in removed]
         added = [name for name in added if name not in self.overlays or name in lost]
@@ -297,6 +376,7 @@ class CompareStructuresDialog(QtWidgets.QDialog):
         self.failures.clear()
 
     def clear(self):
+        self._cancel_comparison()
         self.scene.stop()
         with display_updates(cmd):
             self._clear_overlays()
@@ -324,27 +404,40 @@ def _stage_overlay(source, color, align):
     return Overlay(source, color, name)
 
 
-def _stage_comparison(sources, reference, method, mobile_filter, target_filter, align):
+def _stage_comparison_steps(sources, reference, method, mobile_filter, target_filter, align):
     staged, notes = {}, {}
     alignment = None
+    completed = False
+    ordered = [reference] + [source for source in sources if source != reference]
+    colors = {source: COLORS[index % len(COLORS)] for index, source in enumerate(sources)}
     try:
-        for index, source in enumerate(sources):
-            staged[source] = _stage_overlay(source, COLORS[index % len(COLORS)], align)
-        if align:
-            alignment = ComparisonAlignment(staged[reference].name, method, mobile_filter, target_filter)
-            for source, overlay in staged.items():
+        for source in ordered:
+            overlay = staged[source] = _stage_overlay(source, colors[source], align)
+            if align:
                 if source == reference:
-                    continue
-                try:
-                    notes[source] = alignment.apply(overlay)
-                except Exception as error:
-                    raise ValueError(f"{source} · {error}") from error
-                cmd.disable(overlay.name)
-    except Exception:
-        for overlay in staged.values():
-            cmd.delete(overlay.name)
-        raise
-    return staged, alignment, notes
+                    alignment = ComparisonAlignment(overlay.name, method, mobile_filter, target_filter)
+                else:
+                    try:
+                        notes[source] = alignment.apply(overlay)
+                    except Exception as error:
+                        raise ValueError(f"{source} · {error}") from error
+                    cmd.disable(overlay.name)
+            yield
+        completed = True
+        return {source: staged[source] for source in sources}, alignment, notes
+    finally:
+        if not completed:
+            for overlay in staged.values():
+                cmd.delete(overlay.name)
+
+
+def _stage_comparison(sources, reference, method, mobile_filter, target_filter, align):
+    steps = _stage_comparison_steps(sources, reference, method, mobile_filter, target_filter, align)
+    while True:
+        try:
+            next(steps)
+        except StopIteration as finished:
+            return finished.value
 
 
 def show_compare():
