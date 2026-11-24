@@ -43,6 +43,31 @@ class FocusLayer:
     ligand_surface: str = ""
     void_result: Optional["CavityRender"] = None
     _surface_cache: dict = field(default_factory=dict)
+    _visible_when_shown: Optional[set] = None
+
+    @property
+    def source_hidden(self):
+        return self._visible_when_shown is not None
+
+    def set_source_visible(self, api, visible):
+        if visible:
+            names, self._visible_when_shown = self._visible_when_shown, None
+            for name in names.intersection(api.get_names("objects")):
+                api.enable(name)
+        else:
+            self._visible_when_shown = set(self.names).intersection(api.get_names("objects", enabled_only=1))
+            for name in self._visible_when_shown:
+                api.disable(name)
+
+    def set_product_visible(self, api, name, visible):
+        if self.source_hidden:
+            if visible:
+                self._visible_when_shown.add(name)
+            else:
+                self._visible_when_shown.discard(name)
+            api.disable(name)
+        else:
+            (api.enable if visible else api.disable)(name)
 
     @property
     def copies(self):
@@ -54,7 +79,7 @@ class FocusLayer:
 
     def show_contacts(self, api, kinds):
         for kind, name in self.contact_layers.items():
-            (api.enable if kind in kinds else api.disable)(name)
+            self.set_product_visible(api, name, kind in kinds)
 
     def move_camera(self, api, camera):
         if camera == "center":
@@ -70,7 +95,7 @@ class FocusLayer:
         if enabled and self.ligand_selection:
             self._ensure_ligand_surface(api)
         if self.ligand_surface:
-            (api.enable if enabled else api.disable)(self.ligand_surface)
+            self.set_product_visible(api, self.ligand_surface, enabled)
 
     def _ensure_ligand_surface(self, api):
         if not self.ligand_surface:
@@ -84,7 +109,7 @@ class FocusLayer:
     def show_surface(self, api, enabled, radius, transparency, facing):
         if not enabled:
             if self.surface:
-                api.disable(self.surface)
+                self.set_product_visible(api, self.surface, False)
             return
         anchor = self.copies[0] if facing and self.ligand_selection else ""
         shape = (radius, bool(anchor))
@@ -104,8 +129,8 @@ class FocusLayer:
         elif not isclose(api.get_setting_float("transparency", name), transparency, abs_tol=1e-6):
             api.set("transparency", transparency, name)
         if self.surface and self.surface != name and self.surface in self.names:
-            api.disable(self.surface)
-        api.enable(name)
+            self.set_product_visible(api, self.surface, False)
+        self.set_product_visible(api, name, True)
         self.surface, self.surface_shape = name, shape
         self._surface_cache.pop(shape, None)
         self._surface_cache[shape] = name

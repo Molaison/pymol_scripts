@@ -233,17 +233,22 @@ class FocusPocket:
         self._refresh_layers()
 
     def _hide_unselected(self, layers):
-        names = set()
         for source, layer in self.displayed.items():
             if layers.get(source) is layer:
                 continue
             self.void_errors.pop(source, None)
-            names.update((layer.surface, layer.ligand_surface))
+            for name in (layer.surface, layer.ligand_surface):
+                if name:
+                    layer.set_product_visible(self.api, name, False)
             if layer.void_result is not None:
-                names.update(layer.void_result.objects.values())
-        if names:
-            for name in names.intersection(self.api.get_names("objects", enabled_only=1)):
-                self.api.disable(name)
+                for name in layer.void_result.objects.values():
+                    layer.set_product_visible(self.api, name, False)
+
+    def source_visibility_changed(self):
+        if self.request is not None and self.request.source_hidden:
+            self._cancel_voids()
+        self._next_void()
+        self._refresh_layers()
 
     def _draw_surfaces(self, layer):
         options = self.options
@@ -314,7 +319,7 @@ class FocusPocket:
         if layer.void_result is not None:
             for kind, name in layer.void_result.objects.items():
                 visible = self.visible["voids"] and self.void_layers[kind]
-                (self.api.enable if visible else self.api.disable)(name)
+                layer.set_product_visible(self.api, name, visible)
 
     @staticmethod
     def _void_status(rendered):

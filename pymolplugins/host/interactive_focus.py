@@ -214,13 +214,32 @@ class InteractiveFocus(Wizard):
             self.clear()
             self.cmd.select(self.capture, "none", enable=1, quiet=1)
         elif self.layers:
-            enabled = set(self.cmd.get_names("objects", enabled_only=1))
-            stale = [source for source in self.layers if source not in enabled]
-            if stale:
-                self._remove_layers(stale)
-                self.cmd.refresh_wizard()
+            self._sync_source_visibility()
             if self.layers and self._source_check_timer is None:
                 self._check_source_signatures()
+
+    def _sync_source_visibility(self):
+        objects = set(self.cmd.get_names("objects"))
+        enabled = set(self.cmd.get_names("objects", enabled_only=1))
+        stale = [source for source in self.layers if source not in objects]
+        changed = []
+        for source, layer in self.layers.items():
+            hidden = source not in enabled
+            if source not in objects or hidden == layer.source_hidden:
+                continue
+            if not hidden and molecule_signature(self.cmd, source) != layer.source_signature:
+                stale.append(source)
+            else:
+                changed.append((layer, not hidden))
+        if not stale and not changed:
+            return
+        with display_updates(self.cmd):
+            if stale:
+                self._remove_layers(stale)
+            for layer, visible in changed:
+                layer.set_source_visible(self.cmd, visible)
+        pocket_for(self).source_visibility_changed()
+        self.cmd.refresh_wizard()
 
     def do_view(self):
         timer = self._source_check_timer
@@ -241,9 +260,9 @@ class InteractiveFocus(Wizard):
     def _check_source_signatures(self):
         if self.closed or self.handling_pick or not self.layers:
             return
-        enabled = set(self.cmd.get_names("objects", enabled_only=1))
+        self._sync_source_visibility()
         stale = [source for source, layer in self.layers.items()
-                 if source not in enabled or molecule_signature(self.cmd, source) != layer.source_signature]
+                 if not layer.source_hidden and molecule_signature(self.cmd, source) != layer.source_signature]
         if stale:
             self._remove_layers(stale)
             self.cmd.refresh_wizard()
