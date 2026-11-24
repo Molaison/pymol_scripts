@@ -2829,14 +2829,9 @@ def _review_status_for_entry(entry_id: str, *, refresh: bool = True) -> str:
     )
 
 
-def _review_status_ids(status: str = REVIEW_STATUS_LATER) -> set:
-    if STATE.row_annotation_store is None:
-        return set()
-    return {
-        entry_id
-        for entry_id, values in STATE.row_annotation_store.snapshot().items()
-        if values.get(REVIEW_STATUS_LABEL) == status
-    }
+def _review_status_ids(status: str = REVIEW_STATUS_LATER) -> frozenset:
+    store = STATE.row_annotation_store
+    return store.unversioned_entries_with_value(REVIEW_STATUS_LABEL, status) if store is not None else frozenset()
 
 
 def _set_review_status(entry_ids: Sequence[str], status: str = "") -> None:
@@ -6038,6 +6033,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self._source_columns_explicit = False
         self._source_review_config = {}
         self._pending_navigation = None
+        self._later_count_cache = None
         self._filter_empty = False
         self._qt_shortcuts = None
         self._history_restore = None
@@ -8766,6 +8762,16 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                 item.setToolTip(text)
                 self.metadata_table.setItem(row, column, item)
 
+    def _visible_later_count(self, later_ids):
+        if not later_ids:
+            self._later_count_cache = None
+            return 0
+        cached = self._later_count_cache
+        if cached is None or cached[0] is not later_ids or cached[1] is not STATE.entries:
+            count = sum(entry.id in later_ids for entry in STATE.entries)
+            cached = self._later_count_cache = (later_ids, STATE.entries, count)
+        return cached[2]
+
     def _refresh_status(self) -> None:
         self._page_changed()
         busy = self._csv_task_kind in {"annotations", "annotation_undo"} or self._batch_is_busy()
@@ -8790,6 +8796,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.empty_view.setVisible(bool(STATE.all_entries) and not STATE.files)
         self.status_label.setText("")
         if not STATE.files:
+            self._later_count_cache = None
             self.position_label.setText("")
             self.current_title_label.setText("No matching candidates" if STATE.all_entries else "")
             self.goto_spin.setRange(1, 1)
@@ -8833,7 +8840,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         annotated = len(STATE.annotated_indices)
         total = len(STATE.files)
         later_ids = _review_status_ids()
-        later_count = sum(1 for candidate in STATE.entries if candidate.id in later_ids)
+        later_count = self._visible_later_count(later_ids)
         self.position_label.setText(
             f"{STATE.index + 1:,} / {total:,} · {annotated:,} reviewed"
             + (f" · {later_count:,} later" if later_count else "")

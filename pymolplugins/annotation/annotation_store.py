@@ -394,6 +394,7 @@ class RowAnnotationStore:
         self._history_by_seq: Dict[int, Dict[str, object]] = {}
         self._state: Dict[Tuple[str, str, str], str] = {}
         self._by_entry: Dict[str, Dict[Tuple[str, str], str]] = {}
+        self._unversioned_lookup = None
         self._reversible: Dict[int, Tuple[Tuple[str, str, str], object]] = {}
         self._batch_reversible = {}
         self._key_history = {}
@@ -599,6 +600,7 @@ class RowAnnotationStore:
         for (entry_id, label, version), value in state.items():
             by_entry.setdefault(entry_id, {})[(label, version)] = value
         self._by_entry = by_entry
+        self._unversioned_lookup = None
         self._reversible = reversible
         self._batch_reversible = batches
         self._key_history = key_history
@@ -740,11 +742,18 @@ class RowAnnotationStore:
         result["appended"] = True
         return result
 
+    def _invalidate_unversioned_lookup(self, key):
+        cached = self._unversioned_lookup
+        if cached is not None and key[1] == cached[0] and not key[2]:
+            self._unversioned_lookup = None
+
     def _set_state_unlocked(self, key: Tuple[str, str, str], value: str) -> None:
+        self._invalidate_unversioned_lookup(key)
         self._state[key] = value
         self._by_entry.setdefault(key[0], {})[key[1:]] = value
 
     def _remove_state_unlocked(self, key: Tuple[str, str, str]) -> None:
+        self._invalidate_unversioned_lookup(key)
         self._state.pop(key, None)
         labels = self._by_entry.get(key[0])
         if labels is None:
@@ -1005,6 +1014,20 @@ class RowAnnotationStore:
             if refresh:
                 self._refresh_if_changed_unlocked()
             return self._snapshot_unlocked()
+
+    def unversioned_entries_with_value(self, label, value, *, refresh=True):
+        """Return matching IDs, cached across candidates and unrelated quality writes."""
+        if self.versioned and label not in self._unversioned_labels:
+            raise AnnotationStoreError(f"Label is versioned: {label}")
+        with self._lock:
+            if refresh:
+                self._refresh_if_changed_unlocked()
+            cached = self._unversioned_lookup
+            if cached is None or cached[:2] != (label, value):
+                matches = frozenset(entry for (entry, name, version), current in self._state.items()
+                                    if name == label and not version and current == value)
+                cached = self._unversioned_lookup = (label, value, matches)
+            return cached[2]
 
     def snapshot_for_label(self, label: str, *, refresh: bool = True) -> Dict[str, str]:
         """Return ``{entry_id: value}`` for one label with one log refresh."""
