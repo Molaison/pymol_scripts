@@ -326,7 +326,7 @@ class FocusPocket:
 
     def _finish_void(self):
         layer, self.request = self.request, None
-        if self._is_current(layer) and layer.void_result is None:
+        if layer is not None and layer.void_result is None and self._is_current(layer):
             self.void_errors[layer.source] = self.void_status
         self.void_status = ""
         self._next_void()

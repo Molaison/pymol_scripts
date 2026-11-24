@@ -35,12 +35,12 @@ class CavityJobs:
         if self.cavity_job is None:
             return
         future, draw, title = self.cavity_job
+        if not future.done():
+            return
         if not self.is_current(self.identity):
             self.cancel_cavity()
             if self.on_finished is not None:
                 self.on_finished()
-            return
-        if not future.done():
             return
         self.cavity_timer.stop()
         self.cavity_job = None
