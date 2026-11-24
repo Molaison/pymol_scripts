@@ -8550,11 +8550,20 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                              runtime=_capture_csv_runtime_context(),
                              worker_arguments=dict(arguments, restore_saved=restore_saved, detect_table=detect_table))
 
+    def _navigation_index(self):
+        if self._pending_navigation is not None:
+            return self._pending_navigation[2]
+        if self._csv_task_kind == "steps":
+            job = _CSV_ASYNC_JOBS.get(self._csv_task_id)
+            if job is not None and job["dataset_generation"] == STATE.dataset_generation:
+                return job["target_index"]
+        return STATE.index
+
     def _next(self) -> None:
-        self._request_navigation(STATE.index + 1)
+        self._request_navigation(self._navigation_index() + 1)
 
     def _prev(self) -> None:
-        self._request_navigation(STATE.index - 1)
+        self._request_navigation(self._navigation_index() - 1)
 
     def _reload(self) -> None:
         self._sync_to_state()
