@@ -40,7 +40,7 @@ from pymolplugins.annotation.model import format_numeric_cell
 from pymolplugins.annotation.command_templates import format_commands
 from pymolplugins.annotation.review_file import (
     REVIEW_KEYS, bundle_table_name, bundle_view_config, check_review_unchanged, read_review_file, review_paths,
-    is_legacy_bundle_step, validate_review_columns, write_review_override,
+    is_legacy_bundle_step, recover_review_view, validate_review_columns, write_review_override,
 )
 from pymolplugins.annotation.path_formats import rewrite_path
 from pymolplugins.targets.commands import _execute_checked
@@ -3520,6 +3520,28 @@ class _PreparedCsvLoad:
     step_materialized: dict = field(default_factory=dict)
 
 
+def _load_csv_with_saved_view(source, review, *, saved_columns=(), cancel_event=None, progress=None):
+    try:
+        return source.load(cancel_event=cancel_event, progress=progress)
+    except CsvSourceError as exc:
+        requested = source.config.display_columns
+        if requested is None or not ("unknown display columns" in str(exc)
+                                     or "display_columns must not contain duplicates" in str(exc)):
+            raise
+        path = source.config.csv_path
+        header = read_csv_header(path if is_ssh_path(path) else _long_path(path),
+                                 encoding=source.config.encoding, delimiter=source.config.delimiter,
+                                 cancel_event=cancel_event)["columns"]
+        recovered = recover_review_view(review, path, header)
+        stale_override = (requested == tuple(review.config.get("display_columns", ()))
+                          and recovered.get("display_columns") != review.config.get("display_columns"))
+        if requested not in saved_columns and not stale_override:
+            raise
+        validate_review_columns(recovered, header)
+        fallback = replace(source.config, display_columns=recovered.get("display_columns"))
+        return CsvDatasetSource.from_config(fallback).load(cancel_event=cancel_event, progress=progress)
+
+
 def _prepare_csv_preview(
     csv_path: str,
     path_column: Optional[str] = None,
@@ -3555,10 +3577,10 @@ def _prepare_csv_preview(
         source_base=str(source_base or ""),
         label_column=label_column if label_column is not None else configured.get("label_column", ""),
     )
-    dataset = source.load(cancel_event=cancel_event, progress=(
+    dataset = _load_csv_with_saved_view(source, review, cancel_event=cancel_event, progress=(
         (lambda count: progress(f"Reading CSV: {count:,} rows")) if progress else None
     ))
-    validate_review_columns(configured, dataset.columns)
+    validate_review_columns(recover_review_view(review, canonical_csv, dataset.columns), dataset.columns)
     _check_csv_preparation_cancelled(cancel_event)
     profile = str(mapping_profile or DEFAULT_PROFILE_NAME)
     dataset = _resolve_csv_dataset(
@@ -3616,8 +3638,17 @@ def _prepare_csv_header(csv_path, encoding=DEFAULT_ENCODING, delimiter=AUTO_DELI
     header = read_csv_header(csv_path if is_ssh_path(csv_path) else _long_path(csv_path),
                              encoding=encoding, delimiter=delimiter, cancel_event=cancel_event)
     review = read_review_file(csv_path, cancel_event=cancel_event)
-    validate_review_columns(review.config, header["columns"])
-    header["review_config"] = review.config
+    columns = header["columns"]
+    review_config = recover_review_view(review, csv_path, columns)
+    validate_review_columns(review_config, columns)
+    saved_csv = (saved or {}).get("csv") or {}
+    stale_saved = any(name not in columns for name in saved_csv.get("display_columns") or ())
+    if stale_saved:
+        saved_csv.pop("display_columns", None)
+    header["display_columns_recovered"] = (
+        stale_saved or review_config.get("display_columns") != review.config.get("display_columns")
+    )
+    header["review_config"] = review_config
     header["saved_state"] = saved
     header["input_delimiter"] = delimiter
     _check_csv_preparation_cancelled(cancel_event)
@@ -3820,12 +3851,6 @@ def _prepare_csv_load(
         next_sort_column = str(config_override.get("sort_column", next_sort_column))
         next_sort_descending = bool(config_override.get("sort_descending", next_sort_descending))
 
-    if not resume_saved_view and (not same_active_csv or config_override is None):
-        next_filter = str(review.config.get("filter_text", next_filter))
-        next_sort_column = str(review.config.get("sort_column", next_sort_column))
-        next_sort_descending = bool(review.config.get("sort_descending", next_sort_descending))
-    next_filter = normalize_filter_query(next_filter, restore=True)
-
     _check_csv_preparation_cancelled(cancel_event)
     source = CsvDatasetSource(
         canonical_csv,
@@ -3837,49 +3862,28 @@ def _prepare_csv_load(
         source_base=effective_source_base,
         label_column=effective_label_column,
     )
-    try:
-        reusable = (reuse_preview is not None and reuse_preview.dataset is not None
-                    and reuse_preview.source_fingerprint == before
-                    and reuse_preview.dataset.path_column == effective_path_column
-                    and reuse_preview.dataset.id_column == effective_id_column
-                    and reuse_preview.dataset.label_column == effective_label_column
-                    and reuse_preview.review_signatures == review.signatures
-                    and tuple(reuse_preview.dataset.display_columns) == tuple(effective_display_columns or ()))
-        dataset = reuse_preview.dataset if reusable else source.load(
-            cancel_event=cancel_event,
-            progress=(lambda count: progress(f"Reading CSV: {count:,} rows")) if progress else None,
-        )
-    except CsvSourceError as exc:
-        stale_saved_columns = (
-            effective_display_columns is not None
-            and persisted is not None
-            and "display_columns" not in review.config
-            and (
-                display_columns is None
-                or effective_display_columns == saved_display_columns
-            )
-            and (
-                "unknown display columns" in str(exc)
-                or "display_columns" in str(exc)
-            )
-        )
-        if not stale_saved_columns:
-            raise
-        # Display columns are a recoverable view preference. Path/ID columns
-        # remain strict dataset contracts and still fail with their diagnostics.
-        effective_display_columns = None
-        source = CsvDatasetSource(
-            canonical_csv,
-            effective_path_column,
-            id_column=effective_id_column,
-            display_columns=None,
-            encoding=effective_encoding,
-            delimiter=effective_delimiter,
-            source_base=effective_source_base,
-            label_column=effective_label_column,
-        )
-        dataset = source.load(cancel_event=cancel_event)
-    validate_review_columns(review.config, dataset.columns)
+    reusable = (reuse_preview is not None and reuse_preview.dataset is not None
+                and reuse_preview.source_fingerprint == before
+                and reuse_preview.dataset.path_column == effective_path_column
+                and reuse_preview.dataset.id_column == effective_id_column
+                and reuse_preview.dataset.label_column == effective_label_column
+                and reuse_preview.review_signatures == review.signatures
+                and tuple(reuse_preview.dataset.display_columns) == tuple(effective_display_columns or ()))
+    saved_columns = [tuple(saved_display_columns)] if saved_display_columns is not None else []
+    if same_active_csv:
+        saved_columns.append(runtime.display_columns)
+    dataset = reuse_preview.dataset if reusable else _load_csv_with_saved_view(
+        source, review, saved_columns=saved_columns, cancel_event=cancel_event,
+        progress=(lambda count: progress(f"Reading CSV: {count:,} rows")) if progress else None,
+    )
+    review_config = recover_review_view(review, canonical_csv, dataset.columns)
+    validate_review_columns(review_config, dataset.columns)
+
+    if not resume_saved_view and (not same_active_csv or config_override is None):
+        next_filter = str(review_config.get("filter_text", next_filter))
+        next_sort_column = str(review_config.get("sort_column", next_sort_column))
+        next_sort_descending = bool(review_config.get("sort_descending", next_sort_descending))
+    next_filter = normalize_filter_query(next_filter, restore=True)
     _check_csv_preparation_cancelled(cancel_event)
     if progress:
         progress(f"Mapping {dataset.count:,} rows")
@@ -3975,33 +3979,33 @@ def _prepare_csv_load(
     )
     if config_override is not None and not resume_saved_view:
         persisted_config = _validate_persisted_config(dict(config_override))
-    if review.config:
+    if review_config:
         persisted_config = dict(persisted_config or {})
         if not same_active_csv and not persisted:
             persisted_config.setdefault("score_guidance", {})
         for name in ("step_cmd", "bucket_cmds", "steps"):
-            if name in review.config:
-                persisted_config[name] = copy.deepcopy(review.config[name])
-        if "display_columns" in review.config:
+            if name in review_config:
+                persisted_config[name] = copy.deepcopy(review_config[name])
+        if "display_columns" in review_config:
             persisted_config["display_columns_selected"] = True
     if review_options and not resume_saved_view:
         persisted_config = dict(persisted_config or {})
         for name in ("step_cmd", "bucket_cmds", "steps"):
             if name in review_options:
                 persisted_config[name] = copy.deepcopy(review_options[name])
-    reference_column = review.config.get("reference_column", (persisted_config or {}).get("reference_column", ""))
+    reference_column = review_config.get("reference_column", (persisted_config or {}).get("reference_column", ""))
     if reference_column and reference_column not in dataset.columns:
         raise ValueError(f"Unknown reference column: {reference_column}")
     persisted_config = dict(persisted_config or {})
     persisted_config["reference_column"] = reference_column
-    persisted_config["reference_track"] = review.config.get(
+    persisted_config["reference_track"] = review_config.get(
         "reference_track", persisted_config.get("reference_track", {}) if same_active_csv or persisted else {})
     step_cmd = persisted_config.get("step_cmd", runtime.config.get("step_cmd", ""))
     bundle_view = bundle_view_config(review, canonical_csv, step_cmd=step_cmd,
                                      dataset=dataset, selected=selected_entry)
     if bundle_view is not None and is_legacy_bundle_step(step_cmd):
         persisted_config["step_cmd"] = ""
-    persisted_config["steps"] = validate_steps(persisted_config.get("steps", []) if same_active_csv or persisted or "steps" in review.config else [],
+    persisted_config["steps"] = validate_steps(persisted_config.get("steps", []) if same_active_csv or persisted or "steps" in review_config else [],
         persisted_config.get("step_cmd", runtime.config.get("step_cmd", "")), dataset.columns)
     prepared_assets, prepared_cache = _prepare_step_assets(
         dataset, selected_entry, effective_steps(persisted_config["steps"], reference_column),
@@ -4012,7 +4016,7 @@ def _prepare_csv_load(
         runtime.step_materialized if same_active_csv else {}, cancel_event=cancel_event)
     from .filtering import validate_filter_presets
     persisted_config["filter_presets"] = validate_filter_presets(
-        review.config.get("filter_presets", persisted_config.get("filter_presets", []) if same_active_csv or persisted else []),
+        review_config.get("filter_presets", persisted_config.get("filter_presets", []) if same_active_csv or persisted else []),
         dataset.columns)
     label_name = str(
         (persisted_config or {}).get("label_name") or runtime.label_name or "quality"
@@ -7391,8 +7395,10 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         explicit = explicit or "display_columns" in self._source_review_config
         if not chosen and saved_columns and (explicit or len(saved_columns) < len(columns) - 1):
             chosen = [name for name in saved_columns if name in columns]
-        self.display_columns_edit.setText(json.dumps(chosen, ensure_ascii=False))
         self._source_columns_explicit = self._source_columns_explicit or explicit or bool(chosen)
+        if not self._source_columns_explicit and result.get("display_columns_recovered"):
+            chosen = [name for name in columns if name != path_column]
+        self.display_columns_edit.setText(json.dumps(chosen, ensure_ascii=False))
         self.source_base_edit.setText(self.source_base_edit.text() or _saved_csv_source_base(saved))
         self.stage_root_edit.setText(self.stage_root_edit.text() or str(source.get("stage_root") or ""))
         self.stage_alias_edit.setText(self.stage_alias_edit.text() or str(source.get("stage_alias") or ""))

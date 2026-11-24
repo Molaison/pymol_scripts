@@ -2779,6 +2779,13 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
                 )
                 writer.writerow([structure, "model", "0.95", "changed"])
 
+            header = self.module._prepare_csv_header(csv_path, prefer_saved=True)
+            self.assertNotIn("display_columns", header["review_config"])
+            self.assertNotIn("sort_column", header["review_config"])
+            self.assertNotIn("display_columns", header["saved_state"]["csv"])
+            preview = self.module._prepare_csv_preview(csv_path, id_column="id")
+            self.assertEqual(preview.dataset.display_columns, ("id", "new_score", "cohort"))
+
             restored = self.module.sa_load_csv(
                 csv_path,
                 "structure_path",
@@ -2795,6 +2802,9 @@ class StructureAnnotatorCoreTests(unittest.TestCase):
             self.assertEqual(self.module.STATE.sort_column, "")
             self.assertFalse(self.module.STATE.sort_descending)
             self.assertEqual(self.module.STATE.current_entry().metadata["id"], "model")
+            saved_override = self.module.read_review_file(csv_path).config
+            self.assertEqual(saved_override["display_columns"], ["id", "new_score", "cohort"])
+            self.assertEqual(saved_override["sort_column"], "")
             session_before = self._session_signature()
             self.assertIsNone(
                 self.module.sa_load_csv(

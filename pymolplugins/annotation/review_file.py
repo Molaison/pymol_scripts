@@ -195,6 +195,33 @@ def validate_review_config(raw, *, validate_order=True):
     return result
 
 
+def recover_review_view(review, table_path, columns):
+    """Discard obsolete display and sort preferences from saved override layers."""
+    available = set(columns)
+
+    def stale_display(config):
+        return any(name not in available for name in config.get("display_columns", ()))
+
+    def stale_sort(config):
+        return bool(config.get("sort_column")) and config["sort_column"] not in available
+
+    if not (stale_display(review.config) or stale_sort(review.config)):
+        return review.config
+
+    config = {}
+    for path, raw in review.layers:
+        layer = review_table_layer(path, raw, table_path)
+        if ntpath.basename(path) == "review.override.json":
+            layer = dict(layer)
+            if stale_display(layer):
+                layer.pop("display_columns")
+            if stale_sort(layer):
+                layer.pop("sort_column")
+                layer.pop("sort_descending", None)
+        config.update(layer)
+    return validate_review_config(config)
+
+
 def validate_review_columns(config, columns):
     """Reject stale named columns before any structures or commands are loaded."""
     selected = list(config.get("display_columns", []))
