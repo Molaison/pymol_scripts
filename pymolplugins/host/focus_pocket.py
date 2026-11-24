@@ -10,6 +10,7 @@ from pymolplugins.annotation.panel_style import apply_style
 from pymolplugins.annotation.view_controls import CavityControls
 from pymolplugins.annotation.view_jobs import CavityJobs
 from pymolplugins.annotation.compare_scene import molecule_signature
+from pymolplugins.core.pymol_display import display_updates
 
 from .workspace import _check_settings, window_settings
 
@@ -217,16 +218,17 @@ class FocusPocket:
             layers = dict(self.wizard_ref().layers)
         else:
             layers = {active.source: active} if active else {}
-        self._hide_unselected(layers)
-        self.displayed = layers
-        if self.request is not None and not self._is_current(self.request):
-            self._cancel_voids()
-        if not self.visible["voids"]:
-            self.void_errors.clear()
-        self.notes = []
-        for layer in layers.values():
-            self._draw_surfaces(layer)
-            self._show_void_layers(layer)
+        with display_updates(self.api):
+            self._hide_unselected(layers)
+            self.displayed = layers
+            if self.request is not None and not self._is_current(self.request):
+                self._cancel_voids()
+            if not self.visible["voids"]:
+                self.void_errors.clear()
+            self.notes = []
+            for layer in layers.values():
+                self._draw_surfaces(layer)
+                self._show_void_layers(layer)
         self._next_void()
         self._refresh_layers()
 
