@@ -84,6 +84,7 @@ class CompareStructuresDialog(QtWidgets.QDialog):
         self._comparison_identities = {}
         self._comparison_reference = ""
         self._comparison_was_active = False
+        self._comparison_refreshes_reference = False
         self._comparison_progress = 0
         self._comparison_timer = QtCore.QTimer(self)
         self._comparison_timer.setSingleShot(True)
@@ -205,30 +206,38 @@ class CompareStructuresDialog(QtWidgets.QDialog):
         self.objects.blockSignals(False)
 
     def apply(self, align):
-        self._cancel_comparison()
         sources = self.selected()
         if len(sources) < 2:
             return
         try:
             mobile = self.mobile_range.selection() if align else ""
             target = self.reference_range.selection() if align else ""
+        except Exception as error:
+            self.status.setText(f"Comparison skipped · {error}")
+            return
+        self._start_comparison(sources, self.reference.currentText(), self.method.currentData(),
+                               mobile, target, align)
+
+    def _start_comparison(self, sources, reference, method, mobile, target, align, *, refresh_reference=False):
+        self._cancel_comparison()
+        try:
             identities = {name: (molecule_identity(cmd, name), cmd.get_object_state(name)) for name in sources}
         except Exception as error:
             self.status.setText(f"Comparison skipped · {error}")
             return
         self._comparison_was_active = self.scene.active
+        self._comparison_refreshes_reference = refresh_reference
         self.scene.start()
         # The bulk transaction owns these objects until it commits. The watcher
         # resumes from its old snapshot so new loads are handled exactly once.
         self.scene.timer.stop()
         self.scene._scan = None
         self._comparison_identities = identities
-        self._comparison_reference = self.reference.currentText()
+        self._comparison_reference = reference
         self._comparison_progress = 0
-        self._pending_comparison = _stage_comparison_steps(
-            sources, self._comparison_reference, self.method.currentData(), mobile, target, align)
+        self._pending_comparison = _stage_comparison_steps(sources, reference, method, mobile, target, align)
         self._comparison_controls(False)
-        self.status.setText(f"Preparing comparison · 0/{len(sources)}")
+        self._show_comparison_progress()
         self._comparison_timer.start(_COMPARISON_YIELD_MS)
 
     def _comparison_controls(self, enabled):
@@ -291,7 +300,8 @@ class CompareStructuresDialog(QtWidgets.QDialog):
                     self.reference_source = self._comparison_reference
                     self.alignment, self.rmsds = alignment, notes
                     self._show_overlays(staged)
-                    cmd.zoom(" or ".join(f"%{overlay.name}" for overlay in staged.values()), 4, animate=0)
+                    if not self._comparison_refreshes_reference:
+                        cmd.zoom(" or ".join(f"%{overlay.name}" for overlay in staged.values()), 4, animate=0)
         except Exception as error:
             if staged is None:
                 self._cancel_comparison()
@@ -304,14 +314,17 @@ class CompareStructuresDialog(QtWidgets.QDialog):
             self.status.setText(f"Comparison skipped · {error}")
             return
         if self._pending_comparison is not None:
-            self.status.setText(
-                f"Preparing comparison · {self._comparison_progress}/{len(self._comparison_identities)}")
+            self._show_comparison_progress()
             self._comparison_timer.start(_COMPARISON_YIELD_MS)
             return
         self.scene.timer.start()
         self._comparison_controls(True)
         self.setWindowTitle("PymolPlugins · Compare mode")
         self._update_status()
+
+    def _show_comparison_progress(self):
+        action = "Updating reference" if self._comparison_refreshes_reference else "Preparing comparison"
+        self.status.setText(f"{action} · {self._comparison_progress}/{len(self._comparison_identities)}")
 
     def _show_overlays(self, overlays):
         if not overlays:
@@ -329,6 +342,17 @@ class CompareStructuresDialog(QtWidgets.QDialog):
                 if source in removed or overlay.name in removed]
         added = [name for name in added if name not in self.overlays or name in lost]
         if self.reference_source in lost:
+            current = set(loaded_molecules(cmd))
+            if self.reference_source in current:
+                sources = [name for name in dict.fromkeys([*self.overlays, *added]) if name in current]
+                alignment = self.alignment
+                self.refresh_objects()
+                self._start_comparison(sources, self.reference_source,
+                                       alignment.method if alignment else "",
+                                       alignment.mobile_filter if alignment else "",
+                                       alignment.target_filter if alignment else "",
+                                       alignment is not None, refresh_reference=True)
+                return
             self.clear()
             self.refresh_objects()
             self.status.setText("Reference removed · Returned to Default mode")
