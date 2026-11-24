@@ -100,7 +100,7 @@ class CompareStructuresDialog(QtWidgets.QDialog):
         row.addWidget(QtWidgets.QLabel("Loaded objects"))
         row.addStretch(1)
         refresh = QtWidgets.QPushButton("Refresh")
-        refresh.clicked.connect(self.refresh_objects)
+        refresh.clicked.connect(lambda: self.refresh_objects())
         self.refresh_button = refresh
         row.addWidget(refresh)
         layout.addLayout(row)
@@ -135,6 +135,11 @@ class CompareStructuresDialog(QtWidgets.QDialog):
         self.status.setTextFormat(QtCore.Qt.PlainText)
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
+        self.pending_settings = QtWidgets.QLabel("Settings changed · Click Overlay or Align to apply.")
+        self.pending_settings.setProperty("role", "muted")
+        self.pending_settings.setWordWrap(True)
+        self.pending_settings.hide()
+        layout.addWidget(self.pending_settings)
         actions = QtWidgets.QHBoxLayout()
         self.clear_button = QtWidgets.QPushButton("Return to Default mode")
         self.overlay_button = QtWidgets.QPushButton("Overlay")
@@ -150,14 +155,20 @@ class CompareStructuresDialog(QtWidgets.QDialog):
         layout.addLayout(actions)
         self.objects.itemChanged.connect(self._selection_changed)
         self.reference.currentIndexChanged.connect(self._update_ranges)
+        self.method.currentIndexChanged.connect(self._update_pending_settings)
+        for scope in (self.mobile_range, self.reference_range):
+            scope.atoms.currentIndexChanged.connect(self._update_pending_settings)
+            scope.chain.currentIndexChanged.connect(self._update_pending_settings)
+            scope.residues.textChanged.connect(self._update_pending_settings)
         apply_style(self, "compareStructures")
 
     def selected(self):
         return [self.objects.item(i).text() for i in range(self.objects.count())
                 if self.objects.item(i).checkState() == QtCore.Qt.Checked]
 
-    def refresh_objects(self):
-        previous = set(self.selected()) | set(self.overlays)
+    def refresh_objects(self, *, new_overlays=()):
+        known = {self.objects.item(i).text() for i in range(self.objects.count())}
+        previous = set(self.selected()) | (set(new_overlays) - known)
         self.objects.blockSignals(True)
         self.objects.clear()
         for name in loaded_molecules(cmd):
@@ -191,6 +202,20 @@ class CompareStructuresDialog(QtWidgets.QDialog):
                    if name != reference and name in existing]
         self.mobile_range.set_chains(set.intersection(*mobiles) if mobiles else ())
         self.reference_range.set_chains(cmd.get_chains(f"%{reference}") if reference in existing else ())
+        self._update_pending_settings()
+
+    def _update_pending_settings(self):
+        changed = False
+        if self.overlays and self._pending_comparison is None:
+            changed = set(self.selected()) != set(self.overlays) or self.reference.currentText() != self.reference_source
+            if not changed and self.alignment:
+                try:
+                    changed = (self.method.currentData() != self.alignment.method
+                               or self.mobile_range.selection() != self.alignment.mobile_filter
+                               or self.reference_range.selection() != self.alignment.target_filter)
+                except ValueError:
+                    changed = True
+        self.pending_settings.setVisible(changed)
 
     def _decorate(self):
         self.objects.blockSignals(True)
@@ -237,6 +262,7 @@ class CompareStructuresDialog(QtWidgets.QDialog):
         self._comparison_progress = 0
         self._pending_comparison = _stage_comparison_steps(sources, reference, method, mobile, target, align)
         self._comparison_controls(False)
+        self._update_pending_settings()
         self._show_comparison_progress()
         self._comparison_timer.start(_COMPARISON_YIELD_MS)
 
@@ -262,6 +288,7 @@ class CompareStructuresDialog(QtWidgets.QDialog):
         else:
             self.scene.stop()
         self._comparison_controls(True)
+        self._update_pending_settings()
 
     def _stage_comparison_slice(self, total):
         deadline = perf_counter() + _COMPARISON_SLICE_SECONDS
@@ -346,7 +373,7 @@ class CompareStructuresDialog(QtWidgets.QDialog):
             if self.reference_source in current:
                 sources = [name for name in dict.fromkeys([*self.overlays, *added]) if name in current]
                 alignment = self.alignment
-                self.refresh_objects()
+                self.refresh_objects(new_overlays=added)
                 self._start_comparison(sources, self.reference_source,
                                        alignment.method if alignment else "",
                                        alignment.mobile_filter if alignment else "",
@@ -366,7 +393,7 @@ class CompareStructuresDialog(QtWidgets.QDialog):
             for source in lost:
                 self._remove_overlay(source)
             self._add_overlays(added)
-        self.refresh_objects()
+        self.refresh_objects(new_overlays=added)
         self._update_status()
 
     def _add_overlays(self, sources):
@@ -404,6 +431,7 @@ class CompareStructuresDialog(QtWidgets.QDialog):
         details.extend(f"{source} · {error}" for source, error in self.failures.items())
         self.status.setToolTip("\n".join(details))
         self._decorate()
+        self._update_pending_settings()
         self.clear_button.setEnabled(True)
 
     def _remove_overlay(self, source):
@@ -428,6 +456,7 @@ class CompareStructuresDialog(QtWidgets.QDialog):
         self.status.setText("Check at least two objects.")
         self.status.setToolTip("")
         self._decorate()
+        self._update_pending_settings()
         self.clear_button.setEnabled(False)
 
 
