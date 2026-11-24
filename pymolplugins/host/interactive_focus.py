@@ -9,6 +9,7 @@ from pymol.wizard import Wizard
 from pymolplugins.annotation.compare_scene import molecule_signature
 from pymolplugins.core.pymol_display import display_updates
 
+from .focus_input import FocusClickInput
 from .focus_pocket import close_pocket, pocket_for
 from .focus_view import RADIUS, draw_focus, focus_identity, picked_source
 from .workspace import _check_settings, window_settings
@@ -17,6 +18,7 @@ from .workspace import _check_settings, window_settings
 _CAMERAS = {"keep": "Keep view", "center": "Center smoothly", "frame": "Frame pocket"}
 _SCOPES = {"scene": "Whole scene", "object": "Per object"}
 _SCOPE_SETTING = "interactive_focus/scope"
+_CLICK_SETTING = "interactive_focus/quick_click"
 _SOURCE_CHECK_INTERVAL_MS = 400
 _CONTACT_LEVELS = {
     "off": ("Off", ()),
@@ -32,6 +34,8 @@ class InteractiveFocus(Wizard):
         self.layers = {}
         saved_scope = window_settings().value(_SCOPE_SETTING, "scene", type=str)
         self.scope = saved_scope if saved_scope in _SCOPES else "scene"
+        self.quick_click = window_settings().value(_CLICK_SETTING, False, type=bool)
+        self._click_input = None
         self.camera = self.session.get("camera", "keep")
         self.contacts = self.session.get("contacts", "interface")
         self.error = ""
@@ -52,6 +56,7 @@ class InteractiveFocus(Wizard):
     def __getstate__(self):
         state = super().__getstate__()
         state.pop("_source_check_timer", None)
+        state.pop("_click_input", None)
         return state
 
     @property
@@ -62,6 +67,7 @@ class InteractiveFocus(Wizard):
         for name, (_, value) in self.settings.items():
             self.cmd.set(name, value)
         self.cmd.select(self.capture, "none", enable=1, quiet=1)
+        self._update_click_input()
 
     def get_event_mask(self):
         return (Wizard.event_mask_select | Wizard.event_mask_pick |
@@ -75,6 +81,7 @@ class InteractiveFocus(Wizard):
             [1, f"Interactive focus ({RADIUS:g} A)", ""],
             [3, f"Scope: {_SCOPES[self.scope]}", "scope"],
             [3, f"Camera: {_CAMERAS[self.camera]}", "camera"],
+            [3, f"Clicks: {'Quick' if self._click_input else 'Native'}", "clicks"],
             [3, f"Contacts: {_CONTACT_LEVELS[self.contacts][0]}", "contacts"],
             [3, "Pocket options", "pocket"],
             *clear,
@@ -86,6 +93,10 @@ class InteractiveFocus(Wizard):
             return [[2, "Focus scope", ""]] + [
                 [1, label, f"cmd.get_wizard().set_scope({key!r})"] for key, label in _SCOPES.items()
             ]
+        if tag == "clicks":
+            return [[2, "Focus clicks", ""],
+                    [1, "Native mouse actions", "cmd.get_wizard().set_quick_click(False)"],
+                    [1, "Quick click (double-click acts once)", "cmd.get_wizard().set_quick_click(True)"]]
         if tag == "pocket":
             return pocket_for(self).menu()
         if tag == "camera":
@@ -121,6 +132,22 @@ class InteractiveFocus(Wizard):
         if pocket.cavity_note:
             prompt.append(pocket.cavity_note)
         return prompt
+
+    def _update_click_input(self):
+        if self._click_input is not None:
+            self._click_input.close()
+            self._click_input = None
+        if self.quick_click and not self.closed:
+            self._click_input = FocusClickInput.attach(self)
+
+    def set_quick_click(self, enabled):
+        self.quick_click = enabled
+        self._update_click_input()
+        settings = window_settings()
+        settings.setValue(_CLICK_SETTING, enabled)
+        settings.sync()
+        _check_settings(settings)
+        self.cmd.refresh_wizard()
 
     def set_camera(self, mode):
         self.camera = self.session["camera"] = mode
@@ -286,6 +313,7 @@ class InteractiveFocus(Wizard):
         from .toolbar import set_focus_active
         set_focus_active(False)
         self.closed = True
+        self._update_click_input()
         self.clear()
         close_pocket(self)
         self.cmd.delete(self.capture)
