@@ -5383,6 +5383,7 @@ if _HAS_QT_ASYNC:
         completed = QtCore.Signal(str, object, object)
         progress = QtCore.Signal(str, str)
         materialization_progress = QtCore.Signal(int, str, str)
+        navigation_ready = QtCore.Signal(object, object)
 
         def __init__(self):
             super().__init__()
@@ -5394,6 +5395,7 @@ if _HAS_QT_ASYNC:
             self.completed.connect(self._dispatch, queued)
             self.progress.connect(self._progress, queued)
             self.materialization_progress.connect(self._materialization_progress, queued)
+            self.navigation_ready.connect(self._navigation_ready, queued)
 
         @staticmethod
         def _on_main_thread():
@@ -5412,6 +5414,16 @@ if _HAS_QT_ASYNC:
                 panel._last_ssh_progress_message = message
                 panel._last_ssh_progress_on_main_thread = self._on_main_thread()
                 panel.status_label.setText(message)
+
+        @QtCore.Slot(object, object)
+        def _navigation_ready(self, record, future):
+            panel = _panel
+            if (panel is None or panel._closed or panel._pending_navigation != record
+                    or not _preload_queue or _preload_queue[0] != record):
+                return
+            if future is not None and _materialization_futures.get(record[:2]) is not future:
+                return
+            _process_preload_tick()
 
         @QtCore.Slot(int, str, str)
         def _materialization_progress(self, generation, entry_id, message):
@@ -7149,11 +7161,15 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             return
         self._pending_navigation = record
         _preload_queue = [record] + [value for value in _preload_queue if value != record]
-        _materialize_index(index, allow_background=True, trust_cached=True)
+        cached = _materialize_index(index, allow_background=True, trust_cached=True)
         self._source_mode_changed()
         self.status_label.setText(f"Preparing structure {index + 1}: {entry.display_name}…")
         self.review.refresh()
-        _schedule_preload_tick()
+        wake = _csv_async_bridge().navigation_ready.emit
+        if cached is not None:
+            wake(record, None)
+        else:
+            _materialization_futures[record[:2]].add_done_callback(lambda future: wake(record, future))
 
     def _finish_navigation(self, record):
         if self._pending_navigation != record:
