@@ -6,18 +6,20 @@ import shlex
 import tempfile
 import uuid
 
+from pymolplugins.core.pymol_display import display_updates
 from pymolplugins.core.pymol_groups import direct_children, group_parent_snapshot, is_group
 
 
 def delete_owned(api, names):
     """Deleting a PyMOL group is recursive: detach borrowed members first."""
-    existing = set(api.get_names("objects"))
-    names = set(names) & existing
-    for name in names:
-        if is_group(api, name):
-            api.group(name, action="empty")
-    for name in names:
-        api.delete(name)
+    with display_updates(api):
+        existing = set(api.get_names("objects"))
+        names = set(names) & existing
+        for name in names:
+            if is_group(api, name):
+                api.group(name, action="empty")
+        for name in names:
+            api.delete(name)
 
 
 def group_parents(api):
@@ -94,16 +96,17 @@ class CandidateBundles:
         self.groups, self.products = groups, products
 
     def attach(self, api, candidate, created=()):
-        if candidate not in self.groups:
-            self.groups[candidate] = "sa_bundle_" + uuid.uuid4().hex[:12]
-            api.group(self.groups[candidate], candidate)
-            for name in self.products.get(candidate, ()):
+        with display_updates(api):
+            if candidate not in self.groups:
+                self.groups[candidate] = "sa_bundle_" + uuid.uuid4().hex[:12]
+                api.group(self.groups[candidate], candidate)
+                for name in self.products.get(candidate, ()):
+                    api.group(self.groups[candidate], name)
+            members = set(created)
+            self.products.setdefault(candidate, set()).update(members)
+            # Existing user objects and fixed references never enter this set.
+            for name in members:
                 api.group(self.groups[candidate], name)
-        members = set(created)
-        self.products.setdefault(candidate, set()).update(members)
-        # Existing user objects and fixed references never enter this set.
-        for name in members:
-            api.group(self.groups[candidate], name)
 
     def show(self, api, candidate, existing):
         for owner, group in self.groups.items():
