@@ -5,21 +5,24 @@ from concurrent.futures import ThreadPoolExecutor
 
 from pymol.Qt import QtCore
 
+class _CavityCompletion(QtCore.QObject):
+    ready = QtCore.Signal(object)
+
+
 class CavityJobs:
     def __init__(self, parent, is_current, status, *, on_finished=None):
         self.is_current, self._cavity_status = is_current, status
         self.on_finished = on_finished
         self.cavity_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pymol-cavity")
-        self.cavity_timer = QtCore.QTimer(parent)
-        self.cavity_timer.setInterval(75)
-        self.cavity_timer.timeout.connect(self._advance_cavity)
+        self._cavity_completion = _CavityCompletion(parent)
+        connection = getattr(QtCore.Qt, "ConnectionType", QtCore.Qt)
+        self._cavity_completion.ready.connect(self._advance_cavity, connection.QueuedConnection)
         self.cavity_job = None
 
     def cancel_cavity(self):
-        self.cavity_timer.stop()
-        if self.cavity_job is not None:
-            self.cavity_job[0].cancel()
-            self.cavity_job = None
+        job, self.cavity_job = self.cavity_job, None
+        if job is not None:
+            job[0].cancel()
 
     def close_cavity(self):
         self.cancel_cavity()
@@ -27,23 +30,27 @@ class CavityJobs:
 
     def start_cavity(self, title, compute, draw):
         self.cancel_cavity()
-        self.cavity_job = (self.cavity_pool.submit(compute), draw, title)
-        self.cavity_timer.start()
+        future = self.cavity_pool.submit(compute)
+        self.cavity_job = (future, draw, title)
+        future.add_done_callback(self._notify_cavity_ready)
         self._cavity_status(f"{title} · calculating…")
 
-    def _advance_cavity(self):
-        if self.cavity_job is None:
+    def _notify_cavity_ready(self, future):
+        try:
+            self._cavity_completion.ready.emit(future)
+        except RuntimeError:
+            # The parent Qt widget can close before a running worker finishes.
+            pass
+
+    def _advance_cavity(self, future):
+        if self.cavity_job is None or future is not self.cavity_job[0]:
             return
-        future, draw, title = self.cavity_job
-        if not future.done():
-            return
+        _, draw, title = self.cavity_job
+        self.cavity_job = None
         if not self.is_current(self.identity):
-            self.cancel_cavity()
             if self.on_finished is not None:
                 self.on_finished()
             return
-        self.cavity_timer.stop()
-        self.cavity_job = None
         try:
             self._cavity_status(*draw(future.result()))
         except Exception as exc:
