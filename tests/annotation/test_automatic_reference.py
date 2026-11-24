@@ -193,7 +193,10 @@ class OrderedReviewStepsTests(unittest.TestCase):
         panel._qt_shortcuts = None
         panel.error_label = mock.Mock()
         panel.status_label = mock.Mock()
-        panel.comparison = SimpleNamespace(close_pocket=mock.Mock())
+        panel.comparison = SimpleNamespace(
+            close_pocket=mock.Mock(), pocket=SimpleNamespace(track=SimpleNamespace(active=False)),
+        )
+        panel._start_candidate_views = mock.Mock()
         panel.review = SimpleNamespace(selection=SimpleNamespace(
             clear=mock.Mock(), select_entry=mock.Mock()
         ))

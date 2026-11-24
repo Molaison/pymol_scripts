@@ -1650,6 +1650,10 @@ def _verify_current_object_enabled(*, check_parents=False) -> bool:
 
 
 def _current_candidate_is_displayed() -> bool:
+    if _has_review_steps():
+        definitions = {step["name"]: step for step in _configured_steps() if step["type"] == "object"}
+        if definitions != _review_objects.definitions:
+            return False
     if _panel is not None and _panel.compare_bar.pocket_mode:
         # Pocket changes can hide the original object while showing its overlay.
         return _object_exists(STATE.current_object)
