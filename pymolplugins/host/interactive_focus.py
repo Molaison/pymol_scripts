@@ -4,6 +4,7 @@ from traceback import print_exc
 from uuid import uuid4
 
 from pymol import cmd
+from pymol.Qt import QtCore
 from pymol.wizard import Wizard
 from pymolplugins.annotation.compare_scene import molecule_signature
 
@@ -15,6 +16,7 @@ from .workspace import _check_settings, window_settings
 _CAMERAS = {"keep": "Keep view", "center": "Center smoothly", "frame": "Frame pocket"}
 _SCOPES = {"scene": "Whole scene", "object": "Per object"}
 _SCOPE_SETTING = "interactive_focus/scope"
+_SOURCE_CHECK_INTERVAL_MS = 400
 _CONTACT_LEVELS = {
     "off": ("Off", ()),
     "polar": ("Polar", ("polar_contacts", "buried_unsatisfied_polar")),
@@ -34,6 +36,7 @@ class InteractiveFocus(Wizard):
         self.error = ""
         self.closed = False
         self.handling_pick = False
+        self._source_check_timer = None
         self.prefix = f"_pp_focus_{uuid4().hex[:8]}"
         self.capture = f"{self.prefix}_pick"
         self.enabled_selections = tuple(api.get_names("selections", enabled_only=1))
@@ -44,6 +47,11 @@ class InteractiveFocus(Wizard):
                 ("auto_show_selections", 1),
             )
         }
+
+    def __getstate__(self):
+        state = super().__getstate__()
+        state.pop("_source_check_timer", None)
+        return state
 
     @property
     def layer(self):
@@ -56,7 +64,7 @@ class InteractiveFocus(Wizard):
 
     def get_event_mask(self):
         return (Wizard.event_mask_select | Wizard.event_mask_pick |
-                Wizard.event_mask_dirty | Wizard.event_mask_state)
+                Wizard.event_mask_dirty | Wizard.event_mask_state | Wizard.event_mask_view)
 
     def get_panel(self):
         clear = [[2, "Clear focus", "cmd.get_wizard().clear_active()"]]
@@ -177,11 +185,38 @@ class InteractiveFocus(Wizard):
             self.cmd.select(self.capture, "none", enable=1, quiet=1)
         elif self.layers:
             enabled = set(self.cmd.get_names("objects", enabled_only=1))
-            stale = [source for source, layer in self.layers.items()
-                     if source not in enabled or molecule_signature(self.cmd, source) != layer.source_signature]
+            stale = [source for source in self.layers if source not in enabled]
             if stale:
                 self._remove_layers(stale)
                 self.cmd.refresh_wizard()
+            if self.layers and self._source_check_timer is None:
+                self._check_source_signatures()
+
+    def do_view(self):
+        timer = self._source_check_timer
+        if timer is not None and timer.isActive():
+            timer.start()
+
+    def _watch_sources(self):
+        if self._source_check_timer is None:
+            if QtCore.QCoreApplication.instance() is None:
+                return
+            # Native edits such as alter_state can bypass the wizard's dirty event.
+            timer = self._source_check_timer = QtCore.QTimer()
+            timer.setInterval(_SOURCE_CHECK_INTERVAL_MS)
+            timer.timeout.connect(self._check_source_signatures)
+        if not self._source_check_timer.isActive():
+            self._source_check_timer.start()
+
+    def _check_source_signatures(self):
+        if self.closed or self.handling_pick or not self.layers:
+            return
+        enabled = set(self.cmd.get_names("objects", enabled_only=1))
+        stale = [source for source, layer in self.layers.items()
+                 if source not in enabled or molecule_signature(self.cmd, source) != layer.source_signature]
+        if stale:
+            self._remove_layers(stale)
+            self.cmd.refresh_wizard()
 
     def do_state(self, _state):
         if self.closed or self.handling_pick or not self.layers:
@@ -211,6 +246,7 @@ class InteractiveFocus(Wizard):
                 else:
                     replaced = (self.layers.pop(source),) if previous else ()
                 self.layers[source] = layer
+                self._watch_sources()
                 for old in replaced:
                     old.delete(self.cmd)
                 layer.show_contacts(self.cmd, _CONTACT_LEVELS[self.contacts][1])
@@ -224,6 +260,8 @@ class InteractiveFocus(Wizard):
 
     def _remove_layers(self, sources):
         removed = [self.layers.pop(source) for source in sources]
+        if not self.layers and self._source_check_timer is not None:
+            self._source_check_timer.stop()
         for layer in removed:
             layer.delete(self.cmd)
         pocket_for(self).update()
