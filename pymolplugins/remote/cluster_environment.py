@@ -9,6 +9,11 @@ import sys
 import tempfile
 
 
+FOLDSEEK_COMPLEX_HELP_TOKENS = (
+    "--multimer-tm-threshold", "--chain-tm-threshold", "--interface-lddt-threshold",
+    "--min-aligned-chains", "--min-assigned-chains-ratio", "--multimer-report-mode")
+
+
 def root():
     return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "pymolplugins" / "clustering"
 
@@ -56,13 +61,26 @@ def _probe(command, env):
     return output.decode("utf-8", "replace").strip()
 
 
+def _supports_complex(executable, env):
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    try:
+        result = subprocess.run([executable, "easy-multimercluster", "-h"],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
+                                creationflags=flags, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    detail = result.stdout + result.stderr
+    return all(option.encode("ascii") in detail for option in FOLDSEEK_COMPLEX_HELP_TOKENS)
+
+
 def discover(method, need_file, *, private=None, default_python=None):
     """Select runnable tools from existing environments before considering install."""
     home = Path.home()
     private = Path(private) if private is not None else root()
     prefixes = tuple(dict.fromkeys(_prefixes())) + (private / "environment",)
     common = [home / ".local/bin", home / "bin"]
-    tools = {"sequence": ("mmseqs",), "structure": ("foldseek",), "both": ("mmseqs", "foldseek")}[method]
+    tools = {"sequence": ("mmseqs",), "structure": ("foldseek",), "both": ("mmseqs", "foldseek"),
+             "complex": ("foldseek",)}[method]
     env = os.environ.copy()
     exe = ".exe" if os.name == "nt" else ""
     for name in tools:
@@ -78,7 +96,7 @@ def discover(method, need_file, *, private=None, default_python=None):
             if not os.path.isfile(candidate) or not os.access(candidate, os.X_OK):
                 continue
             trial = dict(env, PATH=str(Path(candidate).parent) + os.pathsep + env.get("PATH", ""))
-            if _probe([candidate, "version"], trial):
+            if _probe([candidate, "version"], trial) and (method != "complex" or _supports_complex(candidate, trial)):
                 env = trial
                 env[key] = candidate
                 break

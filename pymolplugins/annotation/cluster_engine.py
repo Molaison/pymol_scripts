@@ -1,5 +1,5 @@
 
-"""Cluster one protein chain per candidate with MMseqs2 or Foldseek."""
+"""Cluster one protein chain or a whole protein complex per candidate."""
 import gzip
 import json
 import os
@@ -23,14 +23,43 @@ def _tool(name):
 
 
 def required_tools(method):
-    return {"sequence": ("mmseqs",), "structure": ("foldseek",), "both": ("mmseqs", "foldseek")}[method]
+    return {"sequence": ("mmseqs",), "structure": ("foldseek",), "both": ("mmseqs", "foldseek"),
+            "complex": ("foldseek",)}[method]
+
+
+FOLDSEEK_COMPLEX_HELP_TOKENS = (
+    "--multimer-tm-threshold", "--chain-tm-threshold", "--interface-lddt-threshold",
+    "--min-aligned-chains", "--min-assigned-chains-ratio", "--multimer-report-mode")
+
+
+def _validate_foldseek_complex(executable):
+    """Require the native multimer command and its clustering options."""
+    result = subprocess.run([executable, "easy-multimercluster", "-h"],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            universal_newlines=True, timeout=15,
+                            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+    detail = result.stdout + result.stderr
+    missing = [option for option in FOLDSEEK_COMPLEX_HELP_TOKENS if option not in detail]
+    if missing:
+        raise RuntimeError("Foldseek does not provide the required easy-multimercluster interface: "
+                           + ", ".join(missing))
+
+
+def _versioned_tools(method):
+    tools = {name: _tool(name) for name in required_tools(method)}
+    if method == "complex":
+        _validate_foldseek_complex(tools["foldseek"][0])
+    return tools
 
 
 def check_dependencies(method, need_file):
     available, missing = {}, []
     for name in required_tools(method):
         try:
-            available[name] = _tool(name)[1]
+            executable, version = _tool(name)
+            if name == "foldseek" and method == "complex":
+                _validate_foldseek_complex(executable)
+            available[name] = version
         except (OSError, RuntimeError, subprocess.SubprocessError):
             missing.append(name)
     if need_file:
@@ -64,7 +93,7 @@ def _read_model(path, gemmi):
     return gemmi.read_structure(str(path))
 
 
-def _protein_chain(path, selected, gemmi):
+def _protein_chains(path, gemmi):
     structure = _read_model(path, gemmi)
     if not len(structure):
         raise ValueError("No coordinate model")
@@ -78,6 +107,11 @@ def _protein_chain(path, selected, gemmi):
                 residues.append((residue, letter if re.fullmatch("[A-Z]", letter) else "X"))
         if residues:
             chains.setdefault(chain.name, []).extend(residues)
+    return chains
+
+
+def _protein_chain(path, selected, gemmi):
+    chains = _protein_chains(path, gemmi)
     if selected:
         if selected not in chains:
             raise ValueError(f"Protein chain {selected!r} absent; available: {', '.join(chains) or 'none'}")
@@ -111,6 +145,42 @@ def _write_chain(path, residues, gemmi):
     return "".join(letters)
 
 
+def _write_complex(path, chains, gemmi):
+    """Copy every protein chain while normalizing residue indices, not coordinates."""
+    if len(chains) < 2:
+        raise ValueError("Protein complex clustering needs at least two protein chains; available: "
+                         + (", ".join(chains) or "none"))
+    preserved = {name for name in chains if re.fullmatch("[A-Za-z0-9]", name)}
+    used = set(preserved)
+    next_generated = 0
+    structure = gemmi.Structure()
+    model = gemmi.Model(1)
+    for source_name, residues in chains.items():
+        chain_name = source_name
+        if source_name not in preserved:
+            while f"c{next_generated:03d}" in used:
+                next_generated += 1
+            chain_name = f"c{next_generated:03d}"
+            next_generated += 1
+            used.add(chain_name)
+        chain = gemmi.Chain(chain_name)
+        seen = set()
+        for residue, _letter in residues:
+            key = str(residue.seqid)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized = residue.clone()
+            normalized.seqid = gemmi.SeqId(len(seen), " ")
+            normalized.het_flag = "A"
+            chain.add_residue(normalized)
+        if seen:
+            model.add_chain(chain)
+    structure.add_model(model)
+    structure.remove_alternative_conformations()
+    structure.make_mmcif_document().write_file(str(path))
+
+
 def _sequence(record):
     value = record.get("sequence")
     sequence = "".join(str(value or "").split()).upper().rstrip("*")
@@ -120,8 +190,10 @@ def _sequence(record):
 
 
 def _prepare(request, root, check_cancel):
-    structures = request["method"] != "sequence"
-    sequences = request["method"] != "structure"
+    method = request["method"]
+    structures = method in {"structure", "both", "complex"}
+    sequences = method in {"sequence", "both"}
+    multimer = method == "complex"
     records = request["records"]
     if structures or any("sequence" not in record for record in records):
         try:
@@ -136,14 +208,23 @@ def _prepare(request, root, check_cancel):
             check_cancel()
             row_id = record["id"]
             name = f"m{index:08d}"
-            path = models / f"{name}.pdb"
+            path = models / (f"{name}.cif" if multimer else f"{name}.pdb")
             try:
-                residues = _protein_chain(record["path"], request["chain"], gemmi) if structures or "sequence" not in record else []
+                if multimer:
+                    chains = _protein_chains(record["path"], gemmi)
+                    residues = []
+                else:
+                    chains = None
+                    residues = (_protein_chain(record["path"], request["chain"], gemmi)
+                                if structures or "sequence" not in record else [])
                 if sequences and "sequence" in record:
                     sequence = _sequence(record)
                 else:
                     sequence = ""
-                if structures:
+                if multimer:
+                    _write_complex(path, chains, gemmi)
+                    derived = ""
+                elif structures:
                     derived = _write_chain(path, residues, gemmi)
                 else:
                     derived = "".join(letter for _, letter in residues)
@@ -241,7 +322,8 @@ def _cluster_sequences(executable, request, root, coverage, check_cancel):
 
 def run_cluster(request, check_cancel=lambda: None):
     """Return stable row assignments, skipped input reasons, and engine versions."""
-    tools = {name: _tool(name) for name in required_tools(request["method"])}
+    method = request["method"]
+    tools = _versioned_tools(method)
     with tempfile.TemporaryDirectory(prefix="pymol_clustering_") as work:
         root = Path(work)
         names, skipped = _prepare(request, root, check_cancel)
@@ -251,10 +333,20 @@ def run_cluster(request, check_cancel=lambda: None):
             _cluster_sequences(tools["mmseqs"][0], request, root, coverage, check_cancel)
             partitions.append(_rows(root / "seq_cluster.tsv", names))
         if "foldseek" in tools:
-            _run([tools["foldseek"][0], "easy-cluster", "models", "struct", "struct_tmp",
-                  "--alignment-type", "1", "--tmscore-threshold", str(request["tm"]),
-                  "--tmscore-threshold-mode", "1", *coverage], root, check_cancel)
-            partitions.append(_rows(root / "struct_cluster.tsv", names))
+            foldseek = tools["foldseek"][0]
+            if method == "complex":
+                _run([foldseek, "easy-multimercluster", "models", "complex", "complex_tmp",
+                      "--alignment-type", "2",
+                      "--multimer-tm-threshold", str(request["tm"]),
+                      "--chain-tm-threshold", "0", "--interface-lddt-threshold", "0",
+                      "--min-aligned-chains", "2", "--min-assigned-chains-ratio", "1.0",
+                      "--multimer-report-mode", "0", *coverage], root, check_cancel)
+                partitions.append(_rows(root / "complex_cluster.tsv", names))
+            else:
+                _run([foldseek, "easy-cluster", "models", "struct", "struct_tmp",
+                      "--alignment-type", "1", "--tmscore-threshold", str(request["tm"]),
+                      "--tmscore-threshold-mode", "1", *coverage], root, check_cancel)
+                partitions.append(_rows(root / "struct_cluster.tsv", names))
         assignments = {row_id: "/".join(partition[name] for partition in partitions)
                        for name, row_id in names.items()}
         return {"groups": assignments, "skipped": skipped, "versions": {key: value[1] for key, value in tools.items()}}

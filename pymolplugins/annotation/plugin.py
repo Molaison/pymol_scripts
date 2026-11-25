@@ -6292,10 +6292,17 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         def current():
             return not self._closed and STATE.dataset is dataset and STATE.filter_text == query
 
-        def show_view(ids, title):
-            if self._csv_task_id or self._table_mode == "preview":
+        def show_view(ids, title, *, compare=False):
+            if self._csv_task_id or self._pending_navigation is not None or self._table_mode == "preview":
                 return False
-            self._apply_view(cluster_scope={"ids": ids, "title": title} if title else {})
+
+            def open_pocket():
+                self.main_tabs.setCurrentWidget(self.review_tab)
+                self.comparison.start_pocket(tuple(STATE.entries), choose_proteins=True)
+
+            self._apply_view(cluster_scope={"ids": ids, "title": title} if title else {},
+                             reference_id=ids[0] if compare else None,
+                             on_applied=open_pocket if compare else None)
             return bool(self._csv_task_id)
 
         self._cluster_dialog = ClusterDialog(self, rows, dataset.columns, remote, current, show_view,
@@ -7597,6 +7604,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         *,
         runtime: Optional[_CsvRuntimeContext] = None,
         worker_arguments: Optional[Mapping[str, object]] = None,
+        on_applied=None,
     ) -> None:
         if self._csv_task_id:
             return
@@ -7631,6 +7639,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             self._show_error(f"CSV {kind} could not start: {exc}")
             traceback.print_exc()
             return
+        if on_applied is not None:
+            _CSV_ASYNC_JOBS[job_id]["on_applied"] = on_applied
         self._csv_task_id = job_id
         self._csv_task_kind = str(kind)
         self._source_mode_changed()
@@ -7754,6 +7764,9 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             self._table_mode = "active"
             self._dataset_table_signature = None
             self._refresh_status()
+            on_applied = job.get("on_applied")
+            if on_applied is not None:
+                on_applied()
             return
         if kind == "steps":
             self._clear_csv_task()
@@ -7928,7 +7941,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.review.selection.clear()
         self.review.refresh()
 
-    def _apply_view(self, *, sampling=None, cluster_scope=None) -> None:
+    def _apply_view(self, *, sampling=None, cluster_scope=None, reference_id=None, on_applied=None) -> None:
         if not STATE.all_entries or self._table_mode == "preview":
             self._show_error("Load the CSV before applying a filter.")
             return
@@ -7945,10 +7958,11 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             arguments = self._view_arguments()
             sort, descending = arguments["sort_column"], arguments["descending"]
             cluster_scope = STATE.cluster_scope if sampling is None and query == STATE.filter_text else {}
-        self._start_csv_task("view", _prepare_view, arguments, worker_arguments={
+        self._start_csv_task("view", _prepare_view, arguments, on_applied=on_applied, worker_arguments={
             "entries": tuple(STATE.all_entries), "query": query,
             "sort_column": sort, "descending": descending,
-            "current_id": STATE.current_entry_id(), "current_index": STATE.index,
+            "current_id": reference_id or STATE.current_entry_id(),
+            "current_index": 0 if reference_id else STATE.index,
             "materialized": dict(STATE.materialized_paths), "context": _materialization_context(),
             "dataset": STATE.dataset, "steps": copy.deepcopy(_configured_steps()), "step_cmd": STATE.step_cmd,
             "mapping": _step_mapping(), "step_materialized": dict(STATE.step_materialized),

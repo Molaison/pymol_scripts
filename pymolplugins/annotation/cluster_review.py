@@ -128,6 +128,8 @@ def cluster_on_source(entries, options, *, remote=None, backend="auto", cancel_e
             first_error = next(iter(skipped.values()), "No eligible rows")
             raise ValueError(first_error)
         request = {key: options[key] for key in ("method", "chain", "identity", "tm", "coverage", "threads")}
+        if request["method"] == "complex":
+            request["chain"] = ""
         request["records"] = records
         if remote is not None:
             result = SshClient(remote, timeout=3600).cluster(request, cancel_event=cancel_event)

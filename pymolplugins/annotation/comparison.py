@@ -346,6 +346,9 @@ class ReviewComparison:
 
     def _pocket_selected(self, *, choose_proteins=False):
         entries = tuple(self.panel._entries_by_id[key] for key in self.panel.review.targets())
+        self.start_pocket(entries, choose_proteins=choose_proteins)
+
+    def start_pocket(self, entries, *, choose_proteins=False):
         try:
             if not self.pocket.start(entries, choose_proteins=choose_proteins):
                 return

@@ -56,17 +56,20 @@ class ClusterDialog(QtWidgets.QDialog):
         self.future = None
         self.result = None
         self.setWindowTitle("Cluster review candidates")
-        self.resize(620, 495)
+        self.resize(540, 375)
         self._build(sort, higher)
 
     def _build(self, sort, higher):
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(5)
         layout.addWidget(QtWidgets.QLabel(f"{len(self.rows):,} candidates in the current filter"))
         self.inputs = QtWidgets.QWidget()
         form = QtWidgets.QFormLayout(self.inputs)
         form.setContentsMargins(0, 0, 0, 0)
+        form.setVerticalSpacing(2)
         self.method = _combo((("Sequence", "sequence"), ("Structure", "structure"),
-                              ("Sequence and structure", "both")))
+                              ("Sequence and structure", "both"), ("Protein complexes", "complex")))
         local = (("Windows (native)", "windows"), ("WSL", "wsl")) if os.name == "nt" else (("This computer", "native"),)
         locations = ((f"SSH · {self.source.profile}", "ssh"), *local) if self.source else local
         self.location = _combo(locations)
@@ -92,6 +95,8 @@ class ClusterDialog(QtWidgets.QDialog):
         rank = QtWidgets.QHBoxLayout()
         self.score = _combo((("", ""), *((column_expression(name), name) for name in self.columns)))
         self.score.setEditable(True)
+        self.score.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.score.setMinimumContentsLength(12)
         self.score.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
         self.score.lineEdit().setPlaceholderText("Column or expression, e.g. ipsae - 0.1 * rmsd")
         if sort:
@@ -111,6 +116,7 @@ class ClusterDialog(QtWidgets.QDialog):
         self.table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
         self.table.verticalHeader().hide()
         self.table.doubleClicked.connect(lambda _index: self._show_members())
+        self.table.setMinimumHeight(80)
         layout.addWidget(self.table, 1)
         self.status = QtWidgets.QLabel("Leave the score blank to use the original row order.")
         self.status.setWordWrap(True)
@@ -118,12 +124,20 @@ class ClusterDialog(QtWidgets.QDialog):
         layout.addWidget(self.status)
         actions = QtWidgets.QHBoxLayout()
         execution = QtWidgets.QHBoxLayout()
-        self.all = _button("Full filtered list", self._show_all)
-        self.representatives = _button("Show representatives", self._show_representatives)
-        self.members = _button("Show cluster members", self._show_members)
+        self.all = _button("Full list", self._show_all)
+        self.representatives = _button("Representatives", self._show_representatives)
+        self.members = _button("Members", self._show_members)
+        self.all.setToolTip("Show the full filtered list")
+        self.representatives.setToolTip("Show one representative per cluster")
+        self.members.setToolTip("Show members of the selected cluster")
+        self.compare = _button("Compare PPI…", self._compare_members)
+        self.compare.setToolTip("Compare interface contacts within this cluster using its representative as reference")
+        self.table.selectionModel().currentChanged.connect(lambda *_: self._compare_enabled())
         self.cancel = _button("Cancel", self._cancel)
-        self.check = _button("Check dependencies", lambda: self._setup(False))
-        self.install = _button("Install dependencies…", lambda: self._setup(True))
+        self.check = _button("Check tools", lambda: self._setup(False))
+        self.install = _button("Install tools…", lambda: self._setup(True))
+        self.check.setToolTip("Check clustering dependencies")
+        self.install.setToolTip("Install clustering dependencies")
         self.location.currentIndexChanged.connect(self._environment_actions)
         self.run = _button("Run clustering", self._start)
         self.run.setProperty("role", "primary")
@@ -134,7 +148,7 @@ class ClusterDialog(QtWidgets.QDialog):
         execution.addWidget(self.cancel)
         execution.addStretch()
         layout.insertLayout(3, execution)
-        for button in (self.all, self.representatives, self.members):
+        for button in (self.all, self.representatives, self.members, self.compare):
             actions.addWidget(button)
         layout.addLayout(actions)
         apply_style(self, "clusterReview")
@@ -142,9 +156,10 @@ class ClusterDialog(QtWidgets.QDialog):
 
     def _fields(self, form):
         method = self.method.currentData()
-        for field, visible in ((self.sequence, method != "structure"), (self.identity, method != "structure"),
+        sequence = method in {"sequence", "both"}
+        for field, visible in ((self.sequence, sequence), (self.identity, sequence),
                                (self.tm, method != "sequence"),
-                               (self.chain, method != "sequence" or not self.sequence.currentData())):
+                               (self.chain, method != "complex" and (method != "sequence" or not self.sequence.currentData()))):
             field.setVisible(visible)
             form.labelForField(field).setVisible(visible)
 
@@ -155,6 +170,7 @@ class ClusterDialog(QtWidgets.QDialog):
         self.members.setEnabled(not running and self.result is not None)
         self.cancel.setVisible(running)
         self._environment_actions()
+        self._compare_enabled()
 
     def _environment_actions(self):
         self.check.setEnabled(self.future is None)
@@ -205,7 +221,7 @@ class ClusterDialog(QtWidgets.QDialog):
             return
         method = self.method.currentData()
         options = {"method": method, "chain": self.chain.text().strip(),
-                   "sequence_column": self.sequence.currentData() if method != "structure" else "",
+                   "sequence_column": self.sequence.currentData() if method in {"sequence", "both"} else "",
                    "identity": self.identity.value() / 100, "tm": self.tm.value() / 100,
                    "coverage": self.coverage.value() / 100, "threads": self.threads.value()}
         self.cancel_event = threading.Event()
@@ -273,11 +289,12 @@ class ClusterDialog(QtWidgets.QDialog):
         self.status.setToolTip("\n".join(reasons))
         self._request_view(tuple(row.members[0] for row in rows), "Cluster representatives")
 
-    def _request_view(self, ids, title):
+    def _request_view(self, ids, title, *, compare=False):
         if not self.is_current():
             self.status.setText("The dataset or filter changed. Reopen Cluster to use the current candidates.")
             return False
-        if not self.show_view(ids, title):
+        opened = self.show_view(ids, title, compare=True) if compare else self.show_view(ids, title)
+        if not opened:
             self.status.setText("Wait for the current table operation, then try again.")
             return False
         return True
@@ -287,6 +304,20 @@ class ClusterDialog(QtWidgets.QDialog):
         if 0 <= row < len(self.model.rows):
             cluster = self.model.rows[row]
             self._request_view(cluster.members, f"Cluster {self.model.numbers[cluster.key]} members")
+
+    def _compare_enabled(self):
+        row = self.table.currentIndex().row()
+        self.compare.setEnabled(self.future is None and 0 <= row < len(self.model.rows)
+                                and len(self.model.rows[row].members) > 1)
+
+    def _compare_members(self):
+        row = self.table.currentIndex().row()
+        if 0 <= row < len(self.model.rows):
+            cluster = self.model.rows[row]
+            if len(cluster.members) > 1 and self._request_view(
+                cluster.members, f"Cluster {self.model.numbers[cluster.key]} members", compare=True
+            ):
+                self.hide()
 
     def _show_all(self):
         self._request_view((), "")
@@ -325,5 +356,6 @@ def _percentage(value):
 def _button(label, action):
     control = QtWidgets.QPushButton(label)
     control.setAutoDefault(False)
+    control.setProperty("role", "compact")
     control.clicked.connect(action)
     return control
