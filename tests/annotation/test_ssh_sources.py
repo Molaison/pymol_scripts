@@ -18,7 +18,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from pymolplugins.remote import ssh_worker
+from tests.annotation.ssh_fixture_worker import LOCAL_NAMES, REMOTE_ROOT
 from pymolplugins.remote.import_cache import MAX_SOURCES, clear_remote_imports
 from pymolplugins.remote.ssh import (
     SshCancelled, SshClient, SshError, SshLocation, parse_ssh_path,
@@ -40,7 +40,7 @@ class SshSourceTests(unittest.TestCase):
         self.remote = self.root / "remote input"
         self.remote.mkdir()
         self.table = self.remote / "scores.tsv"
-        self.location = SshLocation("test-profile", str(self.table))
+        self.location = SshLocation("test-profile", self.remote_path(self.table))
         self.environment = patch.dict(os.environ, {
             "PYMOLPLUGINS_SSH_STATE_ROOT": str(self.root / "local states"),
             "PYMOLPLUGINS_ANNOTATOR_HISTORY": str(self.root / "history.json"),
@@ -48,10 +48,16 @@ class SshSourceTests(unittest.TestCase):
         self.environment.start()
         self.addCleanup(self.environment.stop)
         self.original_command = SshClient.command
-        worker_command = patch.object(SshClient, "command", lambda _self: [sys.executable, ssh_worker.__file__])
+        worker_command = patch.object(SshClient, "command", return_value=self.worker_command())
         worker_command.start()
         self.addCleanup(worker_command.stop)
         self.addCleanup(close_ssh_sessions)
+
+    def remote_path(self, path):
+        return str(REMOTE_ROOT.joinpath(*path.relative_to(self.remote).parts))
+
+    def worker_command(self, *args):
+        return [sys.executable, "-m", "tests.annotation.ssh_fixture_worker", str(self.remote), *args]
 
     def write_table(self, paths):
         with self.table.open("w", newline="", encoding="utf-8") as handle:
@@ -64,7 +70,7 @@ class SshSourceTests(unittest.TestCase):
         (self.remote / "one.pdb").write_text("structure")
         generated = self.remote / "review.json"
         generated.write_text(json.dumps({"path_column": "structure_path"}))
-        folder = self.location.at(str(self.remote))
+        folder = self.location.at(self.remote_path(self.remote))
         originals = {name: getattr(SshClient, name) for name in ("read_header", "download", "list_directory", "read_small_files")}
         with patch.object(SshClient, "read_header", autospec=True, side_effect=originals["read_header"]) as header, \
                 patch.object(SshClient, "download", autospec=True, side_effect=originals["download"]) as download, \
@@ -78,8 +84,14 @@ class SshSourceTests(unittest.TestCase):
             self.assertEqual((header.call_count, download.call_count, listing.call_count, review.call_count), (1, 1, 1, 1))
 
             before = self.table.stat()
-            self.table.write_bytes(self.table.read_bytes().replace(b"0.9", b"0.7"))
-            os.utime(self.table, ns=(before.st_atime_ns, before.st_mtime_ns))
+            updated = self.table.read_bytes().replace(b"0.9", b"0.7")
+            # Windows st_ctime may be creation time. Replace the backing file
+            # there to change its identity even when size and mtime stay fixed.
+            target = self.table.with_suffix(".new") if os.name == "nt" else self.table
+            target.write_bytes(updated)
+            os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+            if target != self.table:
+                target.replace(self.table)
             self.assertEqual(CsvDatasetSource(self.location.uri, "structure_path").load().entries[0].metadata["AC.iptm"], "0.7")
             generated.write_text(json.dumps({"path_column": "structure_path", "label_column": "AC.iptm"}))
             self.assertEqual(read_review_file(self.location.uri).config["label_column"], "AC.iptm")
@@ -93,7 +105,7 @@ class SshSourceTests(unittest.TestCase):
         for index in range(MAX_SOURCES + 1):
             path = self.remote / f"scores-{index}.tsv"
             path.write_bytes(self.table.read_bytes())
-            paths.append(self.location.at(str(path)).uri)
+            paths.append(self.location.at(self.remote_path(path)).uri)
         store = RowAnnotationStore(annotation_sidecar_path(paths[0]))
         store.set_many([{"entry_id": "row", "label": "quality", "value": "Good"}])
         download = SshClient.download
@@ -197,14 +209,14 @@ class SshSourceTests(unittest.TestCase):
     def test_table_paths_remain_raw_and_resolve_remotely(self):
         quoted = "model ' ; $(touch forbidden).pdb"
         (self.remote / quoted).write_bytes(b"ATOM remote\n")
-        self.write_table([quoted, str(self.remote / quoted), "missing.pdb"])
+        self.write_table([quoted, self.remote_path(self.remote / quoted), "missing.pdb"])
         before = self.table.read_bytes()
         self.assertEqual(read_csv_header(self.location.uri)["columns"], ("structure_path", "AC.iptm"))
         dataset = CsvDatasetSource(self.location.uri, "structure_path").load()
         resolved = resolve_ssh_dataset(dataset, require_exists=True)
         self.assertEqual(resolved.source_path, self.location.uri)
         self.assertEqual(resolved.entries[0].source_path, quoted)
-        self.assertEqual(parse_ssh_path(resolved.entries[0].resolved_path).path, str(self.remote / quoted))
+        self.assertEqual(parse_ssh_path(resolved.entries[0].resolved_path).path, self.remote_path(self.remote / quoted))
         self.assertEqual([entry.status for entry in resolved.entries], ["available", "available", "missing"])
         self.assertEqual(before, self.table.read_bytes())
         destination = self.root / "downloaded.pdb"
@@ -231,7 +243,7 @@ class SshSourceTests(unittest.TestCase):
             self.assertEqual(entry.status, "unreadable")
             self.assertFalse(entry.is_navigable)
             self.assertIn("not readable", entry.error)
-            folder = load_ssh_directory(self.location.at(str(self.remote)).uri)
+            folder = load_ssh_directory(self.location.at(self.remote_path(self.remote)).uri)
             self.assertEqual(folder.entries[0].status, "unreadable")
             self.assertFalse(folder.entries[0].is_navigable)
         finally:
@@ -239,8 +251,8 @@ class SshSourceTests(unittest.TestCase):
 
     def test_directory_names_are_case_sensitive_and_gzip_preference_is_retained(self):
         for name in ("A.pdb", "a.pdb", "A.pdb.gz", "not-structure.txt"):
-            (self.remote / name).write_text("data", encoding="utf-8")
-        location = self.location.at(str(self.remote))
+            (self.remote / LOCAL_NAMES.get(name, name)).write_text("data", encoding="utf-8")
+        location = self.location.at(self.remote_path(self.remote))
         dataset = load_ssh_directory(location.uri)
         self.assertEqual([entry.display_name for entry in dataset.entries], ["A.pdb.gz", "a.pdb"])
         self.assertEqual(len({entry.id for entry in dataset.entries}), 2)
@@ -248,7 +260,7 @@ class SshSourceTests(unittest.TestCase):
         self.assertEqual([entry.display_name for entry in plain.entries], ["A.pdb", "a.pdb"])
 
     def test_local_state_and_annotations_are_isolated_by_host_and_remote_case(self):
-        locations = [self.location, self.location.at(str(self.remote / "Scores.tsv")),
+        locations = [self.location, self.location.at(self.remote_path(self.remote / "Scores.tsv")),
                      SshLocation("another-host", self.location.path)]
         self.assertEqual(len({csv_dataset_id(value.uri) for value in locations}), 3)
         for value in locations:
@@ -278,11 +290,11 @@ class SshSourceTests(unittest.TestCase):
         self.assertEqual(source_hashes, [hashlib.sha256(path.read_bytes()).hexdigest() for path in (generated, override)])
 
     def test_remote_history_keeps_the_profile_and_original_path(self):
-        record_config_history(self.location.at(str(self.remote)).uri,
+        record_config_history(self.location.at(self.remote_path(self.remote)).uri,
                               {"source_mode": "csv", "csv_path": self.location.uri})
         snapshot = latest_config_snapshot()
         self.assertEqual(snapshot["csv_path"], self.location.uri)
-        self.assertEqual(snapshot["dataset_dir"], self.location.at(str(self.remote)).uri)
+        self.assertEqual(snapshot["dataset_dir"], self.location.at(self.remote_path(self.remote)).uri)
 
     def test_missing_files_are_visible_and_cancellation_terminates_the_child(self):
         with self.assertRaisesRegex(SshError, "No such file"):
@@ -337,10 +349,10 @@ class SshSourceTests(unittest.TestCase):
         binary.write_bytes(content)
         real_popen = subprocess.Popen
         with patch("pymolplugins.remote.ssh.subprocess.Popen", wraps=real_popen) as started:
-            client = SshClient(self.location.at(str(binary)))
+            client = SshClient(self.location.at(self.remote_path(binary)))
             self.assertEqual(client.stat()["size"], len(content))
             with self.assertRaises(SshError):
-                SshClient(self.location.at(str(self.remote / "missing.pdb"))).download(self.root / "missing")
+                SshClient(self.location.at(self.remote_path(self.remote / "missing.pdb"))).download(self.root / "missing")
             destination = self.root / "copy.pdb"
             client.download(destination)
             self.assertEqual(destination.read_bytes(), content)
@@ -352,10 +364,10 @@ class SshSourceTests(unittest.TestCase):
         for index, path in enumerate(paths):
             path.write_bytes(b"x" * (index + 1))
         def read(path):
-            return SshClient(self.location.at(str(path))).stat()
+            return SshClient(self.location.at(self.remote_path(path))).stat()
         with ThreadPoolExecutor(max_workers=4) as pool:
             values = list(pool.map(read, paths))
-        self.assertEqual([value["path"] for value in values], [str(path) for path in paths])
+        self.assertEqual([value["path"] for value in values], [self.remote_path(path) for path in paths])
         self.assertEqual([value["size"] for value in values], list(range(1, 9)))
 
     def test_streamed_compression_preserves_bytes_without_a_second_copy(self):
@@ -371,7 +383,7 @@ class SshSourceTests(unittest.TestCase):
             messages.append(message)
         with patch.object(ssh.shutil, "copyfileobj", side_effect=AssertionError("download copied a spool file")):
             with ssh_progress(progress):
-                SshClient(self.location.at(str(source))).download(destination)
+                SshClient(self.location.at(self.remote_path(source))).download(destination)
         self.assertEqual(destination.read_bytes(), content)
         session = next(iter(ssh._sessions.values()))
         self.assertLess(session.wire_bytes, len(content) // 4)
@@ -415,8 +427,7 @@ class SshSourceTests(unittest.TestCase):
 
     def test_cancelling_a_queued_request_keeps_the_active_connection(self):
         self.write_table(["model.pdb"])
-        command = [sys.executable, "-u", "-c",
-                   "import time,runpy;time.sleep(0.6);runpy.run_path(" + repr(ssh_worker.__file__) + ",run_name='__main__')"]
+        command = self.worker_command("0.6")
         active = threading.Event()
         def read():
             with ssh_progress(lambda message: active.set()):
@@ -443,7 +454,7 @@ class SshSourceTests(unittest.TestCase):
         source = self.remote / "model.pdb.gz"
         source.write_bytes(content)
         destination = self.root / "copy.pdb.gz"
-        SshClient(self.location.at(str(source))).download(destination)
+        SshClient(self.location.at(self.remote_path(source))).download(destination)
         self.assertEqual(destination.read_bytes(), content)
         self.assertEqual(next(iter(ssh._sessions.values())).wire_bytes, len(content))
 
