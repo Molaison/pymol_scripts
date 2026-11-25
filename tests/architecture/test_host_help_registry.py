@@ -85,10 +85,11 @@ class HostManifestTests(unittest.TestCase):
         compat = {
             name for values in AUTOLOADED_COMPAT_COMMANDS.values() for name in values
         }
-        self.assertEqual(len(canonical), 81)
+        self.assertEqual(len(canonical), 84)
         self.assertEqual(
             compat,
             {
+                "coretosurf",
                 "align_in_groups",
                 "group_objects_by_name",
                 "merge_groups",
@@ -99,8 +100,8 @@ class HostManifestTests(unittest.TestCase):
                 "seq_select",
             },
         )
-        self.assertEqual(len(declared_command_names()), 89)
-        self.assertEqual(len(set(declared_command_names())), 89)
+        self.assertEqual(len(declared_command_names()), 93)
+        self.assertEqual(len(set(declared_command_names())), 93)
         self.assertEqual(set(COMMAND_TARGETS), canonical | compat)
 
 

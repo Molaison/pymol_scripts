@@ -725,6 +725,7 @@ def pp_view(preset="", object_name="", mode="auto", radius="4", scope="nearby",
 def __init_plugin__(app=None):
     from pymol.plugins import addmenuitemqt
     from pymolplugins.collections.commands import pp_collections
+    from pymolplugins.residues.commands import pp_residues
     from pymolplugins.navigation.qt_keys import install_qt_navigation_keys
     from .toolbar import install_toolbar
 
@@ -738,6 +739,7 @@ def __init_plugin__(app=None):
         addmenuitemqt("PymolPlugins|" + label, callback)
     for label, callback in (
         ("Structure Collections…", pp_collections),
+        ("Residue analysis…", pp_residues),
         ("Getting Started", pp_wizard),
         ("Command Help…", lambda: pp_wizard("tools")),
         ("Maintenance|Updates", show_updates_from_toolkit),

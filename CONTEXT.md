@@ -99,3 +99,7 @@ reference当前合同（0.15.1）：用户明确要求常驻固定对象，已�
 文件源质量标签绑定成功加载时的可携带版本身份，缓存位置与标注版本分开。新结构不自动沿用旧版本质量标签；旧版本与未绑定历史保留，Later 继续跟随行 ID。版本精度沿用已有元数据和可用摘要，标注回调不增加源文件或 SSH 读取。
 
 审查取舍、实际验证和保留的基线问题见 [整合验收](docs/validation/04_reviewed_integration_2026-11-23.md)。本机唯一恢复入口为 [状态与证据](D:/SyncPath/GitRepo/PymolPlugins/output/07_reviewed_integration/01_recovery.md)。发布和用户安装仍按原授权边界处理。
+
+## 2026-11-26 残基分析
+
+0.23.0 的 CoreToSurf、疏水性和非局部 Cα 接触数共用统一残基分析入口；用法、来源、计算定义与通过的真实宿主验收见 [残基分析集成](docs/validation/05_residue_analysis_2026-11-26.md)。代码以 main 为 owner，不改独立脚本分支的 live UI 文件。

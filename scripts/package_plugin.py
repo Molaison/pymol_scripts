@@ -37,6 +37,10 @@ INSTALL_TEXT = """# 安装 PymolPlugins（{version}）
 
 ## 比较和展示结构集合
 
+**Plugin > PymolPlugins > Residue analysis…** 或 `pp_residues` 打开残基分析。选择对象后用 Core / Boundary 阈值调节 SASA 分层，可切到相对暴露度、Kyte–Doolittle 疏水性、暴露疏水残基和非局部 Cα 接触数。表格显示逐残基数值，支持 CSV、接触对 CSV、PyMOL 选择与 Rosetta resnums 导出。默认只改碳原子颜色；**Restore colors** 或 `pp_residue_clear` 恢复颜色。**Create selections** 才显式增加带前缀的分层选择。CoreToSurf 来源和 BSD-3-Clause 许可证包含在 `pymolplugins/residues/LICENSE.CoreToSurf`。
+
+整残基 SASA 使用源对象重原子作为遮蔽环境，保留配体、排除水和氢；它与 Rosetta 默认的侧链邻居分层不等价。相对 ASA 使用 Tien 2013 理论最大值，未知残基不补造数值。非局部 Cα 接触默认 ≤8 Å，排除同链模型顺序相邻两位，不计算不同对象间的接触。
+
 **Review > Tools > Compare or process structures…** 打开 **Batch** 页。选择 **Review in PyMOL**，设置候选和参考，先预览配对，再生成比较目录并打开 Review。选择 **Process and save structures** 则运行处理命令并输出结构；输入文件保留。
 
 **Plugin > PymolPlugins > Structure Collections…** 打开并排的采样控件与样本预览。按打分分层和结构差异选样，保存统一朝向，再导出独立的 PNG 与展示页。`pp_collections` 可直接打开面板或已有 `01_collection.json`。源结构保持不变；关闭预览恢复原场景。细节见包内 `docs/01_structure_collections.md` 和 `docs/03_comparison_review.md`。
@@ -193,6 +197,7 @@ def _build(output_dir: Path = DIST) -> Path:
             "__init__.py", "pymolplugins/__init__.py", "plugins/pymol_plugins.py",
             "pymolplugins/annotation/review_file.py",
             "pymolplugins/annotation/_bundle_skill/acceptance_recipes.py",
+            "pymolplugins/residues/LICENSE.CoreToSurf",
         )
     }
     with ZipFile(destination) as archive:

@@ -32,6 +32,9 @@ class PluginPackageTests(unittest.TestCase):
             bootstrap = archive.read("pymol_plugins/__init__.py").decode("utf-8")
             self.assertTrue(bootstrap.startswith(f"# Version: {__version__}\n"))
             self.assertIn("pymol_plugins/INSTALL.md", names)
+            license_text = archive.read("pymol_plugins/pymolplugins/residues/LICENSE.CoreToSurf").decode("utf-8")
+            self.assertIn("BSD 3-Clause License", license_text)
+            self.assertIn("Copyright (c) 2026, Ajasja Ljubetič", license_text)
             for filename in ("ssh_askpass.exe", "ssh_askpass.c"):
                 source = ROOT / "pymolplugins/remote/askpass" / filename
                 self.assertEqual(archive.read("pymol_plugins/" + source.relative_to(ROOT).as_posix()), source.read_bytes())
@@ -95,6 +98,7 @@ assert set(menus) == {
     "PymolPlugins|Maintenance|Capabilities", "PymolPlugins|Command Help…",
     "PymolPlugins|Review structures…",
     "PymolPlugins|Structure Collections…",
+    "PymolPlugins|Residue analysis…",
     "PymolPlugins|RFD4 · Proteina",
     "PymolPlugins|Maintenance|Updates",
 }, menus

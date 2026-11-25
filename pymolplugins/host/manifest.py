@@ -18,6 +18,7 @@ CANONICAL_MODULES = (
     "pymolplugins.geometry.commands",
     "pymolplugins.styles.registry",
     "pymolplugins.interactions.controller",
+    "pymolplugins.residues.commands",
     "pymolplugins.remote.commands",
     "pymolplugins.tasks.commands",
 )
@@ -30,6 +31,7 @@ CANONICAL_COMMANDS = {
     ),
     "targets": ("pp_target_resolve", "pp_foreach", "pp_batch", "pp_compare"),
     "collections": ("pp_collections",),
+    "residues": ("pp_residues", "pp_core_surface", "pp_residue_clear"),
     "grouping": ("pp_group", "pp_group_by_name"),
     "navigation": (
         "pp_nav_start", "pp_nav_next", "pp_nav_prev", "pp_nav_next_batch",
@@ -73,6 +75,7 @@ CANONICAL_COMMANDS = {
 # They remain callable for compatibility, but are not promoted into the
 # task-plus-advanced canonical API and should not be used for new command design.
 AUTOLOADED_COMPAT_COMMANDS = {
+    "residues_compat": ("coretosurf",),
     "grouping_compat": (
         "group_objects_by_name",
         "merge_models_by_name",
@@ -93,6 +96,7 @@ _CANONICAL_CATEGORY_MODULES = {
     "tasks": "pymolplugins.tasks.commands",
     "targets": "pymolplugins.targets.commands",
     "collections": "pymolplugins.collections.commands",
+    "residues": "pymolplugins.residues.commands",
     "grouping": "pymolplugins.grouping.commands",
     "navigation": "pymolplugins.navigation.commands",
     "follow": "pymolplugins.follow.commands",
@@ -124,6 +128,7 @@ def _canonical_targets():
 CANONICAL_COMMAND_TARGETS = _canonical_targets()
 
 COMPAT_COMMAND_TARGETS = {
+    "coretosurf": ("pymolplugins.residues.commands", "coretosurf"),
     "group_objects_by_name": (
         "pymolplugins.grouping.commands",
         "group_objects_by_name",

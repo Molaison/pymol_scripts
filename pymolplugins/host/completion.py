@@ -30,7 +30,7 @@ PATH_PARAMETERS = frozenset((
     "path", "filename", "directory", "output", "output_json", "input_or_selection",
     "executable", "source_base", "review_path", "csv_path", "state_path",
     "out_path", "stage_root", "target_prefix",
-    "a", "b", "manifest",
+    "a", "b", "manifest", "outfile",
 ))
 ENUMS = {
     "on_error": ("stop", "continue"),
@@ -45,6 +45,16 @@ ENUMS = {
     "cgo_policy": ("static", "skip_callback", "rebuild"),
 }
 COMMAND_ENUMS = {
+    ("pp_residues", "mode"): ("layers", "rsa", "hydropathy", "exposed", "contacts"),
+    ("pp_residues", "unit"): ("abs", "rel"),
+    ("pp_core_surface", "unit"): ("abs", "rel"),
+    ("coretosurf", "unit"): ("abs", "rel"),
+    ("pp_residues", "color"): ("0", "1"),
+    ("pp_residues", "selections"): ("0", "1"),
+    ("pp_core_surface", "selections"): ("0", "1"),
+    ("pp_residues", "recompute"): ("0", "1"),
+    ("pp_core_surface", "recompute"): ("0", "1"),
+    ("coretosurf", "recompute"): ("0", "1"),
     ("pp_wizard", "topic"): ("welcome", "data", "review", "tools", "finish"),
     ("pp_group", "action"): ("info", "enable", "disable"),
     ("show_structure_annotator_panel", "mode"): ("docked", "floating"),
