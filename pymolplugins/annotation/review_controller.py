@@ -170,7 +170,7 @@ class ReviewController:
         self.form.primaryChosen.connect(self._label_clicked)
         self.form.saveRequested.connect(self.save)
         self.form.advanceRequested.connect(self._advance_clicked)
-        self.form.configureRequested.connect(self.configure_fields)
+        self.form.options_button.setMenu(self.panel.annotation_options_menu)
         self.form.changed.connect(self._draft_changed)
         self.panel.quick_values_layout.addWidget(self.form)
         self.panel._value_buttons = self.form.primary_buttons

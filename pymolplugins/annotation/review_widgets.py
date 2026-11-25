@@ -87,7 +87,6 @@ class AnnotationForm(QtWidgets.QWidget):
     primaryChosen = QtCore.Signal(str)
     saveRequested = QtCore.Signal()
     advanceRequested = QtCore.Signal()
-    configureRequested = QtCore.Signal()
 
     def __init__(self, fields, parent=None):
         super().__init__(parent)
@@ -150,11 +149,12 @@ class AnnotationForm(QtWidgets.QWidget):
         self.save_button.setMinimumWidth(170)
         self.save_button.setAutoDefault(False)
         self.save_button.clicked.connect(self.saveRequested)
-        self.fields_button = QtWidgets.QPushButton("Annotation fields…")
-        self.fields_button.setAutoDefault(False)
-        self.fields_button.clicked.connect(self.configureRequested)
-        self.fields_button.setParent(self)
-        self.fields_button.hide()
+        self.options_button = QtWidgets.QToolButton(self)
+        self.options_button.setText("Options")
+        self.options_button.setAccessibleName("Annotation options")
+        self.options_button.setToolTip("Annotation options")
+        self.options_button.setProperty("role", "compact")
+        self.options_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         self.hint_label = ElidedLabel()
         self.hint_label.setProperty("role", "muted")
         self.score_button = QtWidgets.QPushButton("Scores…")
@@ -163,6 +163,7 @@ class AnnotationForm(QtWidgets.QWidget):
         row.addWidget(self.optional_toggle)
         row.addWidget(self.score_button)
         row.addWidget(self.hint_label, 1)
+        row.addWidget(self.options_button)
         row.addWidget(self.save_button)
         layout.addLayout(row)
         # Keep saving beside the fields instead of at an auto-hidden taskbar edge.

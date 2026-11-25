@@ -618,8 +618,6 @@ _REVIEW_CHECKBOX_PREFERENCES = {
     "cache_enabled": "cache_enabled_cb",
 }
 _REVIEW_ACTION_PREFERENCES = {
-    "save_on_label_click": "save_on_label_click_action",
-    "auto_advance": "auto_advance_action",
     "antibody_cdrs": "antibody_cdrs_action",
     "show_source_row": "show_source_row_action",
     "show_file_status": "show_file_status_action",

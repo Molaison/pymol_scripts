@@ -214,6 +214,12 @@ def _source_page(panel):
     panel.pattern_edit = QtWidgets.QLineEdit()
     panel.pattern_edit.editingFinished.connect(panel._save_ui_state)
     form.addRow("Filename pattern", panel.pattern_edit)
+    annotation_options = QtWidgets.QToolButton()
+    annotation_options.setText("Annotation options")
+    annotation_options.setProperty("role", "compact")
+    annotation_options.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+    annotation_options.setMenu(panel.annotation_options_menu)
+    form.addRow(annotation_options)
     options_form.addRow(panel.directory_group)
     panel.csv_group = QtWidgets.QWidget()
     form = QtWidgets.QFormLayout(panel.csv_group)
@@ -593,6 +599,7 @@ def _candidate_card(panel):
     panel.manual_annotation_row = _row(panel.value_combo, panel.apply_btn)
     panel.manual_annotation_row.hide()
     current_layout.addWidget(panel.manual_annotation_row)
+    panel.annotation_options_menu = _annotation_options(panel)
     panel.review_splitter.addWidget(current)
     _details_dialog(panel)
 
@@ -617,27 +624,47 @@ def _details_dialog(panel):
     panel.details_dialog.finished.connect(lambda: panel.details_cb.setChecked(False))
 
 
-def _save_options(panel, form):
-    menu = panel.more_button.menu()
-    menu.addSeparator()
-    for name, title in (("save_on_label_click", "Save on label click"),
-                        ("auto_advance", "Go to the next structure after saving"),
-                        ("antibody_cdrs", "Highlight antibody CDRs (IMGT)")):
-        checkbox = QtWidgets.QCheckBox(title)
+def _annotation_options(panel):
+    menu = QtWidgets.QMenu(panel)
+    content = QtWidgets.QWidget(menu)
+    layout = QtWidgets.QVBoxLayout(content)
+    layout.setContentsMargins(8, 4, 8, 4)
+    layout.setSpacing(3)
+    for name, title in (
+        ("save_on_label_click", "Save on label click"),
+        ("auto_advance", "Go to the next structure after saving"),
+        ("skip_annotated", "Skip annotated structures when opening a folder"),
+    ):
+        checkbox = QtWidgets.QCheckBox(title, content)
         checkbox.toggled.connect(panel._schedule_state_save)
-        checkbox.toggled.connect(lambda _checked: panel.review.refresh())
         setattr(panel, name + "_cb", checkbox)
-        form.addRow(checkbox)
-        action = menu.addAction(title)
-        action.setCheckable(True)
-        action.toggled.connect(checkbox.setChecked)
-        checkbox.toggled.connect(action.setChecked)
-        setattr(panel, name + "_action", action)
-    panel._imgt_numbering_action = menu.addAction("IMGT numbering…", panel._show_imgt_numbering)
-    panel._imgt_numbering_action.setEnabled(False)
+        layout.addWidget(checkbox)
     panel.save_on_label_click_cb.setToolTip(
         "Saves a single-choice label for one candidate when required fields are complete. Shift-click leaves a draft."
     )
+    panel.auto_advance_cb.toggled.connect(lambda _checked: panel.review.refresh())
+    options = QtWidgets.QWidgetAction(menu)
+    options.setDefaultWidget(content)
+    menu.addAction(options)
+    menu.addSeparator()
+    menu.addAction("Annotation fields…", lambda: panel.review.configure_fields())
+    return menu
+
+
+def _antibody_settings(panel, layout):
+    title = "Highlight antibody CDRs (IMGT)"
+    checkbox = panel.antibody_cdrs_cb = QtWidgets.QCheckBox(title)
+    checkbox.toggled.connect(panel._schedule_state_save)
+    checkbox.toggled.connect(lambda _checked: panel.review.refresh())
+    layout.addWidget(checkbox)
+    menu = panel.more_button.menu()
+    menu.addSeparator()
+    action = panel.antibody_cdrs_action = menu.addAction(title)
+    action.setCheckable(True)
+    action.toggled.connect(checkbox.setChecked)
+    checkbox.toggled.connect(action.setChecked)
+    panel._imgt_numbering_action = menu.addAction("IMGT numbering…", panel._show_imgt_numbering)
+    panel._imgt_numbering_action.setEnabled(False)
 
 
 def _settings_page(panel):
@@ -646,17 +673,13 @@ def _settings_page(panel):
     layout.setContentsMargins(24, 8, 24, 20)
     layout.setSpacing(20)
 
-    form = QtWidgets.QFormLayout()
     panel.label_edit = QtWidgets.QLineEdit()
     panel.label_edit.editingFinished.connect(panel._on_label_changed)
     panel.values_edit = QtWidgets.QLineEdit()
     panel.values_edit.editingFinished.connect(panel._rebuild_value_controls)
     panel.label_edit.hide()
     panel.values_edit.hide()
-    panel.annotation_fields_button = _button("Configure annotation fields…", lambda: panel.review.configure_fields())
-    form.addRow(panel.annotation_fields_button)
-    _save_options(panel, form)
-    layout.addLayout(form)
+    _antibody_settings(panel, layout)
     _command_settings(panel)
     panel.saved_commands_button = _button("Saved commands…", lambda: _show_command_settings(panel, 0))
     layout.addWidget(panel.saved_commands_button, 0, QtCore.Qt.AlignLeft)
@@ -742,7 +765,6 @@ def _loading_settings(panel, layout):
     choices = {
         "keep_previous_cb": "Keep previous structures visible in the session",
         "prefer_gz_cb": "Prefer compressed structures when both versions exist",
-        "skip_annotated_cb": "Skip annotated structures when loading a directory",
         "preload_enabled_cb": "Preload upcoming structures",
         "bg_decompress_cb": "Prepare compressed structures in the background",
         "cache_enabled_cb": "Cache remote and compressed structures locally",
@@ -802,7 +824,6 @@ def _navigation(panel, layout):
     menu.addAction("Go to candidate…", panel._choose_position)
     menu.addAction("Reload structure", panel._reload)
     menu.addSeparator()
-    menu.addAction("Annotation fields…", lambda: panel.review.configure_fields())
     menu.addAction("Score rules…", lambda: panel.review.scores.configure())
     menu.addAction("Review steps…", panel._edit_review_steps)
     panel.list_columns_menu = panel.table_options_button.menu()

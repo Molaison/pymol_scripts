@@ -57,6 +57,24 @@ def click(widget):
     QtWidgets.QApplication.processEvents()
 
 
+def toggle_annotation_option(panel, checkbox):
+    from pymol.Qt import QtCore
+    button = panel.review.form.options_button
+    menu, errors = button.menu(), []
+    def choose():
+        try:
+            assert menu.isVisible()
+            click(checkbox)
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            menu.hide()
+    QtCore.QTimer.singleShot(80, choose)
+    click(button)
+    if errors:
+        raise errors[0]
+
+
 def menu_action(button, action, submenu=None):
     from pymol.Qt import QtCore
     from PyQt5.QtTest import QTest
@@ -239,6 +257,9 @@ def check_click_save_modes(panel, annotation, app, output):
     from PyQt5.QtTest import QTest
     store = annotation.STATE.row_annotation_store
     assert panel.save_on_label_click_cb.isChecked() and panel.auto_advance_cb.isChecked()
+    if not panel.skip_annotated_cb.isChecked():
+        toggle_annotation_option(panel, panel.skip_annotated_cb)
+    assert panel.skip_annotated_cb.isChecked()
     select_candidate(panel, app, 10)
     before, entry_id = store.snapshot(), annotation.STATE.current_entry_id()
     click_label(panel)
@@ -252,19 +273,15 @@ def check_click_save_modes(panel, annotation, app, output):
         assert saves.call_count == 1
     assert store.get(entry_id, "quality") == "Good" and store.get(entry_id, "reason") == "Interface"
     assert annotation.STATE.index == 11
-    menu_action(panel.more_button, panel.auto_advance_action)
+    toggle_annotation_option(panel, panel.auto_advance_cb)
     assert not panel.auto_advance_cb.isChecked() and panel.review.form.save_button.text() == "Save"
     choose_reason(panel)
     entry_id = annotation.STATE.current_entry_id()
     click_label(panel, 1)
     annotation_idle(panel, app)
     assert annotation.STATE.index == 11 and store.get(entry_id, "quality") == "Bad"
-    click(panel.settings_button)
-    click(panel.auto_advance_cb)
-    assert panel.auto_advance_action.isChecked()
-    QTest.qWait(180)
-    assert panel.grab().save(str(output.with_name(output.stem + "-save-options.png")))
-    click(panel.back_button)
+    toggle_annotation_option(panel, panel.auto_advance_cb)
+    assert panel.auto_advance_cb.isChecked()
     before = store.snapshot()
     click_label(panel, shift=True)
     assert store.snapshot() == before and annotation.STATE.index == 11 and not panel._csv_task_id
@@ -288,16 +305,14 @@ def check_click_save_batch_and_shortcut(panel, annotation, app):
     annotation_idle(panel, app)
     assert annotation.STATE.current_entry_id() == current
     assert all(store.get(entry_id, "quality") == "Good" for entry_id in targets)
-    click(panel.settings_button)
-    click(panel.save_on_label_click_cb)
-    assert not panel.save_on_label_click_action.isChecked()
-    click(panel.back_button)
+    toggle_annotation_option(panel, panel.save_on_label_click_cb)
+    assert not panel.save_on_label_click_cb.isChecked()
     select_candidate(panel, app, 20)
     choose_reason(panel)
     before = store.snapshot()
     click_label(panel)
     assert store.snapshot() == before and annotation.STATE.index == 20 and not panel._csv_task_id
-    menu_action(panel.more_button, panel.save_on_label_click_action)
+    toggle_annotation_option(panel, panel.save_on_label_click_cb)
     assert store.snapshot() == before, "Enabling click-to-save committed an existing draft"
     entry_id = annotation.STATE.current_entry_id()
     with patch.object(annotation, "save_annotations", wraps=annotation.save_annotations) as saves:
@@ -344,9 +359,10 @@ def configure_primary_choices(panel, app, kind="single"):
             errors.append(exc)
             if dialog is not None:
                 dialog.reject()
-    action = next(action for action in panel.more_button.menu().actions() if action.text().startswith("Annotation fields"))
+    button = panel.review.form.options_button
+    action = next(action for action in button.menu().actions() if action.text().startswith("Annotation fields"))
     QtCore.QTimer.singleShot(180, add_choices)
-    menu_action(panel.more_button, action)
+    menu_action(button, action)
     if errors:
         raise errors[0]
 
@@ -558,9 +574,10 @@ def check_config_dialogs(panel, app, output):
                 if dialog is not None:
                     dialog.grab().save(str(output.with_name(output.stem + "-" + name + "-failed.png")))
                     dialog.reject()
-        action = next(action for action in panel.more_button.menu().actions() if action.text().startswith(title))
+        button = panel.review.form.options_button if name == "fields" else panel.more_button
+        action = next(action for action in button.menu().actions() if action.text().startswith(title))
         QtCore.QTimer.singleShot(180, inspect)
-        menu_action(panel.more_button, action)
+        menu_action(button, action)
         if errors:
             raise errors[0]
         assert name in results
@@ -657,8 +674,8 @@ def run(output):
             before, index = annotation.STATE.row_annotation_store.snapshot(), annotation.STATE.index
             panel = annotation.show_structure_annotator_panel()
             app.processEvents()
-            assert panel.save_on_label_click_cb.isChecked() and panel.save_on_label_click_action.isChecked()
-            assert panel.auto_advance_cb.isChecked() and panel.auto_advance_action.isChecked()
+            assert panel.save_on_label_click_cb.isChecked()
+            assert panel.auto_advance_cb.isChecked() and panel.skip_annotated_cb.isChecked()
             assert panel.show_source_row_action.isChecked() and not panel.dataset_table.isColumnHidden(0)
             assert panel.show_file_status_action.isChecked() and not panel.dataset_table.isColumnHidden(1)
             assert annotation.STATE.row_annotation_store.snapshot() == before and annotation.STATE.index == index
