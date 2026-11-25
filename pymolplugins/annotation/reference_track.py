@@ -18,6 +18,7 @@ _PDB_ID = re.compile(r"[1-9][A-Za-z0-9]{3}")
 _DIRECTIONS = ("row_to_reference", "reference_to_row")
 _SOURCES = ("row", "file", "pdb")
 _MODES = ("auto", "protein", "ligand")
+_VIEW_OVERLAY_TRANSPARENCY = 0.65
 
 
 def validate_reference_track(raw):
@@ -262,12 +263,32 @@ class ReferenceTrack:
             return
         clear_review_view(api, self.name)
         ref = _scope(self.name, "")
+        for setting in ("cartoon_color", "cartoon_transparency", "stick_transparency"):
+            api.unset(setting, self.name, quiet=1)
         api.hide("everything", ref)
         api.show("cartoon" if self.protein else "sticks", ref + (" and polymer.protein" if self.protein else ""))
         api.color("yelloworange", ref if self.protein else ref + " and elem C")
         if not self.protein:
             api.set("stick_radius", 0.16, ref)
             api.set("stick_transparency", 0.25, ref)
+
+    def style_view_overlay(self, api, view):
+        """Draw the reference as context over the candidate's full-strength view."""
+        from .review_view_presets import review_view_overlays
+
+        ref = _scope(self.name, "")
+        if view in {"overview", "interface"}:
+            api.set("cartoon_color", "yelloworange", self.name)
+            api.color("yelloworange", f"{ref} and elem C")
+        for setting in ("cartoon_transparency", "stick_transparency"):
+            api.set(setting, _VIEW_OVERLAY_TRANSPARENCY, self.name)
+        for overlay in review_view_overlays(api, self.name):
+            if api.get_type(overlay) == "object:cgo":
+                api.set("cgo_transparency", _VIEW_OVERLAY_TRANSPARENCY, overlay)
+            else:
+                api.set("stick_transparency", _VIEW_OVERLAY_TRANSPARENCY, overlay)
+                api.set("transparency", max(_VIEW_OVERLAY_TRANSPARENCY,
+                                            api.get_setting_float("transparency", overlay)), overlay)
 
     def move_products(self, api, owner, products):
         if owner != self.owner or self.delta is None:

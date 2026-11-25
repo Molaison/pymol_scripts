@@ -8282,7 +8282,9 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
                     and track.reference_identity == identity and track.loaded(cmd, track.key)):
                 camera = cmd.get_view()
                 try:
-                    return draw_review_view(cmd, source, action, draw, data, exclusive=True)
+                    result = draw_review_view(cmd, source, action, draw, data, exclusive=True)
+                    track.style_view_overlay(cmd, view)
+                    return result
                 finally:
                     cmd.set_view(camera, animate=0)
 

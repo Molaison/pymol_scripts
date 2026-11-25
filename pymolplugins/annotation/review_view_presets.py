@@ -220,6 +220,10 @@ def prepare_review_command(line, api):
     return source, action, None, lambda _: action(api, source, *args)
 
 
+def review_view_overlays(api, source):
+    return set().union(*(names for (obj, _), names in _OVERLAYS.get(api, {}).items() if obj == source))
+
+
 def clear_review_view(api, source):
     """Remove only the view overlays belonging to the given molecule."""
     overlays = _OVERLAYS.get(api, {})
