@@ -6093,9 +6093,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Structure Annotator")
-        self.setMinimumWidth(760)
-        self.setMinimumHeight(560)
-        self.resize(1000, 720)
+        self.setMinimumSize(575, 420)
+        self.resize(660, 475)
         self._bucket_inputs: Dict[str, QtWidgets.QPlainTextEdit] = {}
         self._value_buttons: List[QtWidgets.QPushButton] = []
         self._history_bindings: List[_HistoryCompletionBinding] = []

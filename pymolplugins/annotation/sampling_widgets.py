@@ -91,8 +91,8 @@ class DatasetOverviewDialog(QtWidgets.QDialog):
         )
         self.result_config = None
         self.setWindowTitle("Dataset overview and representative sample")
-        self.resize(760, 560)
-        self.setMinimumSize(620, 460)
+        self.resize(600, 410)
+        self.setMinimumSize(475, 300)
         self._build(current_config or {})
         self._refresh()
 

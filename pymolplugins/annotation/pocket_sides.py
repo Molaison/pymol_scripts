@@ -56,6 +56,7 @@ def _choose_chains(parent, chains, target, partner):
         column.addWidget(QtWidgets.QLabel(title))
         widget = QtWidgets.QListWidget(dialog)
         widget.setAccessibleName(title)
+        widget.setMaximumHeight(min(165, max(56, len(chains) * 24 + 8)))
         for chain in chains:
             item = QtWidgets.QListWidgetItem(chain or "(blank chain)", widget)
             item.setData(QtCore.Qt.UserRole, chain)

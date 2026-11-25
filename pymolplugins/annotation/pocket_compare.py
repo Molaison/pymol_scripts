@@ -403,7 +403,7 @@ class PocketComparison:
         dialog = self.dialog = QtWidgets.QDialog(self.panel)
         protein_partner = self.request.protein_partner
         dialog.setWindowTitle("Protein–protein interface changes" if protein_partner else "Pocket changes")
-        dialog.resize(670, 430)
+        dialog.resize(560, 330)
         layout = QtWidgets.QVBoxLayout(dialog)
         header = QtWidgets.QHBoxLayout()
         reference = self.owner.STATE.current_entry()

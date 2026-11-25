@@ -73,7 +73,7 @@ class CompareStructuresDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("PymolPlugins · Default mode")
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
-        self.resize(610, 485)
+        self.resize(540, 390)
         self.overlays = {}
         self.original_visibility = {}
         self.reference_source = ""
@@ -118,7 +118,15 @@ class CompareStructuresDialog(QtWidgets.QDialog):
         form.addRow("Reference", self.reference)
         form.addRow("Method", self.method)
         layout.addLayout(form)
-        sides = QtWidgets.QHBoxLayout()
+        range_options = QtWidgets.QToolButton(self)
+        range_options.setText("Alignment ranges")
+        range_options.setCheckable(True)
+        range_options.setArrowType(QtCore.Qt.RightArrow)
+        range_options.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        layout.addWidget(range_options, 0, QtCore.Qt.AlignLeft)
+        ranges = QtWidgets.QWidget(self)
+        sides = QtWidgets.QHBoxLayout(ranges)
+        sides.setContentsMargins(0, 0, 0, 0)
         self.mobile_range = AlignmentRange("Mobile")
         self.reference_range = AlignmentRange("Reference")
         for title, controls in (("Mobiles", self.mobile_range), ("Reference", self.reference_range)):
@@ -126,7 +134,11 @@ class CompareStructuresDialog(QtWidgets.QDialog):
             inner = QtWidgets.QVBoxLayout(section)
             inner.addWidget(controls)
             sides.addWidget(section, 1)
-        layout.addLayout(sides)
+        layout.addWidget(ranges)
+        ranges.hide()
+        range_options.toggled.connect(ranges.setVisible)
+        range_options.toggled.connect(lambda opened: range_options.setArrowType(
+            QtCore.Qt.DownArrow if opened else QtCore.Qt.RightArrow))
         scope = QtWidgets.QLabel("Overlay or Align starts Compare mode. Newly loaded objects join the comparison.")
         scope.setProperty("role", "muted")
         scope.setWordWrap(True)

@@ -102,8 +102,12 @@ def _header(panel, layout):
     header.addWidget(panel.active_source_label, 1)
     panel.import_button = _button("Open…", panel._show_import, "compact")
     panel.import_button.setToolTip("Open a CSV, structure folder, or saved review")
-    panel.view_open_button = _button("View…", lambda: panel.review_view_dialog.show(), "compact")
-    panel.view_open_button.setToolTip("Change candidate view")
+    panel.view_open_button = QtWidgets.QToolButton()
+    panel.view_open_button.setText("View")
+    panel.view_open_button.setProperty("role", "compact")
+    panel.view_open_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+    panel.view_open_button.setAccessibleName("Review view")
+    panel.view_open_button.setToolTip("Choose a candidate review view")
     panel.compare_toggle = QtWidgets.QToolButton()
     panel.compare_toggle.setText("Compare")
     panel.compare_toggle.setCheckable(True)
@@ -324,18 +328,25 @@ def _quick_views(panel):
     outer = QtWidgets.QVBoxLayout(panel.quick_views)
     outer.setContentsMargins(0, 0, 0, 0)
     outer.setSpacing(3)
-    layout = QtWidgets.QHBoxLayout()
+    layout = QtWidgets.QGridLayout()
+    layout.setHorizontalSpacing(4)
+    layout.setVerticalSpacing(4)
+    layout.setColumnStretch(0, 1)
+    layout.setColumnStretch(1, 1)
     outer.addLayout(layout)
     panel.quick_view_buttons = {}
     panel.interface_radius_actions = {}
-    for name, title in QUICK_VIEWS.items():
+    captions = {"overview": "Overview", "interface": "Interface", "membrane": "Membrane", "mass": "MASS"}
+    for index, (name, title) in enumerate(QUICK_VIEWS.items()):
         button = QtWidgets.QToolButton(panel.quick_views)
-        button.setText("Whole structure" if name == "overview" else title)
+        button.setText(captions[name])
         button.setCheckable(True)
         button.setProperty("role", "view")
+        button.setAccessibleName(title)
+        button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         button.clicked.connect(lambda checked, key=name: panel._choose_quick_view(key if checked else ""))
         button.setToolTip(f"{title} for this review session. Click again to follow saved commands on the next candidate.")
-        layout.addWidget(button)
+        layout.addWidget(button, index // 2, index % 2)
         panel.quick_view_buttons[name] = button
         if name == "interface":
             menu = QtWidgets.QMenu(button)
@@ -352,7 +363,6 @@ def _quick_views(panel):
             menu.aboutToShow.connect(lambda: panel._fill_mass_view_menu(menu))
             button.setMenu(menu)
             button.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
-    layout.addStretch(1)
     panel.quick_views.setEnabled(False)
     return panel.quick_views
 
@@ -360,7 +370,7 @@ def _quick_views(panel):
 def _interface_cavity_controls(panel):
     from .view_controls import CavityControls
 
-    controls = panel.interface_cavity_controls = CavityControls(panel)
+    controls = panel.interface_cavity_controls = CavityControls(panel, compact=True)
     panel.interface_cavity_checks = controls.checks
     panel.interface_cavity_volumes = controls.volumes
     return controls
@@ -371,20 +381,20 @@ def _review_page(panel):
     from .plugin import _DatasetTableModel, _get_bg_executor
     from .qt_widgets import ScoresTable
     from .score_headers import ScoreProfileHeader
+    from .view_popup import ReviewViewPopup
     page = QtWidgets.QWidget()
     layout = QtWidgets.QVBoxLayout(page)
     layout.setContentsMargins(0, 0, 0, 0)
-    view_dialog = panel.review_view_dialog = QtWidgets.QDialog(panel)
-    view_dialog.setWindowTitle("Change candidate view")
-    view_dialog.resize(665, 200)
-    view_layout = QtWidgets.QVBoxLayout(view_dialog)
+    view_popup = panel.review_view_dialog = ReviewViewPopup(panel.view_open_button)
+    panel.view_open_button.setMenu(view_popup)
+    view_layout = view_popup.content_layout
     panel.candidate_view_scope = QtWidgets.QLabel()
     panel.candidate_view_scope.setProperty("role", "muted")
     panel.candidate_view_scope.setWordWrap(True)
+    panel.candidate_view_scope.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
     view_layout.addWidget(panel.candidate_view_scope)
     view_layout.addWidget(_quick_views(panel))
     view_layout.addWidget(_interface_cavity_controls(panel))
-    view_layout.addWidget(_button("Done", view_dialog.close), 0, QtCore.Qt.AlignRight)
     panel.compare_bar = ComparisonBar(page)
     panel.compare_toggle.toggled.connect(panel.compare_bar.setVisible)
     panel.compare_bar.done.clicked.connect(lambda: panel.compare_toggle.setChecked(False))
@@ -570,7 +580,7 @@ def _candidate_card(panel):
     current_layout.addLayout(title_row)
     panel.score_dialog = QtWidgets.QDialog(panel)
     panel.score_dialog.setWindowTitle("Candidate scores")
-    panel.score_dialog.resize(600, 350)
+    panel.score_dialog.resize(600, 300)
     score_layout = QtWidgets.QVBoxLayout(panel.score_dialog)
     panel.score_footer = ScoreFooter(panel.score_dialog)
     score_layout.addWidget(panel.score_footer)
@@ -592,7 +602,7 @@ def _details_dialog(panel):
     panel.details_cb.hide()
     panel.details_dialog = QtWidgets.QDialog(panel)
     panel.details_dialog.setWindowTitle("Structure details")
-    panel.details_dialog.resize(700, 440)
+    panel.details_dialog.resize(700, 380)
     layout = QtWidgets.QVBoxLayout(panel.details_dialog)
     panel.metadata_table = QtWidgets.QTableWidget(0, 2)
     panel.metadata_table.setHorizontalHeaderLabels(["Field", "Value"])
