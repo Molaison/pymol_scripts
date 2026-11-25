@@ -6338,9 +6338,10 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.back_button.setVisible(batch or index == 2 or (index == 1 and STATE.dataset is not None))
         self.import_button.setVisible(index == 0)
         self.view_open_button.setVisible(index == 0)
-        self.compare_toggle.setVisible(index == 0)
+        show_tools = index == 0 or (index == 1 and not STATE.files)
+        self.compare_toggle.setVisible(show_tools)
         self.reference_track_button.setVisible(index == 0)
-        self.more_button.setVisible(index == 0)
+        self.more_button.setVisible(show_tools)
         if index != 0:
             self.review_view_dialog.close()
             self.score_dialog.close()
@@ -8949,7 +8950,9 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.table_options_button.setEnabled(STATE.dataset is not None and not busy)
         self.quick_views.setEnabled(view_available)
         self.view_open_button.setEnabled(view_available)
-        self.compare_toggle.setEnabled(view_available)
+        self.compare_toggle.setEnabled(not busy)
+        self.compare_toggle.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup if view_available
+                                         else QtWidgets.QToolButton.InstantPopup)
         self.reference_track_button.setEnabled(view_available and STATE.source_mode == "csv")
         self.pocket_reference_action.setEnabled(view_available and STATE.source_mode == "csv" and bool(STATE.reference_track))
         self.compare_bar.setEnabled(ready and bool(STATE.current_object))
@@ -8960,7 +8963,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         can_undo = bool(STATE.undo_history) and STATE.row_annotation_store is not None and not busy
         self.undo_btn.setEnabled(can_undo)
         self.undo_action.setEnabled(can_undo)
-        self.more_button.setEnabled(STATE.dataset is not None and not busy)
+        self.more_button.setEnabled(not busy)
         self.empty_view.setVisible(bool(STATE.all_entries) and not STATE.files)
         self.status_label.setText("")
         if not STATE.files:

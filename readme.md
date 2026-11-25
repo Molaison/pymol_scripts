@@ -10,7 +10,7 @@
 
 1. 从 [正式 Release](https://github.com/Molaison/pymol_scripts/releases/latest) 下载附件 `PymolPlugins-<version>.zip`。不要选择 GitHub 自动生成的 Source code ZIP，也不要解压插件包。
 2. 在 PyMOL 选择 **Plugin → Plugin Manager → Install New Plugin**，选择下载的 ZIP。
-3. 完全退出并重启 PyMOL。在 **Plugin → PymolPlugins** 中打开 **Review structures…**、**Compare or process structures…**、**Structure Collections…** 或 **RFD4 · Proteina**。
+3. 完全退出并重启 PyMOL。在 **Plugin → PymolPlugins** 中打开 **Review structures…**、**Structure Collections…** 或 **RFD4 · Proteina**。在 Review 中通过 **Compare → Align loaded objects…** 对齐已加载对象，通过 **Tools → Compare or process structures…** 打开批处理。
 
 0.19.0 将 RFD4 原生面板纳入同一插件包：输入、条件编辑、candidate 生成及下一轮、轨迹与氢键条件检查均在 PyMOL 内操作。模型通过 HTTPS 或 SSH 转发连接服务端，已有连接和登录配置沿用。见 [RFD4 使用与迁移](pymolplugins/rfd4/README.md)。
 

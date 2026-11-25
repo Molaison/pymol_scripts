@@ -1,6 +1,6 @@
 # 批量结构对照
 
-从 **Plugin → PymolPlugins → Compare or process structures…** 或 Annotator 的 **Tools** 菜单打开 **Batch**，选择 **Review in PyMOL**。设置候选和参考后，点 **Preview pairs** 核对配对，再点 **Create and open review…** 选择保存位置。工具生成一个新的比较目录，并在当前 Annotator 窗口切回审阅。下次可直接打开目录内的 sum_scores.csv。
+从 **Review → Tools → Compare or process structures…** 打开 **Batch**，选择 **Review in PyMOL**。设置候选和参考后，点 **Preview pairs** 核对配对，再点 **Create and open review…** 选择保存位置。工具生成一个新的比较目录，并在当前 Annotator 窗口切回审阅。下次可直接打开目录内的 sum_scores.csv。
 
 从已有本地审阅转入 Batch 时，可选择表格中选中的行、当前筛选集合或整个数据源。返回 Batch 保留命令、输出位置和错误处理草稿。Batch 占用场景时暂停场景预载和审阅导航，返回 Review 后恢复。远端数据需先准备本机可读的输入文件。
 

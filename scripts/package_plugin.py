@@ -37,7 +37,7 @@ INSTALL_TEXT = """# 安装 PymolPlugins（{version}）
 
 ## 比较和展示结构集合
 
-**Plugin > PymolPlugins > Compare or process structures…** 打开同一 Annotator 的 **Batch** 页。选择 **Review in PyMOL**，设置候选和参考，先预览配对，再生成比较目录并打开 Review。选择 **Process and save structures** 则运行处理命令并输出结构；输入文件保留。
+**Review > Tools > Compare or process structures…** 打开 **Batch** 页。选择 **Review in PyMOL**，设置候选和参考，先预览配对，再生成比较目录并打开 Review。选择 **Process and save structures** 则运行处理命令并输出结构；输入文件保留。
 
 **Plugin > PymolPlugins > Structure Collections…** 打开并排的采样控件与样本预览。按打分分层和结构差异选样，保存统一朝向，再导出独立的 PNG 与展示页。`pp_collections` 可直接打开面板或已有 `01_collection.json`。源结构保持不变；关闭预览恢复原场景。细节见包内 `docs/01_structure_collections.md` 和 `docs/03_comparison_review.md`。
 

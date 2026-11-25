@@ -90,12 +90,10 @@ bundle.__init_plugin__()
 assert set(menus) == {
     "PymolPlugins|Change scene view…",
     "PymolPlugins|Click to focus",
-    "PymolPlugins|Align loaded objects…",
     "PymolPlugins|Getting Started",
     "PymolPlugins|Maintenance|Reload toolkit", "PymolPlugins|Maintenance|Doctor",
     "PymolPlugins|Maintenance|Capabilities", "PymolPlugins|Command Help…",
     "PymolPlugins|Review structures…",
-    "PymolPlugins|Compare or process structures…",
     "PymolPlugins|Structure Collections…",
     "PymolPlugins|RFD4 · Proteina",
     "PymolPlugins|Maintenance|Updates",

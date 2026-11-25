@@ -291,7 +291,8 @@ class Acceptance:
                     Path(module.__file__).resolve().relative_to(installed)
         self.menu = self.window.menudict["PluginQt|PymolPlugins"]
         labels = [a.text() for a in self.menu.actions()]
-        assert {"Structure Collections…", "Compare or process structures…", "Review structures…"} <= set(labels), labels
+        assert {"Structure Collections…", "Review structures…"} <= set(labels), labels
+        assert not {"Align loaded objects…", "Compare or process structures…"} & set(labels), labels
         identities = {}
         for name in ("pp_collections", "pp_compare"):
             module, function = manifest.COMMAND_TARGETS[name]

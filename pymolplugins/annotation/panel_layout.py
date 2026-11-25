@@ -83,6 +83,7 @@ def build_panel(panel):
 
 
 def _header(panel, layout):
+    from pymolplugins.host.plugin import show_comparison_from_toolkit
     from pymolplugins.host.workspace import WindowModeButton
 
     header = QtWidgets.QHBoxLayout()
@@ -107,9 +108,11 @@ def _header(panel, layout):
     panel.compare_toggle.setText("Compare")
     panel.compare_toggle.setCheckable(True)
     panel.compare_toggle.setProperty("role", "compact")
-    panel.compare_toggle.setToolTip("Compare selected candidates. The menu opens Pocket changes.")
+    panel.compare_toggle.setToolTip("Compare review candidates or align objects already loaded in PyMOL.")
     panel.compare_toggle.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
     compare_menu = QtWidgets.QMenu(panel.compare_toggle)
+    compare_menu.addAction("Align loaded objects…", show_comparison_from_toolkit)
+    compare_menu.addSeparator()
     panel.pocket_summary_action = compare_menu.addAction("Pocket changes")
     panel.pocket_reference_action = compare_menu.addAction("Pocket changes · Reference track")
     panel.pocket_reference_action.setEnabled(False)
