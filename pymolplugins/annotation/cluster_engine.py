@@ -13,18 +13,37 @@ import tempfile
 
 
 def _tool(name):
-    executable = shutil.which(name)
+    executable = os.environ.get("PYMOLPLUGINS_CLUSTER_" + name.upper()) or shutil.which(name)
     if not executable:
         raise RuntimeError(f"{name} is missing on the execution host. Install it and add it to PATH.")
     version = subprocess.run([executable, "version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                             text=True, check=True, timeout=15,
+                             universal_newlines=True, check=True, timeout=15,
                              creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     return executable, version.stdout.strip()
 
 
-def _versioned_tools(method):
-    names = {"sequence": ("mmseqs",), "structure": ("foldseek",), "both": ("mmseqs", "foldseek")}
-    return {name: _tool(name) for name in names[method]}
+def required_tools(method):
+    return {"sequence": ("mmseqs",), "structure": ("foldseek",), "both": ("mmseqs", "foldseek")}[method]
+
+
+def check_dependencies(method, need_file):
+    available, missing = {}, []
+    for name in required_tools(method):
+        try:
+            available[name] = _tool(name)[1]
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            missing.append(name)
+    if need_file:
+        try:
+            import gemmi
+
+            available["gemmi"] = gemmi.__version__
+        except (ImportError, OSError):
+            missing.append("gemmi")
+    return {"ready": not missing, "available": available, "missing": missing,
+            "environment": sys.executable,
+            "paths": {name: os.environ.get("PYMOLPLUGINS_CLUSTER_" + name.upper()) or shutil.which(name)
+                      for name in available if name != "gemmi"}}
 
 
 def _read_model(path, gemmi):
@@ -35,6 +54,11 @@ def _read_model(path, gemmi):
         with gzip.open(path, "rb") as file:
             data = file.read()
         if suffixes[-2] in {"cif", "mmcif"}:
+            return gemmi.make_structure_from_block(gemmi.cif.read_string(data).sole_block())
+        return gemmi.read_pdb_string(data)
+    if os.name == "nt" and str(path).startswith(chr(92) * 2 + "?" + chr(92)):
+        data = path.read_bytes()
+        if suffixes[-1] in {"cif", "mmcif"}:
             return gemmi.make_structure_from_block(gemmi.cif.read_string(data).sole_block())
         return gemmi.read_pdb_string(data)
     return gemmi.read_structure(str(path))
@@ -140,7 +164,8 @@ def _prepare(request, root, check_cancel):
 def _stop(process):
     if os.name == "nt":
         subprocess.run(["taskkill", "/pid", str(process.pid), "/t", "/f"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+                       creationflags=subprocess.CREATE_NO_WINDOW)
     else:
         try:
             os.killpg(process.pid, signal.SIGTERM)
@@ -201,17 +226,29 @@ def _rows(path, names):
     return groups
 
 
+def _cluster_sequences(executable, request, root, coverage, check_cancel):
+    options = ["--alignment-mode", "3", "--min-seq-id", str(request["identity"]), *coverage]
+    if os.name == "nt":
+        # easy-cluster also creates representative FASTA files. The Windows
+        # build can crash in that step after the cluster assignments are ready.
+        _run([executable, "createdb", "input.fasta", "seqdb", "--dbtype", "1"], root, check_cancel)
+        _run([executable, "cluster", "seqdb", "seqclu", "seq_tmp", *options], root, check_cancel)
+        _run([executable, "createtsv", "seqdb", "seqdb", "seqclu", "seq_cluster.tsv"], root, check_cancel)
+    else:
+        _run([executable, "easy-cluster", "input.fasta", "seq", "seq_tmp", "--dbtype", "1", *options],
+             root, check_cancel)
+
+
 def run_cluster(request, check_cancel=lambda: None):
     """Return stable row assignments, skipped input reasons, and engine versions."""
-    tools = _versioned_tools(request["method"])
+    tools = {name: _tool(name) for name in required_tools(request["method"])}
     with tempfile.TemporaryDirectory(prefix="pymol_clustering_") as work:
         root = Path(work)
         names, skipped = _prepare(request, root, check_cancel)
         coverage = ["-c", str(request["coverage"]), "--cov-mode", "0", "--threads", str(request["threads"])]
         partitions = []
         if "mmseqs" in tools:
-            _run([tools["mmseqs"][0], "easy-cluster", "input.fasta", "seq", "seq_tmp", "--dbtype", "1",
-                  "--alignment-mode", "3", "--min-seq-id", str(request["identity"]), *coverage], root, check_cancel)
+            _cluster_sequences(tools["mmseqs"][0], request, root, coverage, check_cancel)
             partitions.append(_rows(root / "seq_cluster.tsv", names))
         if "foldseek" in tools:
             _run([tools["foldseek"][0], "easy-cluster", "models", "struct", "struct_tmp",

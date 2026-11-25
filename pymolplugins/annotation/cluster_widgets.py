@@ -1,12 +1,13 @@
 """Cluster the filtered review candidates and switch between group views."""
 
 from concurrent.futures import ThreadPoolExecutor
+import os
 import threading
 import time
 
 from pymol.Qt import QtCore, QtWidgets
 
-from .cluster_review import cluster_on_source, compile_cluster_score, rank_clusters
+from .cluster_review import cluster_dependencies, cluster_on_source, compile_cluster_score, rank_clusters
 from .filtering import column_expression
 from .panel_style import apply_style
 
@@ -66,10 +67,13 @@ class ClusterDialog(QtWidgets.QDialog):
         form.setContentsMargins(0, 0, 0, 0)
         self.method = _combo((("Sequence", "sequence"), ("Structure", "structure"),
                               ("Sequence and structure", "both")))
-        self.location = _combo(((f"SSH · {self.source.profile}", True), ("This computer", False))
-                               if self.source else (("This computer", False),))
-        self.location.setEnabled(self.source is not None)
+        local = (("Windows (native)", "windows"), ("WSL", "wsl")) if os.name == "nt" else (("This computer", "native"),)
+        locations = ((f"SSH · {self.source.profile}", "ssh"), *local) if self.source else local
+        self.location = _combo(locations)
+        self.location.setEnabled(len(locations) > 1)
         self.sequence = _combo((("Read from structure", ""), *((name, name) for name in self.columns)))
+        if "sequence" in self.columns and all(row.metadata.get("sequence") for row in self.rows):
+            self.sequence.setCurrentIndex(self.sequence.findData("sequence"))
         self.chain = QtWidgets.QLineEdit()
         self.chain.setPlaceholderText("Auto for one protein chain, or enter the exact chain ID")
         self.identity, self.tm, self.coverage = (_percentage(value) for value in (90, 70, 80))
@@ -117,11 +121,16 @@ class ClusterDialog(QtWidgets.QDialog):
         self.all = _button("Full filtered list", self._show_all)
         self.representatives = _button("Show representatives", self._show_representatives)
         self.members = _button("Show cluster members", self._show_members)
-        self.cancel = _button("Cancel run", self._cancel)
+        self.cancel = _button("Cancel", self._cancel)
+        self.check = _button("Check dependencies", lambda: self._setup(False))
+        self.install = _button("Install dependencies…", lambda: self._setup(True))
+        self.location.currentIndexChanged.connect(self._environment_actions)
         self.run = _button("Run clustering", self._start)
         self.run.setProperty("role", "primary")
         self.score.lineEdit().returnPressed.connect(self._show_representatives)
         execution.addWidget(self.run)
+        execution.addWidget(self.check)
+        execution.addWidget(self.install)
         execution.addWidget(self.cancel)
         execution.addStretch()
         layout.insertLayout(3, execution)
@@ -145,6 +154,46 @@ class ClusterDialog(QtWidgets.QDialog):
         self.representatives.setEnabled(not running and self.result is not None)
         self.members.setEnabled(not running and self.result is not None)
         self.cancel.setVisible(running)
+        self._environment_actions()
+
+    def _environment_actions(self):
+        self.check.setEnabled(self.future is None)
+        self.install.setVisible(self.location.currentData() in {"ssh", "windows"})
+        self.install.setEnabled(self.future is None)
+
+    def _setup(self, install):
+        if self.future is not None:
+            return
+        backend = self.location.currentData()
+        method = self.method.currentData()
+        need_file = method != "sequence" or not self.sequence.currentData()
+        self.run_where = self.location.currentText()
+        if install and QtWidgets.QMessageBox.question(
+            self, "Install clustering dependencies",
+            f"Download the clustering tools into your user directory on {self.run_where}?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel, QtWidgets.QMessageBox.Cancel,
+        ) != QtWidgets.QMessageBox.Yes:
+            return
+        self.operation = "Installing dependencies" if install else "Checking dependencies"
+        self.cancel_event = threading.Event()
+        self.started = time.monotonic()
+        remote = self.source if backend == "ssh" else None
+        self.future = self.pool.submit(cluster_dependencies, method, need_file, remote=remote,
+                                       backend=backend, install=install, cancel_event=self.cancel_event)
+        self._set_running(True)
+        self.timer.start()
+        self._poll()
+
+    def _show_dependencies(self, result):
+        versions = ", ".join(f"{name} {version}" for name, version in result["available"].items())
+        if result["ready"]:
+            self.status.setText(f"Ready on {self.run_where} · {versions}")
+        else:
+            missing = ", ".join(result["missing"])
+            hint = " · Choose WSL or SSH for Foldseek." if self.location.currentData() == "windows" and "foldseek" in result["missing"] else ""
+            self.status.setText(f"Missing on {self.run_where} · {missing}{hint}")
+        paths = [f"{tool} · {path}" for tool, path in result.get("paths", {}).items()]
+        self.status.setToolTip("\n".join([result["environment"], *paths]))
 
     def _start(self):
         try:
@@ -162,9 +211,11 @@ class ClusterDialog(QtWidgets.QDialog):
         self.cancel_event = threading.Event()
         self.started = time.monotonic()
         self.run_where = self.location.currentText()
-        remote = self.source if self.location.currentData() else None
+        backend = self.location.currentData()
+        remote = self.source if backend == "ssh" else None
+        self.operation = "Clustering"
         self.future = self.pool.submit(cluster_on_source, self.rows, options, remote=remote,
-                                       cancel_event=self.cancel_event)
+                                       backend=backend, cancel_event=self.cancel_event)
         self.status.setToolTip("")
         self._set_running(True)
         self.timer.start()
@@ -174,18 +225,22 @@ class ClusterDialog(QtWidgets.QDialog):
         if not self.is_current():
             self._cancel()
         if not self.future.done():
-            message = "Cancelling…" if self.cancel_event.is_set() else f"Clustering on {self.run_where}"
+            message = "Cancelling…" if self.cancel_event.is_set() else f"{self.operation} on {self.run_where}"
             self.status.setText(f"{message} · {time.monotonic() - self.started:.1f} s")
             return
         self.timer.stop()
         future, self.future = self.future, None
         if self.cancel_event.is_set():
-            self.status.setText("Clustering cancelled. The review view did not change.")
+            self.status.setText(f"{self.operation} cancelled.")
         else:
             try:
-                self.result = future.result()
-                self.model.update([], {})
-                self._show_representatives()
+                result = future.result()
+                if self.operation == "Clustering":
+                    self.result = result
+                    self.model.update([], {})
+                    self._show_representatives()
+                else:
+                    self._show_dependencies(result)
             except Exception as error:
                 detail = str(error).strip() or type(error).__name__
                 self.status.setText(detail.splitlines()[0])

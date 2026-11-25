@@ -75,7 +75,9 @@ design_a,structures/model_a.pdb,0.82,典型模式
 
 在 **Representative score** 选一列或填组合表达式，例如 `ipsae - 0.1 * rmsd`，再选分数越高或越低越好。列名有空格时用反引号。缺失与计算无效的分数排在末尾，同分按原始行序。改分数后点 **Show representatives** 可重选代表，不会重跑聚类。选择簇后点 **Show cluster members** 查看该簇，**Full filtered list** 返回完整筛选结果。状态栏显示跳过的行数，悬停可看原因。
 
-SSH 数据源默认在原 SSH profile 对应的服务器上跑，使用服务器的结构路径；分组结果返回本机。也可切换到 **This computer**。运行环境需要相应的 MMseqs2 或 Foldseek。读取结构时还需要 Python 3 的 Gemmi。Windows 支持使用默认 WSL 发行版，优先读取该环境中的 `~/.local/share/pymolplugins/clustering` 用户工具目录，再查找 PATH。 [MMseqs2](https://github.com/soedinglab/MMseqs2) · [Foldseek](https://github.com/steineggerlab/foldseek) · [Gemmi](https://gemmi.readthedocs.io/en/stable/mol.html)
+SSH 数据源默认使用源服务器的结构路径执行聚类，分组结果返回本机。在 **Run on** 选执行环境。Windows 与 SSH 会检查 PATH、常见 Conda 和虚拟环境目录，并验证工具是否能运行。点 **Check dependencies** 查看版本、路径和缺失项。**Install dependencies…** 复用可用环境，并在需要时把缺失工具装到所选 SSH 账户或 Windows 用户的专用目录。
+
+Windows 选择 **Windows (native)** 可直接运行 MMseqs2 序列聚类。要从结构提取序列，还需要 Gemmi。Foldseek 结构聚类可选 **WSL** 或源 **SSH** 服务器。 [MMseqs2](https://github.com/soedinglab/MMseqs2) · [Foldseek](https://github.com/steineggerlab/foldseek) · [Gemmi](https://gemmi.readthedocs.io/en/stable/mol.html)
 
 ## 叠加与对齐结构
 

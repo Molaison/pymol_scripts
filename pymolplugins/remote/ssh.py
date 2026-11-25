@@ -201,8 +201,9 @@ def default_ssh_program(*, builtin_otp=False):
 class _SshSession:
     """One authenticated, serialized read channel for one SSH command/profile."""
 
-    def __init__(self, client, command):
+    def __init__(self, client, command, *, bootstrap=None):
         self.client, self.command = client, command
+        self.bootstrap = bootstrap
         self.lock = threading.Lock()
         self.closed = False
         self.process = None
@@ -330,6 +331,8 @@ class _SshSession:
             self._report(progress, started)
             if starting:
                 self._start()
+                if self.bootstrap is not None:
+                    self.process.stdin.write(self.bootstrap + b"\n")
             payload = json.dumps(request, ensure_ascii=True).encode("ascii") + b"\n"
             self.process.stdin.write(payload)
             self.process.stdin.flush()
@@ -499,19 +502,53 @@ class SshClient:
 
     def cluster(self, options, *, cancel_event=None):
         """Run on a dedicated channel using the same profile and authentication."""
+        return self._cluster_request("cluster", options, cancel_event)
+
+    def cluster_dependencies(self, method, *, need_file, install=False, cancel_event=None):
+        operation = "cluster_install" if install else "cluster_check"
+        return self._cluster_request(operation, {"method": method, "need_file": need_file}, cancel_event)
+
+    def _cluster_request(self, operation, options, cancel_event):
         engine = Path(__file__).parents[1] / "annotation" / "cluster_engine.py"
+        environment = Path(__file__).with_name("cluster_environment.py")
         encoded = base64.b64encode(zlib.compress(engine.read_bytes())).decode("ascii")
-        bootstrap = (
+        setup = base64.b64encode(zlib.compress(environment.read_bytes())).decode("ascii")
+        body = (
             "import base64, sys, types, zlib\n"
             "_cluster_engine = types.ModuleType('_pp_cluster_engine')\n"
-            "sys.modules[_cluster_engine.__name__] = _cluster_engine\n"
+            "_cluster_setup = types.ModuleType('_pp_cluster_setup')\n"
             f"exec(zlib.decompress(base64.b64decode({encoded!r})), vars(_cluster_engine))\n"
+            f"exec(zlib.decompress(base64.b64decode({setup!r})), vars(_cluster_setup))\n"
+            "_cluster_setup.configure()\n"
             "run_cluster = _cluster_engine.run_cluster\n"
-        )
-        request = {"operation": "cluster", "options": options}
+        ) + _REMOTE_SCRIPT
+        launch = """
+import base64, json, os, sys, types, zlib
+# Read only the bootstrap line so an interpreter switch cannot consume RPC data.
+payload = bytearray()
+while True:
+    byte = os.read(0, 1)
+    if not byte or byte == bytes((10,)):
+        break
+    payload.extend(byte)
+setup, body, scope = payload.decode('ascii').split(' ', 2)
+module = types.ModuleType('_pp_cluster_setup')
+exec(zlib.decompress(base64.b64decode(setup)), vars(module))
+python, env = module.discover(*json.loads(scope))
+program = 'import base64,zlib;exec(zlib.decompress(base64.b64decode(%r)))' % body
+if python != sys.executable:
+    os.execve(python, [python, '-c', program], env)
+os.environ.update(env)
+exec(program)
+"""
+        payload = setup.encode("ascii") + b" " + base64.b64encode(zlib.compress(body.encode("utf-8")))
+        need_file = (any(row.get("path") for row in options["records"])
+                     if operation == "cluster" else options["need_file"])
+        payload += b" " + json.dumps([options["method"], need_file]).encode("ascii")
+        request = {"operation": operation, "options": options}
         if len(json.dumps(request, ensure_ascii=True)) >= 4 * 1024 * 1024:
             raise ValueError("This cluster request exceeds the SSH metadata limit. Narrow the active filter first.")
-        session = _SshSession(self, tuple(self.command(worker_source=bootstrap + _REMOTE_SCRIPT)))
+        session = _SshSession(self, tuple(self.command(worker_source=launch)), bootstrap=payload)
         try:
             with tempfile.TemporaryFile() as output:
                 return session.request(request, output, cancel_event, self.timeout)

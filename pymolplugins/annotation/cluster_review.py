@@ -6,7 +6,6 @@ from collections import defaultdict
 from contextlib import ExitStack
 from dataclasses import dataclass
 from functools import lru_cache
-from importlib.util import find_spec
 import json
 import math
 import operator
@@ -17,6 +16,7 @@ import subprocess
 import tempfile
 import threading
 
+from pymolplugins.core.windows_paths import windows_long_path
 from pymolplugins.remote.ssh import SshClient, local_source_file, parse_ssh_path
 
 from .filtering import _column_name, _quoted_columns
@@ -98,7 +98,7 @@ def rank_clusters(entries, assignments, score, higher=True):
     return [cluster for _, cluster in sorted(result, key=lambda row: row[0])]
 
 
-def cluster_on_source(entries, options, *, remote=None, cancel_event):
+def cluster_on_source(entries, options, *, remote=None, backend="auto", cancel_event):
     """Run the supplied subset without moving remote structures to the desktop."""
     need_file = options["method"] != "sequence" or not options["sequence_column"]
     records, skipped = [], {}
@@ -132,7 +132,7 @@ def cluster_on_source(entries, options, *, remote=None, cancel_event):
         if remote is not None:
             result = SshClient(remote, timeout=3600).cluster(request, cancel_event=cancel_event)
         else:
-            result = _run_local(request, need_file, cancel_event)
+            result = _run_local(request, need_file, cancel_event, backend=backend)
         result["skipped"].update(skipped)
         return result
 
@@ -155,15 +155,42 @@ def _wsl_path(path):
     return _wsl_mount(native.drive).rstrip("/") + "/" + "/".join(native.parts[1:])
 
 
-def _run_local(request, need_file, cancel_event):
+def cluster_dependencies(method, need_file, *, remote, backend, install, cancel_event):
+    if remote is not None:
+        return SshClient(remote, timeout=1800).cluster_dependencies(
+            method, need_file=need_file, install=install, cancel_event=cancel_event)
+    from .cluster_engine import check_dependencies
+
+    request = {"method": method, "need_file": need_file, "check_dependencies": True}
+    if backend == "wsl":
+        return _run_wsl(request, cancel_event)
+    if os.name != "nt":
+        return check_dependencies(method, need_file)
+    result = _run_windows(request, cancel_event)
+    if not install or result["ready"]:
+        return result
+    from .cluster_windows import install_windows
+
+    install_windows(result["missing"], lambda: _check_cancel(cancel_event))
+    return _run_windows(request, cancel_event)
+
+
+def _run_local(request, need_file, cancel_event, *, backend="auto"):
     from .cluster_engine import run_cluster
 
-    tools = {"sequence": ("mmseqs",), "structure": ("foldseek",),
-             "both": ("mmseqs", "foldseek")}[request["method"]]
-    if os.name != "nt" or (all(shutil.which(tool) for tool in tools) and (not need_file or find_spec("gemmi"))):
+    if os.name != "nt":
         return run_cluster(request, lambda: _check_cancel(cancel_event))
-    if not shutil.which("wsl.exe"):
-        raise RuntimeError("Install the clustering tools and Gemmi, enable WSL, or run on the source SSH host.")
+    if backend != "wsl":
+        status = cluster_dependencies(request["method"], need_file, remote=None, backend="windows",
+                                      install=False, cancel_event=cancel_event)
+        if status["ready"]:
+            for record in request["records"]:
+                if record["path"]:
+                    record["path"] = windows_long_path(record["path"])
+            return _run_windows(request, cancel_event)
+        if backend == "windows" or not shutil.which("wsl.exe"):
+            missing = ", ".join(status["missing"])
+            raise RuntimeError(f"Missing Windows dependencies: {missing}. Use Install dependencies, WSL, or SSH.")
     with tempfile.TemporaryDirectory(prefix="pymol_cluster_input_") as staged:
         for i, record in enumerate(request["records"]):
             _check_cancel(cancel_event)
@@ -177,10 +204,40 @@ def _wsl_input(path, staged, index):
     drive = source.absolute().drive
     if len(drive) != 2 or ctypes.windll.kernel32.GetDriveTypeW(drive + "\\") == 4:
         fallback = Path(staged) / (f"input_{index}" + "".join(source.suffixes[-2:]))
-        if source.is_file():
-            shutil.copyfile(source, fallback)
+        if os.path.isfile(windows_long_path(source)):
+            shutil.copyfile(windows_long_path(source), fallback)
         source = fallback
     return _wsl_path(source)
+
+
+def _run_windows(request, cancel_event):
+    from .cluster_windows import console_python, native_paths, tools_root
+    from pymolplugins.remote.cluster_environment import discover
+
+    need_file = request.get("need_file", any(row.get("path") for row in request.get("records", ())))
+    executable, env = discover(request["method"], need_file, private=tools_root(), default_python=console_python())
+    _, python = native_paths()
+    engine = Path(__file__).with_name("cluster_engine.py")
+    command = [executable, "-I", "-c", _CLUSTER_ENTRY, str(engine), "", str(python)]
+    return _run_cluster_process(command, request, cancel_event, env=env)
+
+
+_CLUSTER_ENTRY = """
+import json, runpy, sys
+if len(sys.argv) > 3:
+    sys.path.insert(0, sys.argv[3])
+engine = runpy.run_path(sys.argv[1])
+channel = runpy.run_path(sys.argv[2])['check_cluster_channel'] if sys.argv[2] else lambda: None
+request = json.loads(sys.stdin.buffer.readline())
+try:
+    if request.get('check_dependencies'):
+        result = engine['check_dependencies'](request['method'], request['need_file'])
+    else:
+        result = engine['run_cluster'](request, check_cancel=channel)
+    print(json.dumps(result))
+except Exception as error:
+    sys.exit(str(error))
+"""
 
 
 def _run_wsl(request, cancel_event):
@@ -188,20 +245,19 @@ def _run_wsl(request, cancel_event):
               'export PATH="$prefix/mmseqs/bin:$prefix/foldseek/bin:$PATH"; '
               'if [ -x "$prefix/python/bin/python" ]; then exec "$prefix/python/bin/python" "$@"; fi; '
               'exec python3 "$@"')
-    entry = (
-        "import json, runpy, sys\n"
-        "run_cluster = runpy.run_path(sys.argv[1])['run_cluster']\n"
-        "channel = runpy.run_path(sys.argv[2])['check_cluster_channel']\n"
-        "try:\n print(json.dumps(run_cluster(json.loads(sys.stdin.buffer.readline()), check_cancel=channel)))\n"
-        "except Exception as error:\n sys.exit(str(error))\n"
-    )
     engine = Path(__file__).with_name("cluster_engine.py")
-    ssh_worker = engine.parents[1] / "remote" / "ssh_worker.py"
-    command = ["wsl.exe", "-e", "sh", "-c", launch, "cluster", "-c", entry,
-               _wsl_path(engine), _wsl_path(ssh_worker)]
+    worker = engine.parents[1] / "remote" / "ssh_worker.py"
+    command = ["wsl.exe", "-e", "sh", "-c", launch, "cluster", "-c", _CLUSTER_ENTRY,
+               _wsl_path(engine), _wsl_path(worker)]
+    return _run_cluster_process(command, request, cancel_event)
+
+
+def _run_cluster_process(command, request, cancel_event, *, env=None):
+    from .cluster_engine import _stop
+
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=stdout, stderr=stderr,
-                                   creationflags=subprocess.CREATE_NO_WINDOW)
+                                   creationflags=subprocess.CREATE_NO_WINDOW, env=env)
         body = json.dumps(request).encode("utf-8") + b"\n"
         writer = threading.Thread(target=_write_request, args=(process, body), daemon=True)
         writer.start()
@@ -211,13 +267,13 @@ def _run_wsl(request, cancel_event):
                     raise InterruptedError("Clustering cancelled.")
         finally:
             if process.poll() is None:
-                process.kill()
+                _stop(process)
             process.wait()
             writer.join()
             process.stdin.close()
         if process.returncode:
             stderr.seek(0)
-            raise RuntimeError(stderr.read().decode("utf-8", "replace").strip()[-1200:] or "Local WSL clustering failed.")
+            raise RuntimeError(stderr.read().decode("utf-8", "replace").strip()[-1200:] or "Local clustering process failed.")
         stdout.seek(0)
         return json.load(stdout)
 

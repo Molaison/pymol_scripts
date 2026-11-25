@@ -140,7 +140,7 @@ def check_cluster_channel():
         raise InterruptedError("Clustering channel closed.")
 
 
-def cluster_request(options):
+def cluster_request(operation, options):
     engine = globals().get("run_cluster")
     if engine is None:
         raise ValueError("This SSH channel is for file access. Start a clustering channel.")
@@ -150,7 +150,13 @@ def cluster_request(options):
 
     saved = signal.signal(signal.SIGHUP, disconnected)
     try:
-        return engine(options, check_cancel=check_cluster_channel)
+        if operation == "cluster":
+            return engine(options, check_cancel=check_cluster_channel)
+        check = _cluster_engine.check_dependencies
+        method, need_file = options["method"], options["need_file"]
+        if operation == "cluster_install":
+            return _cluster_setup.install(method, need_file, check, _cluster_engine._run, check_cluster_channel)
+        return check(method, need_file)
     finally:
         signal.signal(signal.SIGHUP, saved)
 
@@ -167,8 +173,8 @@ def dispatch(request):
         reply(list_directory(request["path"], request["maximum"]))
     elif operation == "header":
         reply(table_header(request["path"], request["encoding"], request["delimiter"]))
-    elif operation == "cluster":
-        reply(cluster_request(request["options"]))
+    elif operation in ("cluster", "cluster_check", "cluster_install"):
+        reply(cluster_request(operation, request["options"]))
     else:
         raise ValueError("Unknown SSH read operation: " + str(operation))
 
