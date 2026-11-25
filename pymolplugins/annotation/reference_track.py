@@ -171,12 +171,18 @@ class ReferenceTrack:
         self.moved = {}
         self.identities = {}
         self.reference_identity = None
+        self.protein = False
+        self.view_request = object()
 
     def loaded(self, api, key):
         return (self.key == key and self.name in api.get_names("objects")
                 and molecule_identity(api, self.name) == self.reference_identity)
 
     def suspend(self, api):
+        if self.name:
+            from .review_view_presets import clear_review_view
+
+            clear_review_view(api, self.name)
         objects = set(api.get_names("objects"))
         for name, (baseline, applied) in self.moved.items():
             if (name in objects and _ttt(api, name) == applied
@@ -240,17 +246,28 @@ class ReferenceTrack:
                 api.center(ref, state=1, origin=0, animate=0)
             else:
                 self.delta = None
-            api.hide("everything", ref)
-            api.show("cartoon" if protein else "sticks", ref + (" and polymer.protein" if protein else ""))
-            api.color("yelloworange", ref if protein else ref + " and elem C")
-            if not protein:
-                api.set("stick_radius", 0.16, ref)
-                api.set("stick_transparency", 0.25, ref)
+            self.protein = protein
+            self.restore_view(api)
         except Exception:
             self.suspend(api)
             raise
         unit = "Cα" if protein else "heavy atoms"
         return f"{len(pairs)} {unit} · RMSD {fit.rmsd_after:.3f} Å"
+
+    def restore_view(self, api):
+        """Restore the track's standard appearance without touching its alignment."""
+        from .review_view_presets import clear_review_view
+
+        if not self.loaded(api, self.key):
+            return
+        clear_review_view(api, self.name)
+        ref = _scope(self.name, "")
+        api.hide("everything", ref)
+        api.show("cartoon" if self.protein else "sticks", ref + (" and polymer.protein" if self.protein else ""))
+        api.color("yelloworange", ref if self.protein else ref + " and elem C")
+        if not self.protein:
+            api.set("stick_radius", 0.16, ref)
+            api.set("stick_transparency", 0.25, ref)
 
     def move_products(self, api, owner, products):
         if owner != self.owner or self.delta is None:

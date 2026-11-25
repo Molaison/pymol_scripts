@@ -610,6 +610,7 @@ _REVIEW_CHECKBOX_PREFERENCES = {
     "save_on_label_click": "save_on_label_click_cb",
     "auto_advance": "auto_advance_cb",
     "antibody_cdrs": "antibody_cdrs_cb",
+    "reference_follows_view": "reference_follows_view_cb",
     "keep_previous": "keep_previous_cb",
     "prefer_gz": "prefer_gz_cb",
     "skip_annotated": "skip_annotated_cb",
@@ -628,7 +629,9 @@ _REVIEW_SPIN_PREFERENCES = {
     "preload_interval_ms": "preload_interval_spin",
 }
 _REVIEW_PREFERENCES_PREFIX = "structure_annotator/preferences/"
-_REVIEW_VIEW_PREFERENCE_DEFAULTS = {"score_distributions": True, "antibody_cdrs": False}
+_REVIEW_VIEW_PREFERENCE_DEFAULTS = {
+    "score_distributions": True, "antibody_cdrs": False, "reference_follows_view": False,
+}
 _PERSISTED_SOURCE_STRING_FIELDS = (
     "source_mode",
     "csv_path",
@@ -6304,6 +6307,8 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             self._show_error("Could not save review preferences in " + settings.fileName())
         if name == "antibody_cdrs":
             self._toggle_antibody_view(value)
+        elif name == "reference_follows_view":
+            self._toggle_reference_view(value)
 
     def _show_overview(self):
         if not STATE.all_entries or self._csv_task_id:
@@ -8239,12 +8244,55 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
             result = track.apply(cmd, owner, config, self._reference_products(owner))
             direction = "row → reference" if config["direction"] == "row_to_reference" else "reference → row"
             self.reference_track_status.setText(f"Reference {label} · {direction} · {result}")
+            if self._quick_view and self._review_preferences["reference_follows_view"]:
+                self._view_jobs.queue.appendleft((owner, track.view_request))
 
         return owner, track, compute, draw
+
+    def _toggle_reference_view(self, enabled):
+        track = self._reference_track
+        if track.owner is None or track.owner != STATE.current_object:
+            return
+        if enabled and self._quick_view:
+            self._view_jobs.append(self._view_identity(), (track.owner, track.view_request), title="Reference view")
+        elif not enabled:
+            track.restore_view(cmd)
+
+    def _prepare_reference_view(self, owner):
+        from .review_view_presets import draw_review_view, prepare_review_command, quick_view_command
+
+        track = self._reference_track
+        if (not self._quick_view or not self._review_preferences["reference_follows_view"]
+                or track.owner != owner or not track.loaded(cmd, track.key)):
+            return owner, track.view_request, None, lambda _: None
+        name, identity = track.name, track.reference_identity
+        view = self._quick_view
+        chain = self._mass_chain
+        if chain is not None and view == "mass" and chain not in cmd.get_chains(f"%{name} and polymer.protein"):
+            chain = None
+        try:
+            source, action, compute, draw = prepare_review_command(
+                quick_view_command(view, name, self._interface_radius, chain), cmd
+            )
+        except ValueError as exc:
+            raise ValueError(f"Reference · {exc}") from exc
+
+        def show(data):
+            if (self._review_preferences["reference_follows_view"] and track.owner == owner
+                    and track.reference_identity == identity and track.loaded(cmd, track.key)):
+                camera = cmd.get_view()
+                try:
+                    return draw_review_view(cmd, source, action, draw, data, exclusive=True)
+                finally:
+                    cmd.set_view(camera, animate=0)
+
+        return source, track.view_request, compute, show
 
     def _prepare_candidate_view(self, owner, line):
         if line is self._reference_track:
             return self._prepare_reference_track(owner)
+        if line is self._reference_track.view_request:
+            return self._prepare_reference_view(owner)
         from .antibody_cdrs import AntibodyRequest, capture_chains, number_chains
         from .bundle_view import BundleMembraneLayer, BundleViewRequest, _draw_bundle_membrane, prepare_bundle_view
         from .review_view_presets import REVIEW_VIEW_COMMANDS, prepare_review_command
@@ -8275,7 +8323,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         from .review_view_presets import draw_review_view
         from pymolplugins.core.pymol_display import display_updates
 
-        if action is self._reference_track:
+        if action in (self._reference_track, self._reference_track.view_request):
             with display_updates(cmd):
                 draw(data)
             return
@@ -8577,6 +8625,7 @@ class StructureAnnotatorPanel(QtWidgets.QWidget):
         self.auto_advance_cb.setChecked(bool(STATE.auto_advance))
         self.save_on_label_click_cb.setChecked(bool(STATE.save_on_label_click))
         self.antibody_cdrs_cb.setChecked(self._review_preferences["antibody_cdrs"])
+        self.reference_follows_view_cb.setChecked(self._review_preferences["reference_follows_view"])
         self.show_source_row_action.setChecked(bool(STATE.show_source_row))
         self.show_file_status_action.setChecked(bool(STATE.show_file_status))
         self.column_profiles_action.setChecked(self._review_preferences["score_distributions"])
