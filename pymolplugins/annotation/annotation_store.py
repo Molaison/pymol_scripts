@@ -639,6 +639,13 @@ class RowAnnotationStore:
             self._source_revision += 1
             return True
 
+    def unbound_entries(self, entry_ids):
+        """Return candidates whose source version has not been observed."""
+        if not self.versioned:
+            return ()
+        with self._lock:
+            return tuple(entry_id for entry_id in entry_ids if entry_id not in self._source_versions)
+
     def _version_for(self, entry_id, label, version=_CURRENT_VERSION, *, writing=False):
         if version is not _CURRENT_VERSION:
             return "" if version is None else _validate_identifier(version, "source_version", 512)

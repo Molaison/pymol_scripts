@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 import copy
+from functools import partial
 import traceback
 
 from pymol.Qt import QtCore, QtWidgets
@@ -303,10 +304,17 @@ class ReviewController:
                         "advance": on_displayed_candidate, "updates": updates,
                         "force_advance": bool(force_advance),
                         "fields": copy.deepcopy(self.form.fields)}
+        store = self.pending["store"]
+        arguments = {"store": store, "entry_ids": targets, "updates": updates,
+                     "fields": self.pending["fields"]}
+        if not on_displayed_candidate and store.versioned:
+            entries = {entry_id: self.owner.STATE.entries[self.panel._entry_id_to_active_index[entry_id]]
+                       for entry_id in targets}
+            arguments["resolve_versions"] = partial(
+                self.owner._observe_annotation_versions, entries, self.owner._materialization_context()
+            )
         self.panel._start_csv_task("annotations", self.owner.save_annotations,
-                                  {"source": self.owner._active_source_reference()}, worker_arguments={
-                                      "store": self.pending["store"], "entry_ids": targets,
-                                      "updates": updates, "fields": copy.deepcopy(self.form.fields)})
+                                  {"source": self.owner._active_source_reference()}, worker_arguments=arguments)
         self.refresh()
 
     def undo(self):

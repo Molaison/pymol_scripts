@@ -33,7 +33,7 @@ from pymolplugins.annotation.scene_groups import CandidateBundles, ancestors, ca
 from pymolplugins.annotation.review_actions import save_annotations, undo_annotations
 from pymolplugins.annotation.provenance import (
     LoadedSourceVersion, record_loaded_source, activate_loaded_source,
-    loaded_source_token, forget_loaded_source,
+    loaded_source_token, forget_loaded_source, source_version_token,
 )
 from pymolplugins.annotation.score_summary import prepare_score_summary
 from pymolplugins.annotation.model import format_numeric_cell
@@ -1783,6 +1783,13 @@ def _stage_relative_path(
     return alias, relative
 
 
+def _staged_source_identity(alias, relative, observed):
+    return SourceIdentity(
+        provider=f"wsl-stage:{alias}", canonical_source=f"{alias}/{relative}",
+        size=int(observed.size), mtime_ns=int(observed.mtime_ns), version_token=str(observed.token),
+    )
+
+
 def _materialize_wsl_entry(
     entry: AnnotationEntry,
     context: _MaterializationContext,
@@ -1791,13 +1798,7 @@ def _materialize_wsl_entry(
     alias, relative = _stage_relative_path(entry, context)
     if observed is None:
         observed = stat_staged_file(alias, relative)
-    observed_identity = SourceIdentity(
-        provider=f"wsl-stage:{alias}",
-        canonical_source=f"{alias}/{relative}",
-        size=int(observed.size),
-        mtime_ns=int(observed.mtime_ns),
-        version_token=str(observed.token),
-    )
+    observed_identity = _staged_source_identity(alias, relative, observed)
     hit = _get_structure_cache().lookup(observed_identity)
     if hit is not None:
         return MaterializedStructure(
@@ -1816,13 +1817,7 @@ def _materialize_wsl_entry(
     with tempfile.TemporaryDirectory(prefix="pymol_sa_stage_") as stage_dir:
         destination = os.path.join(stage_dir, "download" + suffix)
         downloaded = download_staged_file(alias, relative, destination)
-        identity = SourceIdentity(
-            provider=f"wsl-stage:{alias}",
-            canonical_source=f"{alias}/{relative}",
-            size=int(downloaded.source.size),
-            mtime_ns=int(downloaded.source.mtime_ns),
-            version_token=str(downloaded.source.token),
-        )
+        identity = _staged_source_identity(alias, relative, downloaded.source)
         materialized = _get_copy_materializer().materialize(
             downloaded.destination,
             provider=identity.provider,
@@ -1842,6 +1837,12 @@ def _cache_canonical_source(path: str) -> str:
     return os.path.normcase(os.path.realpath(os.path.abspath(value)))
 
 
+def _ssh_source_identity(remote, value):
+    return SourceIdentity(provider="ssh", canonical_source=remote.at(value["path"]).uri,
+                          size=value["size"], mtime_ns=value["mtime_ns"],
+                          version_token=f"{value['device']}:{value['inode']}:{value['ctime_ns']}")
+
+
 def _materialize_ssh_entry(entry, *, cancel_event=None, observed=None):
     remote = parse_ssh_path(entry.resolved_path)
     client = SshClient(remote)
@@ -1850,12 +1851,7 @@ def _materialize_ssh_entry(entry, *, cancel_event=None, observed=None):
     if observed["status"] != "available":
         raise SshError(observed["error"])
 
-    def identity(value):
-        return SourceIdentity(provider="ssh", canonical_source=remote.at(value["path"]).uri,
-                              size=value["size"], mtime_ns=value["mtime_ns"],
-                              version_token=f"{value['device']}:{value['inode']}:{value['ctime_ns']}")
-
-    source_identity = identity(observed)
+    source_identity = _ssh_source_identity(remote, observed)
     hit = _get_structure_cache().lookup(source_identity)
     if hit is not None:
         return MaterializedStructure(source_path=entry.source_path, path=hit.path, identity=source_identity,
@@ -1864,7 +1860,7 @@ def _materialize_ssh_entry(entry, *, cancel_event=None, observed=None):
     if not remote.path.lower().endswith(".gz"):
         def download_to_cache(temporary):
             downloaded = client.download(temporary, cancel_event=cancel_event)
-            if identity(downloaded) != source_identity:
+            if _ssh_source_identity(remote, downloaded) != source_identity:
                 raise SourceChangedError(
                     f"remote source changed while downloading: {remote.path}"
                 )
@@ -1880,7 +1876,7 @@ def _materialize_ssh_entry(entry, *, cancel_event=None, observed=None):
     with tempfile.TemporaryDirectory(prefix="pymol_ssh_structure_") as directory:
         destination = os.path.join(directory, "structure" + suffix)
         downloaded = client.download(destination, cancel_event=cancel_event)
-        if identity(downloaded) != source_identity:
+        if _ssh_source_identity(remote, downloaded) != source_identity:
             raise SourceChangedError(
                 f"remote source changed while downloading: {remote.path}"
             )
@@ -1888,6 +1884,59 @@ def _materialize_ssh_entry(entry, *, cancel_event=None, observed=None):
                    canonical_source=source_identity.canonical_source, source_identity=source_identity,
                    logical_path=remote.path)
         return replace(result, source_path=entry.source_path)
+
+
+def _observe_annotation_versions(entries, context, entry_ids, *, cancel_event=None):
+    """Read source metadata for selected rows that have never been activated."""
+    from collections import defaultdict
+
+    identities = {}
+    ssh_groups = defaultdict(list)
+    staged = []
+    for entry_id in entry_ids:
+        _check_csv_preparation_cancelled(cancel_event)
+        entry = entries[entry_id]
+        provider = _entry_provider(entry)
+        try:
+            if provider == "ssh":
+                remote = parse_ssh_path(_entry_source_path(entry))
+                ssh_groups[remote.at("/")].append((entry, remote))
+            elif provider.startswith("wsl-stage:"):
+                staged.append((entry, *_stage_relative_path(entry, context)))
+            else:
+                source = _entry_source_path(entry)
+                identities[entry_id] = SourceIdentity.from_path(
+                    _long_path(source), provider=provider, canonical_source=_cache_canonical_source(source)
+                )
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise RuntimeError(f"Cannot verify source for {entry.display_name}: {exc}") from exc
+    for remote, group in ssh_groups.items():
+        client = SshClient(remote)
+        for offset in range(0, len(group), 256):
+            chunk = group[offset:offset + 256]
+            observations = client.stat_many([location.path for _, location in chunk], cancel_event=cancel_event)
+            if len(observations) != len(chunk):
+                raise SshError("SSH returned an incomplete annotation source check")
+            for (entry, location), observed in zip(chunk, observations):
+                if observed["status"] != "available":
+                    raise SshError(f"Cannot verify source for {entry.display_name}: {observed['error']}")
+                identities[entry.id] = _ssh_source_identity(location, observed)
+    if staged:
+        _check_csv_preparation_cancelled(cancel_event)
+        alias = staged[0][1]
+        observations = {item.relative_path: item for item in stat_staged_files(
+            alias, [relative for _entry, _alias, relative in staged]
+        )}
+        for entry, alias, relative in staged:
+            observed = observations.get(relative)
+            if observed is None or observed.error is not None:
+                reason = observed.error if observed is not None else "no source version returned"
+                raise RuntimeError(f"Cannot verify source for {entry.display_name}: {reason}")
+            identities[entry.id] = _staged_source_identity(alias, relative, observed.source)
+    _check_csv_preparation_cancelled(cancel_event)
+    return {entry_id: source_version_token(
+        entries[entry_id].source_path if entries[entry_id].source_kind == "csv" else entry_id, identity
+    ) for entry_id, identity in identities.items()}
 
 
 def _materialize_entry(

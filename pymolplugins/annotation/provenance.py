@@ -2,8 +2,9 @@
 
 These functions only handle memory. The caller records after cmd.load succeeds,
 activates after the scene transition succeeds, and owns the object-keyed mapping
-alongside its scene transaction state. Never derive a token by reading the source
-at annotation time: that could identify bytes the user has not seen.
+alongside its scene transaction state. A save always uses the pinned version
+for an activated candidate. Bulk annotation may observe the source version
+of a selected candidate that has never been activated.
 """
 
 from dataclasses import dataclass

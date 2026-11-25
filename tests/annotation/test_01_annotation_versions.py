@@ -102,6 +102,37 @@ class AnnotationVersionTests(unittest.TestCase):
         self.assertEqual(second["status"], "saved")
         self.assertEqual(second["changes"][0]["source_version"], "new")
 
+    def test_batch_resolves_unopened_rows_without_rebinding_the_displayed_version(self):
+        fields = [{"name": "quality", "type": "single", "values": ["Keep"], "required": True}]
+        self.store.bind_source("displayed", "loaded-version")
+
+        def resolve(entry_ids, *, cancel_event):
+            self.assertEqual(entry_ids, ("unopened-one", "unopened-two"))
+            return {"unopened-one": "observed-one", "unopened-two": "observed-two"}
+
+        entries = ["displayed", "unopened-one", "unopened-two"]
+        result = save_annotations(self.store, entries, {"quality": "Keep"}, fields, resolve_versions=resolve)
+        self.assertEqual(
+            {item["entry_id"]: item["source_version"] for item in result["changes"]},
+            {"displayed": "loaded-version", "unopened-one": "observed-one", "unopened-two": "observed-two"},
+        )
+        self.assertEqual(len(self.path.read_text().splitlines()), 1)
+        self.assertEqual(self.store.snapshot_for_label("quality"), dict.fromkeys(entries, "Keep"))
+        self.store.undo_batch(result["seq"])
+        self.assertEqual(self.store.snapshot_for_label("quality"), {})
+
+    def test_incomplete_source_check_does_not_commit_or_bind_any_new_row(self):
+        fields = [{"name": "quality", "type": "single", "values": ["Keep"], "required": True}]
+
+        def resolve(entry_ids, *, cancel_event):
+            raise FileNotFoundError("candidate moved")
+
+        entries = ["unopened-one", "unopened-two"]
+        with self.assertRaisesRegex(FileNotFoundError, "candidate moved"):
+            save_annotations(self.store, entries, {"quality": "Keep"}, fields, resolve_versions=resolve)
+        self.assertFalse(self.path.exists())
+        self.assertEqual(self.store.unbound_entries(entries), tuple(entries))
+
     def test_bind_and_cached_projection_do_no_io_and_change_the_view_revision(self):
         self.store.bind_source("row", "old")
         self.store.set("row", "quality", "Keep")

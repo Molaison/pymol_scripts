@@ -304,7 +304,8 @@ def check_click_save_batch_and_shortcut(panel, annotation, app):
     click(panel.review.form.save_button)
     annotation_idle(panel, app)
     assert annotation.STATE.current_entry_id() == current
-    assert all(store.get(entry_id, "quality") == "Good" for entry_id in targets)
+    assert not panel.error_label.isVisible(), panel.error_label.text()
+    assert all(store.annotations_for(entry_id) == {"quality": "Good", "reason": "Interface"} for entry_id in targets)
     toggle_annotation_option(panel, panel.save_on_label_click_cb)
     assert not panel.save_on_label_click_cb.isChecked()
     select_candidate(panel, app, 20)
