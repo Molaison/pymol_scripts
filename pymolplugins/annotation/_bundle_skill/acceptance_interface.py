@@ -2,10 +2,23 @@
 
 from collections import defaultdict, namedtuple
 from functools import lru_cache
+from math import dist
 
 _PROBE_RADIUS = 1.4  # Å
 _BURIED_AREA = 0.5  # Å²
 _EXPOSED_AREA = 1.0  # Å²
+_DIRECT_ION_CONTACT = (2.4, 3.5)  # Å
+
+POSITIVE_ATOMS = (
+    "((resn ARG and name NH1+NH2+NE) or (resn LYS and name NZ) "
+    "or (formal_charge > 0))"
+)
+NEGATIVE_ATOMS = (
+    "((resn ASP and name OD1+OD2) or (resn GLU and name OE1+OE2) "
+    "or (resn SEP+TPO+PTR and name O1P+O2P+O3P+OP1+OP2+OP3) "
+    "or (formal_charge < 0))"
+)
+
 
 _AtomSnapshot = namedtuple(
     "_AtomSnapshot", "model index segi chain resi alt q vdw coord")
@@ -50,7 +63,7 @@ def polar_pairs(api, first, second, state, cutoff):
             for pair in _pairs(api, f"({first}) and {left}", f"({second}) and {right}", state, cutoff, 1)}
 
 
-def _satisfied_atoms(api, candidates, source, state, model_indices):
+def _satisfied_atoms(api, candidates, source, state, atoms):
     water = "(solvent and elem O)"
     donors = f"({source}) and not hydro and (donor or {water})"
     acceptors = f"({source}) and not hydro and (acceptor or {water})"
@@ -62,7 +75,16 @@ def _satisfied_atoms(api, candidates, source, state, model_indices):
     satisfied = set()
     for first, second, cutoff, mode in pairs:
         for a, b in _pairs(api, first, second, state, cutoff, mode):
-            if a != b and a in model_indices and b in model_indices:
+            if a != b and a in atoms and b in atoms:
+                satisfied.update((a, b))
+
+    # Short contacts between opposite charges can satisfy a polar atom even
+    # when the hydrogen-bond angle filter rejects the pair.
+    minimum, maximum = _DIRECT_ION_CONTACT
+    for first, second in ((POSITIVE_ATOMS, NEGATIVE_ATOMS), (NEGATIVE_ATOMS, POSITIVE_ATOMS)):
+        for a, b in _pairs(api, f"({candidates}) and {first}", f"({source}) and not hydro and {second}",
+                           state, maximum, 0):
+            if a in atoms and b in atoms and dist(atoms[a].coord, atoms[b].coord) >= minimum:
                 satisfied.update((a, b))
     return satisfied
 
@@ -79,7 +101,7 @@ def capture_assembly_polar(api, objects, state, focus, partners):
 
     atoms = _primary_conformer([((atom.model, atom.index), atom)
                                 for atom in _state_atoms(api, objects, state)])
-    satisfied = _satisfied_atoms(api, polar, selection, state, {key for key, _ in atoms})
+    satisfied = _satisfied_atoms(api, polar, selection, state, dict(atoms))
     solvent = set(api.index(f"({selection}) and solvent"))
     rows = [(key, tuple(atom.coord), atom.vdw) for key, atom in atoms if key not in solvent]
     candidates.intersection_update(key for key, _, _ in rows)

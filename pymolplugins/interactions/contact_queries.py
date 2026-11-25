@@ -4,15 +4,6 @@ from typing import Any, Tuple
 
 
 H_BOND_ANGLE = 45.0
-_POSITIVE_ATOMS = (
-    "((resn ARG and name NH1+NH2+NE) or (resn LYS and name NZ) "
-    "or (formal_charge > 0))"
-)
-_NEGATIVE_ATOMS = (
-    "((resn ASP and name OD1+OD2) or (resn GLU and name OE1+OE2) "
-    "or (resn SEP+TPO+PTR and name O1P+O2P+O3P+OP1+OP2+OP3) "
-    "or (formal_charge < 0))"
-)
 
 
 def _pair_key(value: Any) -> Tuple[str, int]:
@@ -85,10 +76,12 @@ def hydrogen_bond_specs(
 def salt_bridge_specs(
     partner1: str, partner2: str, cutoff: float
 ) -> Tuple[Tuple[str, str, float, int, str, str, str, str], ...]:
+    from pymolplugins.annotation._bundle_skill.acceptance_interface import NEGATIVE_ATOMS, POSITIVE_ATOMS
+
     return (
         (
-            "(%s) and %s" % (partner1, _POSITIVE_ATOMS),
-            "(%s) and %s" % (partner2, _NEGATIVE_ATOMS),
+            "(%s) and %s" % (partner1, POSITIVE_ATOMS),
+            "(%s) and %s" % (partner2, NEGATIVE_ATOMS),
             cutoff,
             0,
             "salt_bridge",
@@ -97,8 +90,8 @@ def salt_bridge_specs(
             "negative",
         ),
         (
-            "(%s) and %s" % (partner2, _POSITIVE_ATOMS),
-            "(%s) and %s" % (partner1, _NEGATIVE_ATOMS),
+            "(%s) and %s" % (partner2, POSITIVE_ATOMS),
+            "(%s) and %s" % (partner1, NEGATIVE_ATOMS),
             cutoff,
             0,
             "salt_bridge",
