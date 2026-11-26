@@ -1,7 +1,7 @@
 # View 配色中的残基分析：CoreToSurf 与结构理解补充
 
 更新：2026-11-26。负责人：当前 Codex 会话。状态：完成，验收通过。
-代码 owner：main，D:/SyncPath/GitRepo/PymolPlugins-reviewed-integration；残基算法的原始集成基线 e00394e（0.22.5），本次嵌入 View 的基线 b321597（0.23.0）。交付版本仍为本地 0.23.0。
+代码 owner：main，D:/SyncPath/GitRepo/PymolPlugins-reviewed-integration。残基算法的原始集成基线为 e00394e（0.22.5），View 嵌入基线为 b321597（0.23.0）。交付版本为 0.23.0。独立审查与 main 发布范围见文末。
 
 ## 使用
 
@@ -9,7 +9,7 @@
 2. 使用 View 顶部的 **Object**，在 **Palette** 中选 Core / boundary / surface，点共享的 **Apply object color**。按整残基 SASA 分层；应用后滑条实时更新，切换单位时分别保留各自阈值。**Undo last style** 一次撤销该次应用及随后的阈值预览。
 3. 同一 **Palette** 还可切到相对暴露度、Kyte–Doolittle 疏水性、暴露疏水残基和非局部 Cα 接触数。相关参数按当前配色显示；普通配色继续使用原来的控件。**Copy command** 复制对应命令。
 4. 展开 **Residue values and export** 查看可排序、横向滚动的表格；双击残基定位该位置。**Copy layers** 复制 PyMOL 选择表达式或按对象列出的 Rosetta resnums；**Residue CSV…** 和 **Contact CSV…** 分别保存逐残基数据与稀疏接触对。查看、复制和导出数值不重新着色。
-5. **Create selections** 才显式生成 pp_residues_core / boundary / surface / unclassified。**pp_residue_clear** 删除这些选择，并恢复由命令行分析保存的颜色；View 的颜色使用共享 **Undo last style**。残基配色与普通配色按应用顺序撤销；如果命令行刚应用了更新的 style，先撤销该 style。
+5. **Create selections** 显式生成 pp_residues_core / boundary / surface / unclassified。**pp_residue_clear** 恢复栈顶连续的命令行残基配色，并删除这些选择。残基配色、普通配色和 Lighting 共用样式撤销顺序。如果更新的操作来自 View 或其他 style，先用 **Undo last style** 或 **pp_style_revert** 撤销。命令行配色之间若有其他 style，撤销中间的 style 后再次清理。
 
 下列 model 替换为实际已加载对象名：
 
@@ -61,24 +61,48 @@ coretosurf model, 20, 40 保留上游命令拼写，但选择名使用 pp_residu
 
 全部必需验收通过，无待监督子进程。使用 V1 原生角色；没有启动 Job Runner、科学推理或云连接器。当前旧脚本 checkout 的独立 UI 改进记录与文件不属于本任务。
 
-- 28 项纯指标、manifest/console adapter、帮助和打包测试通过，包含未知残基、CA 距离边界、同链 gap、跨对象/链/segment、随机点对 brute force 和许可证打包。
+- 115 项样式、纯指标、manifest/console adapter、帮助、打包、更新器、自动 reference、Review 导入和命令模板测试通过。包含未知残基、CA 距离边界、同链 gap、跨对象/链/segment、随机点对 brute force 和许可证打包。
 - 10 项真实 PyMOL 3.1.4.1 测试通过：原生 SASA oracle；源 B/color/坐标/全局设置；重原子遮蔽与水/氢；同 atomcount 坐标编辑与重编号缓存；多状态；byres 与环境；对象隔离；导出歧义；颜色恢复与选择冲突；新增残基配色快照与普通 style 撤销的组合检查。UI 快照只含本次分析会修改的碳原子，不写入命令行颜色恢复状态。
-- 最终 ZIP 在 PyMOL 3.1.3.1 的独立隐藏桌面通过实际 View → Color 入口、无独立残基菜单、Qt/OpenGL、滑条/单位记忆与单次撤销、五种着色、剪贴板、真实文件保存对话框、234 行 residue CSV、724 对 contact CSV。展开数据区后窗口为 620×675；共享对象选择、空参数命令复用 View、混合配色撤销、外部 style 保护、Lighting 应用/撤销和原始坐标/B 因子/颜色恢复均通过。输入桌面始终 Default。
-- Review 页的 View → Color… 另经真实菜单点击验收，带入当前候选对象，保留普通 pLDDT 配色和独立 Lighting。该次包与最终包的产品差异仅为残基表格最小高度从 110 调至 150；两个包的哈希分别保存在 09_checks.json 中。
+- 新增 6 项真实 PyMOL 撤销回归测试通过。覆盖同名重建后的快照与 CLI clear、View 与 CLI 的两种先后顺序、被普通 style 分开的 CLI 块，以及更新的普通配色和 Lighting。
+- 最终 ZIP 在 PyMOL 3.1.3.1 的独立隐藏桌面通过实际 View → Color 入口、无独立残基菜单、Qt/OpenGL、滑条/单位记忆与单次撤销、五种着色、剪贴板、真实文件保存对话框、234 行 residue CSV、724 对 contact CSV。展开数据区后的实测窗口为 620×732，计数和图例保留，操作反馈在共享状态区显示。共享对象选择、空参数命令复用 View、混合配色撤销、外部 style 保护、Lighting 应用/撤销和原始坐标/B 因子/颜色恢复均通过。输入桌面始终 Default。
+- 同一个最终 ZIP 通过 Review 页的 View → Color… 真实菜单点击验收。当前候选对象、普通 pLDDT 配色、独立 Lighting 和外部 style 撤销保护均通过。
 - 原始残基算法交付时的已安装包曾在 PyMOL 3.1.4.1 中通过控制台 coretosurf、带引号 selection、带空格 CSV 路径、保留用户 core 选择与清理命令检查；结果在 09_checks.json 的 baseline_results 中保留，本次未重复。PyMOL 2.x、Linux/macOS 未在本轮执行。
 
-证据目录 output/08_residue_analysis/：01_result.json（原生终态，含早期失败记录）、02_desktop.json、03_renderer_before.png、04_layers_panel.png、05_renderer_contacts.png、06_residues.csv、07_contacts.csv、08_compact_panel.png、09_checks.json（其余检查与包哈希）；10_review_view/01_result.json、02_desktop.json 和 13_appearance.png 保存 Review 入口验收。
+当前证据在 output/08_residue_analysis/12_review_confirmation/：01_result.json、02_desktop.json、原生截图、两个 CSV 和 09_checks.json。其下 10_review_view/ 保存同一最终 ZIP 的 Review 入口终态、桌面记录和 13_appearance.png。先前结果和旧包哈希仍在父目录及 10_review_view/ 保留。
 
 原生排错发现：填表完成后一次 resizeColumnsToContents，避免每插入一个单元格就重算列宽。读取原子颜色使用 cmd.iterate，不能假设 get_model 返回的 Chempy Atom 有 color 属性。隐藏桌面的文件保存验收使用逐键输入路径并按 Enter，等待 Save 可用；为模态对话框加了超时取证，避免测试永久停在保存窗口。
 
 可复现命令（仓库根目录）：
 
 ~~~powershell
-C:/Python313/python.exe -m unittest tests.test_residue_metrics tests.architecture.test_package_layout tests.architecture.test_host_help_registry tests.architecture.test_plugin_package -q
-D:/Softwares/Pymol3/python.exe -m unittest tests.test_residue_analysis -v
+C:/Python313/python.exe -m unittest tests.styles.test_style_registry tests.test_residue_metrics tests.architecture.test_plugin_package tests.architecture.test_package_layout tests.architecture.test_host_help_registry tests.host.test_updater tests.annotation.test_automatic_reference tests.annotation.test_review_import tests.annotation.test_command_templates -q
+D:/Softwares/Pymol3/python.exe -m unittest tests.test_residue_analysis tests.test_residue_color_lifecycle -v
 C:/Python313/python.exe scripts/package_plugin.py
-D:/Softwares/Pymol3.1/python.exe -I -u tests/host/21_hidden_desktop.py --record output/08_residue_analysis/02_desktop.json --timeout 120 tests/host/25_residue_analysis.py --package dist/PymolPlugins-0.23.0.zip --output output/08_residue_analysis
+D:/Softwares/Pymol3.1/python.exe -I -u tests/host/21_hidden_desktop.py --record output/08_residue_analysis/12_review_confirmation/02_desktop.json --timeout 90 tests/host/25_residue_analysis.py --package dist/PymolPlugins-0.23.0.zip --output output/08_residue_analysis/12_review_confirmation
+D:/Softwares/Pymol3.1/python.exe -I -u tests/host/24_reviewed_integration.py --source D:/SyncPath/GitRepo/PymolPlugins-reviewed-integration --output output/08_residue_analysis/12_review_confirmation/10_review_view --package dist/PymolPlugins-0.23.0.zip --checks appearance
 ~~~
 
-安装包：dist/PymolPlugins-0.23.0.zip，849399 bytes；SHA256：84508d24ad84c12b8e7480dab0a968d9dce35124ef99058797005328def17aff。
-在 Plugin Manager 选择此 ZIP 安装，重启 PyMOL 后从 Change scene view… → Color 或 Review → View → Color… 打开。此交付为本地源码提交及安装包；正式 Release 和日常安装不在本次变更中。
+本地验收安装包：dist/PymolPlugins-0.23.0.zip，850392 bytes。SHA256：3436f0e3ce2bf0970cd215b5757867ab6167a284c59a45433997797f8320c6a1。
+在 Plugin Manager 选择此 ZIP 安装，重启 PyMOL 后从 Change scene view… → Color 或 Review → View → Color… 打开。main 推送使用仓库现有 workflow 发布 [v0.23.0](https://github.com/Molaison/pymol_scripts/releases/tag/v0.23.0)。发布资产以 Release 随附 SHA256SUMS 为准。日常 PyMOL 安装未修改。
+
+## 独立审查与 main 整合（2026-11-26）
+
+用户要求独立子代理审查 UI（Impeccable）和实现模式，修完后合入 main。审查快照固定为 6eb55c0f81d434c3a06047043ccea1a1d9a4718c；本地 main 已含两个功能提交，远端 main 在开始审查时仍为 e00394e。
+
+- Impeccable A：01a215a7-2c75-71d3-af9f-018bb74f92e6，独立设计判断与已有原生截图。
+- Impeccable B：01a215a7-5e5e-74b2-b831-b97c2bd215dc，独立检测器适用性与原生 Qt 证据。
+- 实现模式：01a215a7-8935-7c91-8b9d-f34f6b63540c，分析、颜色、预览和撤销的共享生命周期。
+
+三份原始报告与复现保存在 output/08_residue_analysis/11_independent_review/。五项已证实问题均已修复：
+
+| 问题 | 修复 | 验证 |
+| --- | --- | --- |
+| 行内参数标签缺少显式输入关联 | 添加可访问名称和 QLabel buddy | 真实 Qt 检查名称与 buddy。实际读屏播报未测 |
+| 复制、生成选择和导出覆盖计数与图例 | 操作反馈进入 View 已有状态区 | 原生 GUI 检查复制后摘要保留，截图显示生成选择后的摘要 |
+| 切换 Palette 后保留旧应用确认 | 选择、对象和参数变化时清理过期反馈 | 原生 GUI 的 palette_message_reset 通过 |
+| 删除后重建的同名对象匹配旧快照 | 复用项目 molecule_identity，恢复前只读核对对象生命期 | 两项真实 PyMOL 重建对象回归测试通过 |
+| 旧 View 撤销或预览覆盖更新的 CLI 配色 | View、CLI 残基配色登记现有 style registry，统一 LIFO 与失败回滚 | 六项生命周期测试及真实 GUI 的 CLI 后预览与撤销保护通过 |
+
+原审查代理完成一次修复确认。05_ui_fix_confirmation.md 确认原 UI 问题已解决，未见截图中明确新增问题。06_implementation_fix_confirmation.md 确认两项实现问题已解决。实现代理另用真实 PyMOL 注入 restore callback 故障，确认失败时场景恢复到撤销前、快照保留、重试成功。脚本和 JSON 为 03_revert_rollback_repro.*。
+
+Impeccable 的修复前设计记录归档到 .impeccable/critique/2026-11-26T02-33-18Z__pymolplugins-residues-panel-py.md。29/40 是修复前评分。bundled detector 只支持 HTML/CSS，本次不把其零输出当作 Qt 扫描通过。

@@ -97,5 +97,9 @@ def coretosurf(selection="", core=None, boundary=None, unit="abs", state=-1,
 
 
 def pp_residue_clear():
-    """Restore residue-analysis colors and remove its explicitly created selections."""
+    """Restore the newest command-color block, then remove owned selections.
+
+    Undo newer View or scene styles first. If styles separate command-color
+    blocks, undo the intervening style before clearing the earlier block.
+    """
     return presentation.clear()

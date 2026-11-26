@@ -315,6 +315,16 @@ class StyleSnapshot:
     representations: tuple = ()
 
 
+@dataclass
+class StyleActionSnapshot:
+    """A reversible color action owned by the same global style history."""
+
+    snapshot_id: int
+    state: object
+    capture: object
+    restore: object
+
+
 class StyleApplyResult(int):
     """Backward-compatible snapshot ID carrying a structured apply report."""
 
@@ -781,7 +791,8 @@ class StyleRegistry:
 
     def _capture_current_like(self, snapshot):
         """Capture the styled state needed to roll back a failed revert."""
-
+        if isinstance(snapshot, StyleActionSnapshot):
+            return replace(snapshot, state=snapshot.capture())
         atom_state, has_colors, has_reps = _capture_atom_state_by_keys(
             self.cmd,
             snapshot.atom_keys,
@@ -938,6 +949,9 @@ class StyleRegistry:
             )
 
     def _restore_snapshot(self, snapshot):
+        if isinstance(snapshot, StyleActionSnapshot):
+            snapshot.restore(snapshot.state)
+            return
         self._restore_atom_colors(snapshot)
         self._restore_representations(snapshot)
         for (name, selection), value in reversed(tuple(snapshot.settings.items())):
@@ -1027,6 +1041,13 @@ class StyleRegistry:
             self.snapshots.append(record)
             return StyleApplyResult(record.snapshot_id, report)
         return None
+
+    def record_action(self, state, capture, restore):
+        """Remember an applied color action alongside ordinary style snapshots."""
+        record = StyleActionSnapshot(self.next_snapshot_id, state, capture, restore)
+        self.next_snapshot_id += 1
+        self.snapshots.append(record)
+        return record.snapshot_id
 
     def revert(self, snapshot_id=None):
         """Restore and pop the top snapshot; explicit IDs must also be top."""

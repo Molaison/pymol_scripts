@@ -36,16 +36,24 @@ def _spin(low, high, value, decimals=1):
     return widget
 
 
+def _label(text, widget):
+    label = QtWidgets.QLabel(text)
+    label.setBuddy(widget)
+    widget.setAccessibleName(text)
+    return label
+
+
 def _threshold(parent, row, label, value, name):
     slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
     slider.setRange(0, 500)
     slider.setValue(int(value))
     slider.setObjectName(name + "_slider")
+    slider.setAccessibleName(label + " slider")
     spin = _spin(0, 500, value, 0)
     spin.setObjectName(name + "_cutoff")
     slider.valueChanged.connect(spin.setValue)
     spin.valueChanged.connect(lambda v: slider.setValue(int(v)))
-    parent.addWidget(QtWidgets.QLabel(label), row, 0)
+    parent.addWidget(_label(label, spin), row, 0)
     parent.addWidget(slider, row, 1)
     parent.addWidget(spin, row, 2)
     return slider, spin
@@ -60,7 +68,7 @@ class ResidueControls:
         self.state.setRange(0, 99999)
         self.state.setSpecialValueText("Current")
         self.state.setObjectName("residue_state")
-        row.addWidget(QtWidgets.QLabel("State"))
+        row.addWidget(_label("State", self.state))
         row.addWidget(self.state)
         self.live = QtWidgets.QCheckBox("Live thresholds after Apply")
         self.live.setChecked(True)
@@ -92,6 +100,7 @@ class ResidueControls:
     def _build_results(self, layout):
         self.table = QtWidgets.QTableWidget(0, len(HEADERS))
         self.table.setObjectName("residue_table")
+        self.table.setAccessibleName("Residue values")
         self.table.setHorizontalHeaderLabels(HEADERS)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
@@ -110,7 +119,7 @@ class ResidueControls:
         self.units.setObjectName("residue_units")
         self.units.addItem("SASA Å²", "abs")
         self.units.addItem("Relative ASA % (Tien)", "rel")
-        grid.addWidget(QtWidgets.QLabel("Layer cutoffs"), 0, 0)
+        grid.addWidget(_label("Layer cutoffs", self.units), 0, 0)
         grid.addWidget(self.units, 0, 1, 1, 2)
         self.core_slider, self.core = _threshold(grid, 1, "Core below", 20, "core")
         self.boundary_slider, self.boundary = _threshold(grid, 2, "Surface from", 40, "boundary")
@@ -123,7 +132,7 @@ class ResidueControls:
             row = QtWidgets.QHBoxLayout(container)
             row.setContentsMargins(0, 0, 0, 0)
             for label, widget in items:
-                row.addWidget(QtWidgets.QLabel(label))
+                row.addWidget(_label(label, widget))
                 row.addWidget(widget)
                 widget.valueChanged.connect(self.schedule)
             row.addStretch(1)
@@ -135,6 +144,7 @@ class ResidueControls:
     def _build_exports(self, layout):
         row = QtWidgets.QHBoxLayout()
         self.format = QtWidgets.QComboBox()
+        self.format.setAccessibleName("Layer export format")
         self.format.addItem("PyMOL selections", "pymol")
         self.format.addItem("Rosetta resnums", "rosetta")
         row.addWidget(self.format)
@@ -155,12 +165,15 @@ class ResidueControls:
 
 
 class ResidueColorControls(ResidueControls, QtWidgets.QWidget):
+    message = QtCore.Signal(str)
+
     def __init__(self, source, parent=None):
         super().__init__(parent)
         self.setObjectName("residue_colors")
         self.source, self.target = source, None
         self.report, self.mode, self.unit = None, "layers", "abs"
         self.preview_active = False
+        self.snapshot_id = None
         self.cutoffs = {u: list(v) for u, v in DEFAULT_CUTOFFS.items()}
         self.timer = QtCore.QTimer(self)
         self.timer.setSingleShot(True)
@@ -171,20 +184,22 @@ class ResidueColorControls(ResidueControls, QtWidgets.QWidget):
         self.timer.stop()
         self.preview_active = False
 
+    def _clear_report(self):
+        self.report = None
+        self.table.setRowCount(0)
+        self.status.clear()
+        self.message.emit("")
+
     def refresh(self):
         if self.target != self.source():
             self.stop_preview()
             self.target = self.source()
-            self.report = None
-            self.table.setRowCount(0)
-            self.status.clear()
+            self._clear_report()
 
     def set_mode(self, mode):
         self.stop_preview()
         if self.mode != mode:
-            self.report = None
-            self.table.setRowCount(0)
-            self.status.clear()
+            self._clear_report()
         self.mode = mode
         self.layer_options.setVisible(mode in ("layers", "rsa"))
         self.contact_options.setVisible(mode == "contacts")
@@ -215,8 +230,11 @@ class ResidueColorControls(ResidueControls, QtWidgets.QWidget):
         self.schedule()
 
     def schedule(self, *_):
+        self.message.emit("")
         if self.preview_active and self.live.isChecked() and self.isVisible():
             self.timer.start(100)
+        else:
+            self._clear_report()
 
     def arguments(self):
         return dict(mode=self.mode, core=self.core.value(), boundary=self.boundary.value(),
@@ -240,7 +258,7 @@ class ResidueColorControls(ResidueControls, QtWidgets.QWidget):
             self._show_report()
             return True
         except Exception as error:
-            self.report = None
+            self._clear_report()
             self.status.setText("Error: " + str(error))
             traceback.print_exc()
             return False
@@ -248,21 +266,24 @@ class ResidueColorControls(ResidueControls, QtWidgets.QWidget):
     def apply(self):
         if not self.analyze():
             return None
-        snapshot = presentation.capture_colors(self.report)
-        try:
-            self._color()
-        except Exception:
-            presentation.restore_colors(snapshot)
-            raise
+        self.snapshot_id = presentation.apply_colors(self.report, self.mode, self.exposure.value(),
+                                                     self.hydrophobicity.value())
         self.preview_active = True
-        return snapshot
+        return self.snapshot_id
 
     def _color(self):
         presentation.color_report(self.report, self.mode, self.exposure.value(),
                                    self.hydrophobicity.value(), remember=False)
 
     def _preview(self):
-        if self.preview_active and self.isVisible() and self.analyze():
+        if not self.preview_active or not self.isVisible() or not self.live.isChecked():
+            return
+        if not presentation.can_preview(self.snapshot_id):
+            self.stop_preview()
+            self._clear_report()
+            self.message.emit("Apply again to update residue colors after the newer style or object change.")
+            return
+        if self.analyze():
             try:
                 self._color()
             except Exception as error:
@@ -302,15 +323,15 @@ class ResidueColorControls(ResidueControls, QtWidgets.QWidget):
         if self.analyze():
             text, warnings = presentation.format_layers(self.report, self.format.currentData())
             QtWidgets.QApplication.clipboard().setText(text)
-            self.status.setText("Copied layer definitions. " + " ".join(warnings))
+            self.message.emit("Copied layer definitions. " + " ".join(warnings))
 
     def create_selections(self):
         if self.analyze():
             try:
                 names = presentation.create_selections(self.report)
-                self.status.setText("Created: " + ", ".join(names))
+                self.message.emit("Created %d layer selections." % len(names))
             except Exception as error:
-                self.status.setText("Error: " + str(error))
+                self.message.emit("Error: " + str(error))
                 traceback.print_exc()
 
     def export_csv(self, pairs=False):
@@ -320,9 +341,9 @@ class ResidueColorControls(ResidueControls, QtWidgets.QWidget):
                                                        "contacts.csv" if pairs else "residues.csv", "CSV (*.csv)")
         if path:
             try:
-                self.status.setText("Saved " + presentation.write_csv(self.report, path, pairs))
+                self.message.emit("Saved " + presentation.write_csv(self.report, path, pairs))
             except Exception as error:
-                self.status.setText("Error: " + str(error))
+                self.message.emit("Error: " + str(error))
                 traceback.print_exc()
 
     def zoom_residue(self, row, _column):

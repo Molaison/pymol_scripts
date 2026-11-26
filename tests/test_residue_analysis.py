@@ -69,7 +69,8 @@ class ResidueAnalysisTests(unittest.TestCase):
         cmd.set("dot_density", 3)
         cmd.set("solvent_radius", 1.4)
         analysis.clear_cache()
-        presentation._colors.clear()
+        presentation._command_snapshots.clear()
+        styles_registry._REGISTRY.snapshots.clear()
         presentation._selections.clear()
 
     def test_whole_residue_sasa_matches_native_get_area(self):
@@ -96,7 +97,7 @@ class ResidueAnalysisTests(unittest.TestCase):
         report = commands.pp_residues("pep", color=0)
 
         self.assertEqual(len(report["residues"]), 22)
-        self.assertEqual(presentation._colors, {})
+        self.assertEqual(presentation._command_snapshots, [])
         self.assertEqual(_iterate("color"), colors)
         self.assertEqual(_iterate("b"), b_values)
         self.assertEqual(_coordinates(), coords)
@@ -292,7 +293,7 @@ class ResidueAnalysisTests(unittest.TestCase):
         blue = cmd.get_color_index("blue")
         self.assertTrue(all(colored[index] == blue for index in changed))
         self.assertEqual(set(cmd.get_names("all")), names)
-        saved = presentation._colors["pep"]
+        saved = styles_registry._REGISTRY.snapshots[-1].state["pep"]
         expected = {index for record in report["residues"] for index in record["indices"]}
         carbons = {atom.index for atom in cmd.get_model("pep").atom if atom.symbol == "C"}
         self.assertEqual(set(saved), expected & carbons)
@@ -330,7 +331,7 @@ class ResidueAnalysisTests(unittest.TestCase):
             self.assertEqual(len(identity), 7)
 
         presentation.color_report(report, "layers", remember=False)
-        self.assertEqual(presentation._colors, {})
+        self.assertEqual(presentation._command_snapshots, [])
         ui_colors = _color_by_index()
         changed = {index for index in set(snapshot["pep"])
                    if ui_colors[index] != source[index]}
@@ -346,7 +347,7 @@ class ResidueAnalysisTests(unittest.TestCase):
         restored = presentation.restore_colors(snapshot)
         self.assertEqual(restored, len(snapshot["pep"]))
         self.assertEqual(_color_by_index(), source)
-        self.assertEqual(presentation._colors, {})
+        self.assertEqual(presentation._command_snapshots, [])
         self.assertEqual(_iterate("b"), b_values)
         self.assertEqual(_coordinates(), coords)
 

@@ -175,6 +175,37 @@ def export(button_name, filename):
         return list(csv.DictReader(stream))
 
 
+def review_lifecycle_regressions():
+    choose(page.preset, page.preset.findData("residue_layers"))
+    assert not page.status.text(), "A previous palette confirmation survived selection"
+    for widget in (panel.state, panel.core, panel.boundary, panel.core_slider,
+                   panel.boundary_slider, panel.units, panel.cutoff, panel.gap,
+                   panel.exposure, panel.hydrophobicity, panel.format):
+        assert widget.accessibleName(), widget.objectName()
+    for title, control in (("State", panel.state), ("Core below", panel.core),
+                           ("Surface from", panel.boundary)):
+        assert any(label.text() == title and label.buddy() is control
+                   for label in panel.findChildren(QtWidgets.QLabel)), title
+    click("appearance_apply")
+    view_colors = colors()
+    pp_residues("insight_model", mode="contacts")
+    command_colors = colors()
+    assert command_colors != view_colors
+    panel.core_slider.setFocus()
+    QTest.keyClick(panel.core_slider, QtCore.Qt.Key_Right)
+    wait_until(lambda: not panel.preview_active)
+    assert colors() == command_colors and panel.report is None
+    click("appearance_undo")
+    assert colors() == command_colors and "LIFO" in page.status.text()
+    pp_residue_clear()
+    assert colors() == view_colors
+    click("appearance_undo")
+    assert colors() == baseline_colors
+    checkpoint("independent_review_fixes", {"labels_and_buddies": "passed",
+               "palette_message_reset": "passed", "summary_survives_copy": "passed",
+               "newer_cli_blocks_preview_and_view_undo": "passed"})
+
+
 exit_code = 0
 try:
     cmd.load(str(root / "data/helical_bundle.pdb"), "insight_model")
@@ -190,6 +221,7 @@ try:
     plugins.HAVE_QT = True
     from pymolplugins.host import plugin, show_presets
     from pymolplugins.residues import presentation
+    from pymolplugins.residues.commands import pp_residues, pp_residue_clear
     from pymolplugins.styles import registry
     plugin.__init_plugin__()
     toolkit = next(action.menu() for action in window.menudict["Plugin"].actions()
@@ -255,6 +287,7 @@ try:
     click("residue_copy")
     text = app.clipboard().text()
     assert "insight_model" in text and "select pp_residues_" in text, (text, panel.status.text())
+    assert "protein residues" in panel.status.text() and page.status.text().startswith("Copied layer")
     checkpoint("color_metrics_and_qualified_clipboard", ["layers", "rsa", "hydropathy", "exposed", "contacts"])
 
     contact_colors = colors()
@@ -290,7 +323,7 @@ try:
     external = registry.pp_style_apply("professional_secondary_structure", "%insight_model")
     external_colors = colors()
     click("appearance_undo")
-    assert colors() == external_colors and "more recent style" in page.status.text()
+    assert colors() == external_colors and "LIFO" in page.status.text()
     registry.pp_style_revert(external)
     assert colors() == residue_colors
     click("appearance_undo")
@@ -300,8 +333,9 @@ try:
         click("appearance_undo")
         assert len(page._owned_snapshots) == count - 1, page.status.text()
     assert colors() == baseline_colors
-    assert not presentation._colors, "View previews leaked into the command color lifecycle"
+    assert pp_residue_clear()["restored_atoms"] == 0, "View previews leaked into command color cleanup"
     checkpoint("shared_undo_mixed_palettes_and_external_styles", "passed")
+    review_lifecycle_regressions()
 
     cmd.create("second_model", "insight_model and chain A")
     cmd.color("magenta", "second_model")
@@ -316,7 +350,6 @@ try:
     click("appearance_undo")
     choose(view.objects, view.objects.findData("insight_model"))
     assert panel.report is None
-    from pymolplugins.residues.commands import pp_residues, pp_residue_clear
     assert pp_residues() is view
     assert view.tabs.currentIndex() == 1 and page.preset.currentData() == "residue_layers"
     assert panel.window() is view

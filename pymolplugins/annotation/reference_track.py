@@ -154,11 +154,11 @@ def _ttt(api, name):
     return tuple(value) if value is not None else None
 
 
-def molecule_identity(api, name):
+def molecule_identity(api, name, *, create=True):
     """Keep a molecule's lifetime distinct from its reusable scene name."""
     key = "_pp_review_identity"
     token = api.get_property(key, name)
-    if token is None:
+    if token is None and create:
         token = uuid4().hex
         api.set_property(key, token, name)
     return token

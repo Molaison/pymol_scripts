@@ -9,9 +9,10 @@ import re
 
 from ._coretosurf import COLORS, Residue, format_rosetta
 from pymolplugins.residues.analysis import quoted
+from pymolplugins.annotation.reference_track import molecule_identity
 
 
-_colors = {}
+_command_snapshots = []
 _selections = set()
 MODES = ("layers", "rsa", "hydropathy", "exposed", "contacts")
 
@@ -47,20 +48,67 @@ def _read_colors(obj, indices):
     return saved
 
 
+class ColorSnapshot(dict):
+    """Carbon colors and the native molecule lifetimes they belong to."""
+
+    def __init__(self):
+        super().__init__()
+        self.identities = {}
+
+
 def capture_colors(report):
     """Capture exactly the carbon atoms a residue color operation affects."""
     indices = defaultdict(set)
     for record in report["residues"]:
         indices[record["object"]].update(record["indices"])
-    return {obj: _read_colors(obj, atoms) for obj, atoms in indices.items()}
+    snapshot = ColorSnapshot()
+    for obj, atoms in indices.items():
+        snapshot[obj] = _read_colors(obj, atoms)
+        snapshot.identities[obj] = molecule_identity(cmd, obj)
+    return snapshot
 
 
-def _remember(obj, indices):
-    saved = _colors.setdefault(obj, {})
-    for index, current in _read_colors(obj, indices).items():
-        old = saved.get(index)
-        if old is None or old[0] != current[0]:
-            saved[index] = current
+def _surviving_objects(snapshot):
+    objects = set(cmd.get_names("objects"))
+    return [obj for obj in snapshot if obj in objects and
+            molecule_identity(cmd, obj, create=False) == snapshot.identities[obj]]
+
+
+def _capture_current(snapshot):
+    current = ColorSnapshot()
+    for obj in _surviving_objects(snapshot):
+        saved = snapshot[obj]
+        current[obj] = {index: value for index, value in _read_colors(obj, saved).items()
+                        if saved[index][0] == value[0]}
+        current.identities[obj] = snapshot.identities[obj]
+    return current
+
+
+def apply_colors(report, mode, exposure=25.0, hydrophobicity=0.0, *, command=False):
+    """Apply residue colors atomically and register one shared style undo step."""
+    from pymolplugins.styles import registry
+
+    snapshot = capture_colors(report)
+    try:
+        color_report(report, mode, exposure, hydrophobicity, remember=False)
+    except Exception:
+        restore_colors(snapshot)
+        raise
+    result = registry._REGISTRY.record_action(snapshot, lambda: _capture_current(snapshot), restore_colors)
+    if command:
+        _command_snapshots.append(result)
+    return result
+
+
+def can_preview(snapshot_id):
+    """Only preview the latest action while its original molecules still exist."""
+    from pymolplugins.styles import registry
+
+    records = registry._REGISTRY.snapshots
+    if not records or records[-1].snapshot_id != snapshot_id:
+        return False
+    state = records[-1].state
+    return len(_surviving_objects(state)) == len(state)
 
 
 def _gradient(value, low, high, name):
@@ -79,6 +127,8 @@ def _gradient(value, low, high, name):
 
 
 def color_report(report, mode, exposure=25.0, hydrophobicity=0.0, remember=True):
+    if remember:
+        return apply_colors(report, mode, exposure, hydrophobicity, command=True)
     by_object = defaultdict(dict)
     palette = {}
     maximum = max((r["contacts"] or 0 for r in report["residues"]), default=1) or 1
@@ -100,8 +150,6 @@ def color_report(report, mode, exposure=25.0, hydrophobicity=0.0, remember=True)
             color = palette[value]
         by_object[record["object"]].update(dict.fromkeys(record["indices"], color))
     for obj, colors in by_object.items():
-        if remember:
-            _remember(obj, colors)
         cmd.alter("model %s and elem C" % quoted(obj),
                   "color=colors.get(index, color)", space={"colors": colors})
         cmd.recolor("model " + quoted(obj))
@@ -110,9 +158,8 @@ def color_report(report, mode, exposure=25.0, hydrophobicity=0.0, remember=True)
 def restore_colors(snapshot):
     """Restore surviving atoms from one View or command color snapshot."""
     restored = 0
-    for obj, saved in snapshot.items():
-        if obj not in cmd.get_names("objects"):
-            continue
+    for obj in _surviving_objects(snapshot):
+        saved = snapshot[obj]
         colors = {a.index: saved[a.index][1]
                   for a in cmd.get_model("model " + quoted(obj)).atom
                   if a.index in saved and saved[a.index][0] == _atom_identity(a)}
@@ -124,13 +171,25 @@ def restore_colors(snapshot):
 
 
 def clear():
-    """Restore command colors and remove only selections owned here."""
-    restored = restore_colors(_colors)
+    """Revert the latest command-color block without overwriting newer styles."""
+    from pymolplugins.styles import registry
+
+    records = registry._REGISTRY.snapshots
+    active = {record.snapshot_id for record in records}
+    _command_snapshots[:] = [key for key in _command_snapshots if key in active]
+    if _command_snapshots and records[-1].snapshot_id not in _command_snapshots:
+        raise RuntimeError("Undo the more recent style first with Undo last style or pp_style_revert.")
+    restored = set()
+    while records and records[-1].snapshot_id in _command_snapshots:
+        record = records[-1]
+        current = _capture_current(record.state)
+        registry._REGISTRY.revert(record.snapshot_id)
+        _command_snapshots.remove(record.snapshot_id)
+        restored.update((current.identities[obj], index) for obj, atoms in current.items() for index in atoms)
     for name in _selections:
         cmd.delete(name)
-    _colors.clear()
     _selections.clear()
-    return dict(restored_atoms=restored)
+    return dict(restored_atoms=len(restored), remaining_color_steps=len(_command_snapshots))
 
 
 def create_selections(report, prefix="pp_residues"):

@@ -33,13 +33,14 @@ class AppearancePage(QtWidgets.QWidget):
         self.residues = ResidueColorControls(source, self) if kind == "color" else None
         if self.residues:
             layout.addWidget(self.residues)
-        self.preset.currentIndexChanged.connect(self._preset_changed)
-        self._preset_changed()
-
         self.status = QtWidgets.QLabel()
         self.status.setTextFormat(QtCore.Qt.PlainText)
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
+        if self.residues:
+            self.residues.message.connect(self.status.setText)
+        self.preset.currentIndexChanged.connect(self._preset_changed)
+        self._preset_changed()
         buttons = QtWidgets.QHBoxLayout()
         self.copy = QtWidgets.QPushButton("Copy command")
         self.copy.clicked.connect(self._copy)
@@ -58,6 +59,7 @@ class AppearancePage(QtWidgets.QWidget):
         layout.addStretch(1)
 
     def _preset_changed(self):
+        self.status.clear()
         show_variant = self.preset.currentData() == "macaron_palette"
         self.variant.setVisible(show_variant)
         self.variant_label.setVisible(show_variant)
@@ -106,16 +108,14 @@ class AppearancePage(QtWidgets.QWidget):
                 if snapshot is None:
                     self.status.setText(self.residues.status.text())
                     return
-                styles = registry._REGISTRY.snapshots
-                head = styles[-1].snapshot_id if styles else None
-                self._owned_snapshots.append(("residues", (snapshot, head)))
+                self._owned_snapshots.append(int(snapshot))
             else:
                 if self.residues:
                     self.residues.stop_preview()
                 preset, selection, variant = self._arguments()
                 snapshot = registry.pp_style_apply(preset, selection, variant=variant)
                 if snapshot is not None:
-                    self._owned_snapshots.append(("style", int(snapshot)))
+                    self._owned_snapshots.append(int(snapshot))
         except Exception as error:
             self.status.setText(str(error))
             traceback.print_exc()
@@ -125,24 +125,15 @@ class AppearancePage(QtWidgets.QWidget):
 
     def _undo(self):
         active = {snapshot.snapshot_id for snapshot in registry._REGISTRY.snapshots}
-        self._owned_snapshots = [(kind, value) for kind, value in self._owned_snapshots
-                                 if kind != "style" or value in active]
+        self._owned_snapshots = [value for value in self._owned_snapshots if value in active]
         if not self._owned_snapshots:
             self.status.setText("No style from this page to undo.")
             return
         try:
-            kind, value = self._owned_snapshots[-1]
+            value = self._owned_snapshots[-1]
             if self.residues:
                 self.residues.stop_preview()
-            if kind == "residues":
-                colors, expected = value
-                styles = registry._REGISTRY.snapshots
-                current = styles[-1].snapshot_id if styles else None
-                if current != expected:
-                    raise RuntimeError("Undo the more recent style first.")
-                presentation.restore_colors(colors)
-            else:
-                registry.pp_style_revert(value)
+            registry.pp_style_revert(value)
         except Exception as error:
             self.status.setText(str(error))
             traceback.print_exc()
