@@ -61,7 +61,7 @@ pp_undo
 | 成对处理结构、预览并保存结果 | [Batch Processing](docs/batch_processing_specification.md#usage) |
 | 切换场景 group、查看接触和使用绘图样式 | [Group、interaction 和样式指南](docs/01_group_interaction_styles.md) |
 | 导出扩展 FASTA，精确搜索修饰残基与异构 component | [序列导出与残基 token](docs/04_extended_sequence.md) |
-| 交互调节 CoreToSurf 分层、查看暴露疏水残基和非局部 Cα 接触 | [残基分析：用法、计算定义与验收](docs/validation/05_residue_analysis_2026-11-26.md) |
+| 在 View → Color 调节 CoreToSurf 分层、查看暴露疏水残基和非局部 Cα 接触 | [配色、数据导出与计算定义](docs/validation/05_residue_analysis_2026-11-26.md) |
 | 配置可选 PLIP / PyRosetta 计算服务 | [WSL worker](docs/wsl_worker.md) |
 | 查找旧设计和验收证据 | [历史与验收索引](docs/03_history_index.md) |
 

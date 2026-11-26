@@ -35,18 +35,32 @@ def _atom_identity(atom):
     return (atom.segi, atom.chain, atom.resi, atom.resn, atom.name, atom.alt, atom.id)
 
 
-def _remember(obj, indices):
-    saved = _colors.setdefault(obj, {})
+def _read_colors(obj, indices):
+    saved = {}
     atom_colors = {}
     cmd.iterate("model %s and elem C" % quoted(obj), "colors[index] = color",
                 space={"colors": atom_colors})
     for atom in cmd.get_model("model " + quoted(obj)).atom:
         if atom.index not in indices or atom.symbol != "C":
             continue
-        identity = _atom_identity(atom)
-        old = saved.get(atom.index)
-        if old is None or old[0] != identity:
-            saved[atom.index] = identity, atom_colors[atom.index]
+        saved[atom.index] = _atom_identity(atom), atom_colors[atom.index]
+    return saved
+
+
+def capture_colors(report):
+    """Capture exactly the carbon atoms a residue color operation affects."""
+    indices = defaultdict(set)
+    for record in report["residues"]:
+        indices[record["object"]].update(record["indices"])
+    return {obj: _read_colors(obj, atoms) for obj, atoms in indices.items()}
+
+
+def _remember(obj, indices):
+    saved = _colors.setdefault(obj, {})
+    for index, current in _read_colors(obj, indices).items():
+        old = saved.get(index)
+        if old is None or old[0] != current[0]:
+            saved[index] = current
 
 
 def _gradient(value, low, high, name):
@@ -64,7 +78,7 @@ def _gradient(value, low, high, name):
     return cmd.get_color_index(color)
 
 
-def color_report(report, mode, exposure=25.0, hydrophobicity=0.0):
+def color_report(report, mode, exposure=25.0, hydrophobicity=0.0, remember=True):
     by_object = defaultdict(dict)
     palette = {}
     maximum = max((r["contacts"] or 0 for r in report["residues"]), default=1) or 1
@@ -86,16 +100,17 @@ def color_report(report, mode, exposure=25.0, hydrophobicity=0.0):
             color = palette[value]
         by_object[record["object"]].update(dict.fromkeys(record["indices"], color))
     for obj, colors in by_object.items():
-        _remember(obj, colors)
+        if remember:
+            _remember(obj, colors)
         cmd.alter("model %s and elem C" % quoted(obj),
                   "color=colors.get(index, color)", space={"colors": colors})
         cmd.recolor("model " + quoted(obj))
 
 
-def clear():
-    """Restore saved atom colors and remove only selections owned here."""
+def restore_colors(snapshot):
+    """Restore surviving atoms from one View or command color snapshot."""
     restored = 0
-    for obj, saved in list(_colors.items()):
+    for obj, saved in snapshot.items():
         if obj not in cmd.get_names("objects"):
             continue
         colors = {a.index: saved[a.index][1]
@@ -105,6 +120,12 @@ def clear():
                   space={"colors": colors})
         cmd.recolor("model " + quoted(obj))
         restored += len(colors)
+    return restored
+
+
+def clear():
+    """Restore command colors and remove only selections owned here."""
+    restored = restore_colors(_colors)
     for name in _selections:
         cmd.delete(name)
     _colors.clear()

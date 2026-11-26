@@ -329,6 +329,7 @@ def _csv_fields(panel, form):
 
 def _quick_views(panel):
     from .review_view_presets import QUICK_VIEWS
+    from .view_popup import review_color_button
 
     panel.quick_views = QtWidgets.QWidget(panel)
     outer = QtWidgets.QVBoxLayout(panel.quick_views)
@@ -369,6 +370,7 @@ def _quick_views(panel):
             menu.aboutToShow.connect(lambda: panel._fill_mass_view_menu(menu))
             button.setMenu(menu)
             button.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
+    outer.addWidget(review_color_button(panel))
     panel.quick_views.setEnabled(False)
     return panel.quick_views
 

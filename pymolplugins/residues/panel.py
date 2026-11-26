@@ -1,4 +1,4 @@
-"""One modeless panel for exposure, hydropathy and residue contacts."""
+"""Residue color controls embedded in the shared Scene view Color page."""
 
 from pymol import cmd
 from pymol.Qt import QtCore, QtWidgets
@@ -6,11 +6,16 @@ from pymol.Qt import QtCore, QtWidgets
 import traceback
 
 from . import presentation
+from pymolplugins.residues.analysis import quoted
 from ._coretosurf import DEFAULT_CUTOFFS
 from .commands import pp_residues
 
 
-_panel = None
+COLOR_CHOICES = (("Core / boundary / surface", "residue_layers"),
+                 ("Relative exposure (RSA)", "residue_rsa"),
+                 ("Hydropathy (Kyte–Doolittle)", "residue_hydropathy"),
+                 ("Exposed hydrophobic residues", "residue_exposed"),
+                 ("Nonlocal Cα contacts", "residue_contacts"))
 HEADERS = ("Object", "Segment", "Chain", "Residue", "AA", "SASA Å²", "RSA %",
            "Layer", "Hydropathy", "Cα neighbors")
 FIELDS = ("object", "segi", "chain", "resi", "resn", "sasa", "rsa", "layer", "hydropathy", "contacts")
@@ -49,62 +54,50 @@ def _threshold(parent, row, label, value, name):
 class ResidueControls:
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         row = QtWidgets.QHBoxLayout()
-        self.objects = QtWidgets.QComboBox()
-        self.objects.setEditable(True)
-        self.objects.setObjectName("residue_selection")
-        self.objects.setToolTip("Loaded object or a PyMOL protein selection")
-        row.addWidget(QtWidgets.QLabel("Object / selection"))
-        row.addWidget(self.objects, 1)
-        row.addWidget(_button("Refresh", self.refresh_objects, "residue_refresh"))
         self.state = QtWidgets.QSpinBox()
         self.state.setRange(0, 99999)
         self.state.setSpecialValueText("Current")
         self.state.setObjectName("residue_state")
         row.addWidget(QtWidgets.QLabel("State"))
         row.addWidget(self.state)
-        from pymolplugins.host.workspace import WindowModeButton
-        self.window_mode_button = WindowModeButton(self)
-        row.addWidget(self.window_mode_button)
-        layout.addLayout(row)
-        row = QtWidgets.QHBoxLayout()
-        self.mode = QtWidgets.QComboBox()
-        self.mode.setObjectName("residue_mode")
-        for text, mode in (("Core / boundary / surface", "layers"), ("Relative exposure", "rsa"),
-                           ("Hydropathy (Kyte–Doolittle)", "hydropathy"),
-                           ("Exposed hydrophobic residues", "exposed"), ("Nonlocal Cα contacts", "contacts")):
-            self.mode.addItem(text, mode)
-        row.addWidget(QtWidgets.QLabel("Color by"))
-        row.addWidget(self.mode, 1)
-        self.live = QtWidgets.QCheckBox("Live thresholds")
+        self.live = QtWidgets.QCheckBox("Live thresholds after Apply")
         self.live.setChecked(True)
         row.addWidget(self.live)
-        layout.addLayout(row)
-        self._build_parameters(layout)
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(_button("Analyze", self.analyze, "residue_analyze"))
-        row.addWidget(_button("Recompute SASA", lambda: self.analyze(True), "residue_recompute"))
-        row.addWidget(_button("Restore colors", self.restore, "residue_restore"))
         row.addStretch(1)
         layout.addLayout(row)
-        self._build_results(layout)
-        self._build_exports(layout)
-        self.mode.currentIndexChanged.connect(self.schedule)
-        self.mode.currentIndexChanged.connect(self.update_mode)
+        self._build_parameters(layout)
+        self.status = QtWidgets.QLabel()
+        self.status.setWordWrap(True)
+        self.status.setTextFormat(QtCore.Qt.PlainText)
+        layout.addWidget(self.status)
+        self.details_toggle = QtWidgets.QToolButton()
+        self.details_toggle.setText("Residue values and export")
+        self.details_toggle.setObjectName("residue_details")
+        self.details_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self.details_toggle.setArrowType(QtCore.Qt.RightArrow)
+        self.details_toggle.setCheckable(True)
+        layout.addWidget(self.details_toggle)
+        self.details = QtWidgets.QWidget(self)
+        details = QtWidgets.QVBoxLayout(self.details)
+        details.setContentsMargins(0, 0, 0, 0)
+        self._build_results(details)
+        self._build_exports(details)
+        layout.addWidget(self.details)
+        self.details.hide()
+        self.details_toggle.toggled.connect(self._toggle_details)
         self.state.valueChanged.connect(self.schedule)
-        self.objects.activated.connect(self.schedule)
-        self.objects.lineEdit().returnPressed.connect(self.analyze)
 
     def _build_results(self, layout):
-        self.status = QtWidgets.QLabel("Load a protein and choose Analyze.")
-        self.status.setWordWrap(True)
-        layout.addWidget(self.status)
         self.table = QtWidgets.QTableWidget(0, len(HEADERS))
         self.table.setObjectName("residue_table")
         self.table.setHorizontalHeaderLabels(HEADERS)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
+        self.table.setMinimumHeight(150)
+        self.table.setMaximumHeight(220)
         self.table.setToolTip("Double-click a residue to zoom to it.")
         self.table.cellDoubleClicked.connect(self.zoom_residue)
         layout.addWidget(self.table, 1)
@@ -134,13 +127,10 @@ class ResidueControls:
                 row.addWidget(widget)
                 widget.valueChanged.connect(self.schedule)
             row.addStretch(1)
-            container.hide()
             layout.addWidget(container)
         self.units.currentIndexChanged.connect(self.change_unit)
         self.core.valueChanged.connect(lambda v: self.threshold_changed(True, v))
         self.boundary.valueChanged.connect(lambda v: self.threshold_changed(False, v))
-        for slider in (self.core_slider, self.boundary_slider):
-            slider.sliderReleased.connect(self.analyze)
 
     def _build_exports(self, layout):
         row = QtWidgets.QHBoxLayout()
@@ -152,45 +142,53 @@ class ResidueControls:
         row.addWidget(_button("Create selections", self.create_selections, "residue_create"))
         layout.addLayout(row)
         row = QtWidgets.QHBoxLayout()
-        row.addWidget(_button("Export residue CSV…", self.export_csv, "residue_export"))
-        row.addWidget(_button("Export contact CSV…", lambda: self.export_csv(True), "residue_export_contacts"))
-        row.addStretch(1)
+        row.addWidget(_button("Residue CSV…", self.export_csv, "residue_export"))
+        row.addWidget(_button("Contact CSV…", lambda: self.export_csv(True), "residue_export_contacts"))
+        row.addWidget(_button("Recompute values", lambda: self.analyze(True), "residue_recompute"))
         layout.addLayout(row)
 
+    def _toggle_details(self, visible):
+        self.details.setVisible(visible)
+        self.details_toggle.setArrowType(QtCore.Qt.DownArrow if visible else QtCore.Qt.RightArrow)
+        if visible and not self.report:
+            self.analyze()
 
-class ResiduePanel(ResidueControls, QtWidgets.QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Residue analysis")
-        self.setObjectName("residue_analysis")
-        self.setMinimumSize(540, 440)
-        self.resize(780, 650)
-        self.report = None
-        self.unit = "abs"
+
+class ResidueColorControls(ResidueControls, QtWidgets.QWidget):
+    def __init__(self, source, parent=None):
+        super().__init__(parent)
+        self.setObjectName("residue_colors")
+        self.source, self.target = source, None
+        self.report, self.mode, self.unit = None, "layers", "abs"
+        self.preview_active = False
         self.cutoffs = {u: list(v) for u, v in DEFAULT_CUTOFFS.items()}
         self.timer = QtCore.QTimer(self)
         self.timer.setSingleShot(True)
-        self.timer.timeout.connect(self.analyze)
+        self.timer.timeout.connect(self._preview)
         self._build_ui()
-        from pymolplugins.annotation.panel_style import workspace_style
-        self.setStyleSheet(workspace_style() + "\nQWidget#residue_analysis { background: white; }")
-        self.refresh_objects()
 
-    def update_mode(self):
-        mode = self.mode.currentData()
+    def stop_preview(self):
+        self.timer.stop()
+        self.preview_active = False
+
+    def refresh(self):
+        if self.target != self.source():
+            self.stop_preview()
+            self.target = self.source()
+            self.report = None
+            self.table.setRowCount(0)
+            self.status.clear()
+
+    def set_mode(self, mode):
+        self.stop_preview()
+        if self.mode != mode:
+            self.report = None
+            self.table.setRowCount(0)
+            self.status.clear()
+        self.mode = mode
         self.layer_options.setVisible(mode in ("layers", "rsa"))
         self.contact_options.setVisible(mode == "contacts")
         self.exposure_options.setVisible(mode == "exposed")
-
-    def refresh_objects(self):
-        current = self.objects.currentText()
-        names = [n for n in cmd.get_names("objects") if cmd.get_type(n) == "object:molecule"]
-        self.objects.blockSignals(True)
-        self.objects.clear()
-        self.objects.addItems(names)
-        if current:
-            self.objects.setEditText(current)
-        self.objects.blockSignals(False)
 
     def threshold_changed(self, is_core, value):
         if is_core and value > self.boundary.value():
@@ -198,8 +196,7 @@ class ResiduePanel(ResidueControls, QtWidgets.QWidget):
         elif not is_core and value < self.core.value():
             self.core.setValue(value)
         self.cutoffs[self.unit] = [self.core.value(), self.boundary.value()]
-        if self.live.isChecked():
-            self.schedule()
+        self.schedule()
 
     def change_unit(self):
         self.unit = self.units.currentData()
@@ -218,20 +215,28 @@ class ResiduePanel(ResidueControls, QtWidgets.QWidget):
         self.schedule()
 
     def schedule(self, *_):
-        self.timer.start(100)
+        if self.preview_active and self.live.isChecked() and self.isVisible():
+            self.timer.start(100)
+
+    def arguments(self):
+        return dict(mode=self.mode, core=self.core.value(), boundary=self.boundary.value(),
+                    unit=self.unit, state=self.state.value(), cutoff=self.cutoff.value(),
+                    gap=int(self.gap.value()), exposure=self.exposure.value(),
+                    hydrophobicity=self.hydrophobicity.value())
+
+    def command(self):
+        values = ", ".join("%s=%s" % item for item in self.arguments().items())
+        return "pp_residues (model %s), %s" % (quoted(self.source()), values)
 
     def analyze(self, force=False):
         self.timer.stop()
-        selection = self.objects.currentText().strip()
-        if not selection:
-            self.status.setText("No protein loaded. Load a structure, then Refresh.")
+        self.refresh()
+        if not self.source():
+            self.status.setText("Choose a loaded protein object.")
             return False
         try:
-            self.report = pp_residues(selection, mode=self.mode.currentData(),
-                                      core=self.core.value(), boundary=self.boundary.value(),
-                                      unit=self.unit, state=self.state.value(), recompute=int(bool(force)),
-                                      cutoff=self.cutoff.value(), gap=int(self.gap.value()),
-                                      exposure=self.exposure.value(), hydrophobicity=self.hydrophobicity.value())
+            self.report = pp_residues("model " + quoted(self.source()), color=0,
+                                      recompute=int(bool(force)), **self.arguments())
             self._show_report()
             return True
         except Exception as error:
@@ -239,6 +244,30 @@ class ResiduePanel(ResidueControls, QtWidgets.QWidget):
             self.status.setText("Error: " + str(error))
             traceback.print_exc()
             return False
+
+    def apply(self):
+        if not self.analyze():
+            return None
+        snapshot = presentation.capture_colors(self.report)
+        try:
+            self._color()
+        except Exception:
+            presentation.restore_colors(snapshot)
+            raise
+        self.preview_active = True
+        return snapshot
+
+    def _color(self):
+        presentation.color_report(self.report, self.mode, self.exposure.value(),
+                                   self.hydrophobicity.value(), remember=False)
+
+    def _preview(self):
+        if self.preview_active and self.isVisible() and self.analyze():
+            try:
+                self._color()
+            except Exception as error:
+                self.status.setText("Error: " + str(error))
+                traceback.print_exc()
 
     def _show_report(self):
         self.table.setUpdatesEnabled(False)
@@ -258,27 +287,21 @@ class ResiduePanel(ResidueControls, QtWidgets.QWidget):
         self.table.setUpdatesEnabled(True)
         counts = self.report["counts"]
         summary = ("Core {core} · Boundary {boundary} · Surface {surface} · Unclassified {unclassified}".format(**counts)
-                   if self.mode.currentData() in ("layers", "rsa") else
+                   if self.mode in ("layers", "rsa") else
                    "%d protein residues · %d nonlocal Cα contacts" % (len(self.report["residues"]), len(self.report["pairs"])))
         self.status.setText(summary + "\n" + self.legend() + " " + " ".join(self.report["warnings"]))
 
     def legend(self):
-        mode = self.mode.currentData()
         return {"layers": "Orange: core · Green: boundary · Blue: surface",
                 "rsa": "Blue: 0% exposed → orange: 100% exposed. Values above 100% are retained.",
                 "hydropathy": "Blue: hydrophilic (−4.5) → orange: hydrophobic (+4.5). Gray: unavailable.",
                 "exposed": "Orange: residues meeting the RSA and hydropathy cutoffs. Gray: other residues.",
-                "contacts": "Blue: fewer nonlocal Cα neighbors → orange: more. Gray: missing Cα."}[mode]
-
-    def restore(self):
-        presentation.clear()
-        self.status.setText("Original atom colors restored; generated layer selections removed.")
+                "contacts": "Blue: fewer nonlocal Cα neighbors → orange: more. Gray: missing Cα."}[self.mode]
 
     def copy_layers(self):
         if self.analyze():
             text, warnings = presentation.format_layers(self.report, self.format.currentData())
             QtWidgets.QApplication.clipboard().setText(text)
-            print(text)
             self.status.setText("Copied layer definitions. " + " ".join(warnings))
 
     def create_selections(self):
@@ -307,14 +330,11 @@ class ResiduePanel(ResidueControls, QtWidgets.QWidget):
             index = self.table.item(row, 0).data(QtCore.Qt.UserRole)
             cmd.zoom(presentation.residue_expression([self.report["residues"][index]], indices=True), buffer=5)
 
+    def hideEvent(self, event):
+        self.stop_preview()
+        super().hideEvent(event)
+
 
 def show_panel():
-    global _panel
-    from pymolplugins.host.workspace import show_workspace
-    if _panel is None:
-        _panel = ResiduePanel()
-    else:
-        _panel.refresh_objects()
-    show_workspace(_panel, "residues")
-    _panel.analyze()
-    return _panel
+    from pymolplugins.host.show_presets import show_presets
+    return show_presets(tab="color", palette="residue_layers")

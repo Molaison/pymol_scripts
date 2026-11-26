@@ -1,15 +1,15 @@
-# 残基分析：CoreToSurf 与结构理解补充
+# View 配色中的残基分析：CoreToSurf 与结构理解补充
 
 更新：2026-11-26。负责人：当前 Codex 会话。状态：完成，验收通过。
-代码 owner：main，D:/SyncPath/GitRepo/PymolPlugins-reviewed-integration；集成基线 e00394e（0.22.5），交付版本 0.23.0。
+代码 owner：main，D:/SyncPath/GitRepo/PymolPlugins-reviewed-integration；残基算法的原始集成基线 e00394e（0.22.5），本次嵌入 View 的基线 b321597（0.23.0）。交付版本仍为本地 0.23.0。
 
 ## 使用
 
-1. 在 PyMOL 加载结构，打开 **Plugin → PymolPlugins → Residue analysis…**，或输入 **pp_residues**。
-2. 选择对象或填写 protein selection，点 **Analyze**。Core / Boundary / Surface 模式按整残基 SASA 分层；滑条实时更新，切换单位时分别保留各自阈值。
-3. **Color by** 可切到相对暴露度、Kyte–Doolittle 疏水性、暴露疏水残基和非局部 Cα 接触数。相关参数按当前模式显示。
-4. 表格可排序、横向滚动；双击残基定位该位置。**Copy layers** 复制 PyMOL 选择表达式或按对象列出的 Rosetta resnums；**Export residue CSV…** 和 **Export contact CSV…** 分别保存逐残基数据与稀疏接触对。
-5. **Create selections** 才显式生成 pp_residues_core / boundary / surface / unclassified。**Restore colors** 或 **pp_residue_clear** 恢复本工具保存的原子颜色并删除它创建的选择。
+1. 在 PyMOL 加载结构，打开 **Plugin → PymolPlugins → Change scene view… → Color**。在 Review 页也可通过 **View → Color…** 带入当前候选；输入 **pp_residues** 会复用同一个 View 窗口并选择 Core / boundary / surface。
+2. 使用 View 顶部的 **Object**，在 **Palette** 中选 Core / boundary / surface，点共享的 **Apply object color**。按整残基 SASA 分层；应用后滑条实时更新，切换单位时分别保留各自阈值。**Undo last style** 一次撤销该次应用及随后的阈值预览。
+3. 同一 **Palette** 还可切到相对暴露度、Kyte–Doolittle 疏水性、暴露疏水残基和非局部 Cα 接触数。相关参数按当前配色显示；普通配色继续使用原来的控件。**Copy command** 复制对应命令。
+4. 展开 **Residue values and export** 查看可排序、横向滚动的表格；双击残基定位该位置。**Copy layers** 复制 PyMOL 选择表达式或按对象列出的 Rosetta resnums；**Residue CSV…** 和 **Contact CSV…** 分别保存逐残基数据与稀疏接触对。查看、复制和导出数值不重新着色。
+5. **Create selections** 才显式生成 pp_residues_core / boundary / surface / unclassified。**pp_residue_clear** 删除这些选择，并恢复由命令行分析保存的颜色；View 的颜色使用共享 **Undo last style**。残基配色与普通配色按应用顺序撤销；如果命令行刚应用了更新的 style，先撤销该 style。
 
 下列 model 替换为实际已加载对象名：
 
@@ -46,7 +46,7 @@ coretosurf model, 20, 40 保留上游命令拼写，但选择名使用 pp_residu
 - RSA = 100 × SASA / Tien 2013 理论最大 ASA。保留大于 100% 的实际值；未知残基不补造参考面积，相对分层归入 unclassified。常见修饰/力场残基名使用父氨基酸的参考值，见源码 aliases。
 - Kyte–Doolittle 数值范围 −4.5 至 +4.5，正值偏疏水。暴露疏水默认要求 RSA ≥25% 且 hydropathy >0，可分别修改；未知标尺值保留空值。
 - 接触对使用 Cα 距离 ≤8 Å，默认排除同 object/segment/chain 内模型顺序相邻 2 位。gap 按实际观察到的残基顺序，而非 PDB 编号差。仅在本次 selection 的蛋白残基间统计，不计算不同对象之间的接触。无 Cα 的残基显示不可用。
-- 缓存以对象、状态、拓扑/残基身份、坐标、occupancy 和原子半径为依据，坐标或编号变化后自动重算；Recompute SASA 可强制重算。选择蛋白的一部分时，SASA 仍保留源对象完整遮蔽环境。
+- 缓存以对象、状态、拓扑/残基身份、坐标、occupancy 和原子半径为依据，坐标或编号变化后自动重算；Recompute values 可强制重算。选择蛋白的一部分时，SASA 仍保留源对象完整遮蔽环境。
 - PyMOL 选择导出包含对象、segment、chain 和原始残基号。Rosetta resnums 按对象分开；对负编号、insertion code、非单 ASCII 字母 chain、同对象重复 chain/resi 跨 segment 的歧义给出遗漏提示，不把它们错误映射成另一个残基。
 
 ## 来源与许可证
@@ -62,13 +62,14 @@ coretosurf model, 20, 40 保留上游命令拼写，但选择名使用 pp_residu
 全部必需验收通过，无待监督子进程。使用 V1 原生角色；没有启动 Job Runner、科学推理或云连接器。当前旧脚本 checkout 的独立 UI 改进记录与文件不属于本任务。
 
 - 28 项纯指标、manifest/console adapter、帮助和打包测试通过，包含未知残基、CA 距离边界、同链 gap、跨对象/链/segment、随机点对 brute force 和许可证打包。
-- 9 项真实 PyMOL 3.1.4.1 测试通过：原生 SASA oracle；源 B/color/坐标/全局设置；重原子遮蔽与水/氢；同 atomcount 坐标编辑与重编号缓存；多状态；byres 与环境；对象隔离；导出歧义；颜色恢复与选择冲突。
-- 最终 ZIP 在 PyMOL 3.1.3.1 的独立隐藏桌面通过真实菜单、Qt/OpenGL、滑条/单位记忆、五种着色、剪贴板、真实文件保存对话框、234 行 residue CSV、724 对 contact CSV、620×500 控件与恢复颜色检查。输入桌面始终 Default。
-- 最终 ZIP 另在 PyMOL 3.1.4.1 中通过控制台 coretosurf、带引号 selection、带空格 CSV 路径、保留用户 core 选择与清理命令检查。PyMOL 2.x、Linux/macOS 未在本轮执行。
+- 10 项真实 PyMOL 3.1.4.1 测试通过：原生 SASA oracle；源 B/color/坐标/全局设置；重原子遮蔽与水/氢；同 atomcount 坐标编辑与重编号缓存；多状态；byres 与环境；对象隔离；导出歧义；颜色恢复与选择冲突；新增残基配色快照与普通 style 撤销的组合检查。UI 快照只含本次分析会修改的碳原子，不写入命令行颜色恢复状态。
+- 最终 ZIP 在 PyMOL 3.1.3.1 的独立隐藏桌面通过实际 View → Color 入口、无独立残基菜单、Qt/OpenGL、滑条/单位记忆与单次撤销、五种着色、剪贴板、真实文件保存对话框、234 行 residue CSV、724 对 contact CSV。展开数据区后窗口为 620×675；共享对象选择、空参数命令复用 View、混合配色撤销、外部 style 保护、Lighting 应用/撤销和原始坐标/B 因子/颜色恢复均通过。输入桌面始终 Default。
+- Review 页的 View → Color… 另经真实菜单点击验收，带入当前候选对象，保留普通 pLDDT 配色和独立 Lighting。该次包与最终包的产品差异仅为残基表格最小高度从 110 调至 150；两个包的哈希分别保存在 09_checks.json 中。
+- 原始残基算法交付时的已安装包曾在 PyMOL 3.1.4.1 中通过控制台 coretosurf、带引号 selection、带空格 CSV 路径、保留用户 core 选择与清理命令检查；结果在 09_checks.json 的 baseline_results 中保留，本次未重复。PyMOL 2.x、Linux/macOS 未在本轮执行。
 
-证据目录 output/08_residue_analysis/：01_result.json（原生终态，含早期失败记录）、02_desktop.json、03_renderer_before.png、04_layers_panel.png、05_renderer_contacts.png、06_residues.csv、07_contacts.csv、08_compact_panel.png、09_checks.json（其余检查与包哈希）。
+证据目录 output/08_residue_analysis/：01_result.json（原生终态，含早期失败记录）、02_desktop.json、03_renderer_before.png、04_layers_panel.png、05_renderer_contacts.png、06_residues.csv、07_contacts.csv、08_compact_panel.png、09_checks.json（其余检查与包哈希）；10_review_view/01_result.json、02_desktop.json 和 13_appearance.png 保存 Review 入口验收。
 
-原生排错发现：QHeaderView 的持续 ResizeToContents 导致每个插入单元格都重算列宽，同一 234 残基场景填表约 22 秒；改为整表填完后一次 resizeColumnsToContents，最终记录为 0.000–0.016 秒。这是该隐藏桌面场景的表格填充时间，不是大型蛋白的整体耗时承诺。读取原子颜色使用 cmd.iterate，不能假设 get_model 返回的 Chempy Atom 有 color 属性。
+原生排错发现：填表完成后一次 resizeColumnsToContents，避免每插入一个单元格就重算列宽。读取原子颜色使用 cmd.iterate，不能假设 get_model 返回的 Chempy Atom 有 color 属性。隐藏桌面的文件保存验收使用逐键输入路径并按 Enter，等待 Save 可用；为模态对话框加了超时取证，避免测试永久停在保存窗口。
 
 可复现命令（仓库根目录）：
 
@@ -79,5 +80,5 @@ C:/Python313/python.exe scripts/package_plugin.py
 D:/Softwares/Pymol3.1/python.exe -I -u tests/host/21_hidden_desktop.py --record output/08_residue_analysis/02_desktop.json --timeout 120 tests/host/25_residue_analysis.py --package dist/PymolPlugins-0.23.0.zip --output output/08_residue_analysis
 ~~~
 
-安装包：dist/PymolPlugins-0.23.0.zip；SHA256：92f9f97c3a59559bf9007384942454fe2646c1489a47d353d0f98a4ed8817ba9。
-在 Plugin Manager 选择此 ZIP 安装，重启 PyMOL 后从 Residue analysis… 打开。此交付为本地源码提交及安装包；正式 Release 和日常安装不在本次变更中。
+安装包：dist/PymolPlugins-0.23.0.zip，849399 bytes；SHA256：84508d24ad84c12b8e7480dab0a968d9dce35124ef99058797005328def17aff。
+在 Plugin Manager 选择此 ZIP 安装，重启 PyMOL 后从 Change scene view… → Color 或 Review → View → Color… 打开。此交付为本地源码提交及安装包；正式 Release 和日常安装不在本次变更中。

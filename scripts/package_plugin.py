@@ -37,7 +37,7 @@ INSTALL_TEXT = """# 安装 PymolPlugins（{version}）
 
 ## 比较和展示结构集合
 
-**Plugin > PymolPlugins > Residue analysis…** 或 `pp_residues` 打开残基分析。选择对象后用 Core / Boundary 阈值调节 SASA 分层，可切到相对暴露度、Kyte–Doolittle 疏水性、暴露疏水残基和非局部 Cα 接触数。表格显示逐残基数值，支持 CSV、接触对 CSV、PyMOL 选择与 Rosetta resnums 导出。默认只改碳原子颜色；**Restore colors** 或 `pp_residue_clear` 恢复颜色。**Create selections** 才显式增加带前缀的分层选择。CoreToSurf 来源和 BSD-3-Clause 许可证包含在 `pymolplugins/residues/LICENSE.CoreToSurf`。
+在 **Plugin > PymolPlugins > Change scene view… > Color** 的 **Palette** 中选择 Core / boundary / surface、相对暴露度、Kyte–Doolittle 疏水性、暴露疏水残基或非局部 Cα 接触数。它们沿用 View 顶部的对象选择，以及 **Apply**、**Copy command** 和 **Undo last style**；`pp_residues` 也直接打开这个 Color 页。应用后阈值可实时预览，单次撤销恢复应用前的颜色。展开 **Residue values and export** 可查看逐残基表格，并导出 CSV、接触对 CSV、PyMOL 选择和 Rosetta resnums。**Create selections** 才显式增加带前缀的分层选择；`pp_residue_clear` 清理这些选择，并恢复由命令行分析保存的颜色。CoreToSurf 来源和 BSD-3-Clause 许可证包含在 `pymolplugins/residues/LICENSE.CoreToSurf`。
 
 整残基 SASA 使用源对象重原子作为遮蔽环境，保留配体、排除水和氢；它与 Rosetta 默认的侧链邻居分层不等价。相对 ASA 使用 Tien 2013 理论最大值，未知残基不补造数值。非局部 Cα 接触默认 ≤8 Å，排除同链模型顺序相邻两位，不计算不同对象间的接触。
 

@@ -7,7 +7,7 @@
 | 检查安装 | `pp_doctor check_worker=0` | 列出命令归属与环境；不用连接可选 worker |
 | 浏览对象、group 或文件 | `pp_nav` | 高层对象/group 默认方向键导航，`pp_nav stop` 恢复；见 [操作指南](task_command_walkthrough.md) |
 | 分组、接触、样式 | `pp_group`、`pp_contacts`、`pp_style_list` | 查看 [0.17.0 候选使用指南](01_group_interaction_styles.md)；局部接触不是能量结论 |
-| 查看残基暴露度、疏水性和接触数 | `pp_residues`、`pp_core_surface` | 可调 CoreToSurf 阈值、RSA、暴露疏水筛选、非局部 Cα 接触及 CSV；见 [残基分析](validation/05_residue_analysis_2026-11-26.md) |
+| 查看残基暴露度、疏水性和接触数 | View → Color；`pp_residues`、`pp_core_surface` | 在现有 Palette 中选择 CoreToSurf、RSA、疏水性或 Cα 接触，共用对象选择、应用和撤销；见 [用法与计算定义](validation/05_residue_analysis_2026-11-26.md) |
 | 导入并标注结构 | Structure Annotator 菜单 | 查看 [审阅指南](structure_annotator_csv_walkthrough.md)，源表与标注分开保存 |
 | 配对并处理结构 | `pp_batch` | 先预览输入对，再运行并生成独立输出；见 [批处理](batch_processing_specification.md#usage) |
 | 请求 PLIP / PyRosetta | `pp_worker_health`、`pp_jobs` | 后端需单独安装，见 [worker](wsl_worker.md)；取消不保证终止后端计算 |
@@ -25,7 +25,7 @@
 | 标注与源 | `pymolplugins/annotation/` | 表格/目录/SSH、路径映射、缓存、状态、标注、scene groups |
 | 序列、对齐、几何 | `pymolplugins/alignment/`、`pymolplugins/geometry/`、`pymolplugins/core/` | 序列映射、拟合、轴、膜、通用数据和数学 |
 | 样式与相互作用 | `pymolplugins/styles/`、`pymolplugins/interactions/` | preset、快照、接触数据、渲染、PLIP 协议 |
-| 残基分析 | `pymolplugins/residues/` | CoreToSurf、整残基 SASA / RSA、KD 疏水性、非局部 Cα 接触、面板与导出 |
+| 残基分析 | `pymolplugins/residues/` | CoreToSurf、整残基 SASA / RSA、KD 疏水性、非局部 Cα 接触、View Color 内嵌控件与导出 |
 | 远程分析 | `pymolplugins/remote/`、`pymolplugins/worker/` | Host 客户端、staging、HTTP 服务和可选后端 |
 
 ## 查兼容和独立功能

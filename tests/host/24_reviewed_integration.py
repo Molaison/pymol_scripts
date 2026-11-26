@@ -607,12 +607,31 @@ class Acceptance:
         return {"same_name": name, "reference_old_result_discarded": True,
                 "cavity_old_result_discarded": True, "fresh_reference_and_cavity_callbacks": True}
 
+    def review_colors(self):
+        from pymolplugins.host import show_presets
+        errors = []
+
+        def choose_color():
+            try:
+                button = self.panel.findChild(self.QtWidgets.QToolButton, "review_view_color")
+                self.click(button)
+            except Exception:
+                errors.append(traceback.format_exc())
+            finally:
+                self.panel.review_view_dialog.hide()
+
+        self.QtCore.QTimer.singleShot(100, choose_color)
+        self.click(self.panel.view_open_button)
+        assert not errors, errors
+        return show_presets._dialog
+
     def appearance(self):
-        from pymolplugins.host.show_presets import show_presets
         from pymolplugins.styles import registry
         source = self.cmd.get_object_list("%" + self.annotation.STATE.current_object)[0]
-        dialog = show_presets(tab="color", source=source)
+        dialog = self.review_colors()
         self.appearance_dialog = dialog
+        assert dialog is not None and dialog.isVisible()
+        assert dialog.objects.currentData() == source and dialog.tabs.currentIndex() == 1
         assert [dialog.tabs.tabText(i) for i in range(dialog.tabs.count())] == ["Structure", "Color", "Lighting"]
         page = dialog.color_page
         self.cmd.alter("%" + source, "b=0")
@@ -638,7 +657,7 @@ class Acceptance:
         assert own not in page._owned_snapshots
         self.capture(dialog, "13_appearance.png")
         dialog.close()
-        return {"separate_color_lighting": True, "plddt_zero_is_orange": True,
+        return {"review_view_current_candidate_color": True, "separate_color_lighting": True, "plddt_zero_is_orange": True,
                 "page_undo_preserves_external_top_style": True}
 
     def ai_mapping(self):

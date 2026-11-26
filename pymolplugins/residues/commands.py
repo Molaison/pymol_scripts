@@ -19,7 +19,7 @@ def pp_residues(selection="", mode="layers", core=None, boundary=None, unit="abs
                 cutoff=8.0, gap=2, exposure=25.0, hydrophobicity=0.0, outfile=""):
     """Analyze residue exposure, hydropathy and nonlocal C-alpha contacts.
     Args:
-        selection: Protein selection, or empty to open the Qt panel.
+        selection: Protein selection, or empty to open Scene view > Color.
         mode: layers, rsa, hydropathy, exposed, or contacts (coloring metric).
         core/boundary: Upper cutoffs, default 20/40 Angstrom² or 20/50 percent.
         unit: abs (whole-residue SASA) or rel (Tien maximum ASA percentage).
@@ -32,7 +32,7 @@ def pp_residues(selection="", mode="layers", core=None, boundary=None, unit="abs
         gap: Exclude this many observed sequence neighbors (default 2).
         exposure/hydrophobicity: Minimum RSA percent and strict KD cutoff for exposed mode.
         outfile: Optional per-residue CSV path.
-    Returns: Analysis report, or the modeless panel when selection is empty.
+    Returns: Analysis report, or the shared View window when selection is empty.
     """
     if not str(selection).strip():
         from .panel import show_panel
@@ -67,10 +67,10 @@ def pp_residues(selection="", mode="layers", core=None, boundary=None, unit="abs
 
 def pp_core_surface(selection="", core=None, boundary=None, unit="abs", state=-1,
                     recompute=0, quiet=0, selections=0):
-    """Open residue analysis, or apply CoreToSurf-compatible SASA thresholds.
+    """Open View > Color, or apply CoreToSurf-compatible SASA thresholds.
 
     Args:
-        selection: Protein selection; empty opens the interactive panel.
+        selection: Protein selection; empty opens View > Color.
         core: Upper SASA/RSA threshold for core residues.
         boundary: Upper SASA/RSA threshold for boundary residues.
         unit: abs (Angstrom²) or rel (percent of Tien maximum ASA).
@@ -79,7 +79,7 @@ def pp_core_surface(selection="", core=None, boundary=None, unit="abs", state=-1
         quiet: Suppress residue counts.
         selections: Create pp_residues_core/boundary/surface selections.
     Returns:
-        Analysis report or the modeless panel.
+        Analysis report or the shared View window.
     """
     result = pp_residues(selection, "layers", core, boundary, unit, state,
                          recompute=recompute, selections=selections)

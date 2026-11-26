@@ -610,11 +610,11 @@ _COMMAND_ROWS = {
         ("collections", "manifest", "sample", "cluster", "preview", "结构集合", "抽样"),
     ),
     "pp_residues": (
-        "Inspect whole-residue SASA/RSA, CoreToSurf layers, Kyte-Doolittle hydropathy and nonlocal C-alpha contacts.",
+        "Inspect whole-residue SASA/RSA, CoreToSurf layers, hydropathy and C-alpha contacts; no selection opens View > Color.",
         "pp_residues [SELECTION [, mode=layers|rsa|hydropathy|exposed|contacts]]",
         "pp_residues model, mode=exposed, exposure=25, hydrophobicity=0",
         True,
-        "pp_residue_clear restores atom colors and removes only generated layer selections.",
+        "View uses Undo last style; pp_residue_clear restores command colors and removes generated layer selections.",
         ("pp_core_surface model, 20, 40", "pp_residues model, mode=contacts", "pp_residue_clear"),
         ("coretosurf", "sasa", "rsa", "burial", "hydropathy", "hydrophobic", "contacts", "残基", "疏水", "暴露度", "核心"),
     ),
@@ -628,7 +628,7 @@ _COMMAND_ROWS = {
         ("coretosurf", "core", "boundary", "surface", "sasa", "rsa", "分层"),
     ),
     "pp_residue_clear": (
-        "Restore the original atom colors saved by residue analysis and remove its layer selections.",
+        "Restore atom colors saved by residue commands and remove generated layer selections. View uses Undo last style.",
         "pp_residue_clear",
         "pp_residue_clear",
         True,

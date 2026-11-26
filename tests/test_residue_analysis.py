@@ -10,6 +10,7 @@ import unittest
 try:
     from pymol import cmd
     from pymolplugins.residues import analysis, commands, presentation
+    from pymolplugins.styles import registry as styles_registry
 except ImportError:
     cmd = None
 
@@ -17,6 +18,12 @@ except ImportError:
 def _iterate(expression, selection="all"):
     values = {}
     cmd.iterate(selection, "values[ID] = %s" % expression, space={"values": values})
+    return values
+
+
+def _color_by_index(selection="all"):
+    values = {}
+    cmd.iterate(selection, "values[index] = color", space={"values": values})
     return values
 
 
@@ -304,6 +311,44 @@ class ResidueAnalysisTests(unittest.TestCase):
             commands.pp_residues("pep", color=0, selections=1)
         self.assertEqual(set(cmd.get_names("all")), names)
         self.assertEqual(cmd.count_atoms("pp_residues_core"), count)
+
+    def test_ui_color_snapshot_composes_with_style_revert(self):
+        cmd.fragment("peptide", "pep")
+        cmd.alter("pep", "b = index * 0.125")
+        cmd.color("yellow", "pep")
+        report = commands.pp_residues("pep", color=0)
+        source = _color_by_index()
+        b_values, coords = _iterate("b"), _coordinates()
+
+        snapshot = presentation.capture_colors(report)
+        expected = {index for record in report["residues"] for index in record["indices"]}
+        carbons = {atom.index for atom in cmd.get_model("pep").atom if atom.symbol == "C"}
+        self.assertEqual(set(snapshot["pep"]), expected & carbons)
+        self.assertLess(len(snapshot["pep"]), len(carbons))
+        for index, (identity, color) in snapshot["pep"].items():
+            self.assertEqual(color, source[index])
+            self.assertEqual(len(identity), 7)
+
+        presentation.color_report(report, "layers", remember=False)
+        self.assertEqual(presentation._colors, {})
+        ui_colors = _color_by_index()
+        changed = {index for index in set(snapshot["pep"])
+                   if ui_colors[index] != source[index]}
+        self.assertEqual(changed, set(snapshot["pep"]))
+
+        style_id = styles_registry.pp_style_apply("macaron_palette", "pep")
+        self.assertIsNotNone(style_id)
+        styled = _color_by_index()
+        self.assertTrue(any(styled[index] != ui_colors[index] for index in ui_colors))
+        self.assertEqual(styles_registry.pp_style_revert(style_id), int(style_id))
+        self.assertEqual(_color_by_index(), ui_colors)
+
+        restored = presentation.restore_colors(snapshot)
+        self.assertEqual(restored, len(snapshot["pep"]))
+        self.assertEqual(_color_by_index(), source)
+        self.assertEqual(presentation._colors, {})
+        self.assertEqual(_iterate("b"), b_values)
+        self.assertEqual(_coordinates(), coords)
 
 
 if __name__ == "__main__":
